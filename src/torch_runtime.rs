@@ -2195,6 +2195,7 @@ impl TerrsvusionKvCache {
         tail: Option<&(Tensor, Tensor)>,
         preassembled_key: Option<&Tensor>,
         precomputed_scores: Option<&Tensor>,
+        precomputed_probabilities: Option<&Tensor>,
         sequence_tokens: usize,
         tolerance: f64,
     ) -> Result<Option<Tensor>> {
@@ -2454,9 +2455,16 @@ impl TerrsvusionKvCache {
         ensure!(!values.is_empty(), "Llama certified V selection empty");
         let selected_indices =
             Tensor::from_slice(&chosen.iter().map(|&x| x as i64).collect::<Vec<_>>());
-        let selected_probabilities = scores
-            .softmax(-1, Kind::Float)
-            .index_select(3, &selected_indices);
+        let probabilities = if let Some(probabilities) = precomputed_probabilities {
+            ensure!(
+                probabilities.size() == [1, 32, 1, cursor as i64],
+                "probabilidades Llama precomputadas incompatibles"
+            );
+            probabilities.shallow_clone()
+        } else {
+            scores.softmax(-1, Kind::Float)
+        };
+        let selected_probabilities = probabilities.index_select(3, &selected_indices);
         let value_refs = values.iter().collect::<Vec<_>>();
         let selected_values = Tensor::cat(&value_refs, 2)
             .repeat_interleave_self_int(gqa, 1, None)
@@ -2572,6 +2580,18 @@ impl TerrsvusionKvCache {
             / (self.head_dim as f64).sqrt())
         .to_kind(Kind::Float)
         .contiguous();
+        let total_tokens = preassembled_key.size()[2] as usize;
+        let mut mask_values = vec![0.0f32; query_tokens * total_tokens];
+        for query_index in 0..query_tokens {
+            for key_index in self.sequence_tokens + query_index + 1..total_tokens {
+                mask_values[query_index * total_tokens + key_index] = f32::NEG_INFINITY;
+            }
+        }
+        let causal_mask =
+            Tensor::from_slice(&mask_values).view([1, 1, query_tokens as i64, total_tokens as i64]);
+        let precomputed_probabilities = (precomputed_scores.shallow_clone() + causal_mask)
+            .softmax(-1, Kind::Float)
+            .contiguous();
         // Exact diagnostic authority must have the same batched geometry and
         // causal mask as the canonical prefill. A sequence of one-query SDPA
         // calls is mathematically equivalent, but not necessarily bit-exact
@@ -2607,6 +2627,10 @@ impl TerrsvusionKvCache {
                 .narrow(2, query_index as i64, 1)
                 .narrow(3, 0, causal_tokens as i64)
                 .contiguous();
+            let query_probabilities = precomputed_probabilities
+                .narrow(2, query_index as i64, 1)
+                .narrow(3, 0, causal_tokens as i64)
+                .contiguous();
             let avoided_before = self.attention_v_tokens_avoided;
             let candidate = self.llama_certified_value_attention(
                 layer_index,
@@ -2615,6 +2639,7 @@ impl TerrsvusionKvCache {
                 Some(&tail),
                 Some(&preassembled_key),
                 Some(&query_scores),
+                Some(&query_probabilities),
                 logical_history,
                 tolerance,
             )?;
@@ -4400,6 +4425,7 @@ impl AttentionCache for TerrsvusionKvCache {
                     query,
                     &pages,
                     tail.as_ref(),
+                    None,
                     None,
                     None,
                     self.sequence_tokens,
@@ -7741,6 +7767,7 @@ mod tests {
                 Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
                 None,
                 None,
+                None,
                 16,
                 1e-3,
             )
@@ -7791,6 +7818,7 @@ mod tests {
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
                     None,
                     None,
+                    None,
                     16,
                     1e-3
                 )
@@ -7804,6 +7832,7 @@ mod tests {
                     &q,
                     &[page.clone()],
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                    None,
                     None,
                     None,
                     16,
@@ -7820,6 +7849,7 @@ mod tests {
                     &zero,
                     &[page],
                     Some(&(tailk, tailv)),
+                    None,
                     None,
                     None,
                     16,
