@@ -205,6 +205,15 @@ resultado válido: queda como diagnóstico fallido y el contrato de aplicación
 es fail-closed. Esto no crea paridad; impide que una falta de paridad se
 publique como si la tuviera.
 
+La barrera se verificó además ejecutando de nuevo el binario contra el mismo
+checkpoint Llama 3.1 8B y los mismos parámetros. La ejecución terminó con:
+
+```text
+Error: omisión aplicada rechazada: L∞ de logits 0.125000000 supera la tolerancia 0.001000000
+```
+
+Esto confirma el comportamiento en runtime, no solo la compilación del guard.
+
 ## Corrección aplicada
 
 `TerrsvusionKvCache::restore_prefix` era una envoltura usada solo por tests,
