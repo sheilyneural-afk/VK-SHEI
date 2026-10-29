@@ -10,10 +10,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
+use terrsvusion::document_graph::{
+    DocumentGraph, RetrievalBudget, RetrievalScope, has_substantive_document_answer,
+    is_insufficient_evidence_answer,
+};
 use terrsvusion::inference_worker::{
     InferenceError, InferenceExecutor, InferencePool, SubmitError,
 };
@@ -102,6 +106,44 @@ struct AppState {
     shared_authority: bool,
     shared_weight_tensors: usize,
     request_timeout: Option<Duration>,
+    document_graph: Option<Arc<DocumentGraph>>,
+    document_graph_path: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct DocumentQueryRequest {
+    question: String,
+    #[serde(default = "default_document_scope")]
+    scope: RetrievalScope,
+    #[serde(default = "default_document_max_pages")]
+    max_pages: usize,
+    #[serde(default = "default_document_max_characters")]
+    max_characters: usize,
+    #[serde(default = "default_document_graph_hops")]
+    graph_hops: usize,
+    #[serde(default = "default_document_max_phases")]
+    max_phases: usize,
+    #[serde(default = "default_document_max_tokens")]
+    max_tokens: usize,
+}
+
+fn default_document_scope() -> RetrievalScope {
+    RetrievalScope::Focused
+}
+fn default_document_max_pages() -> usize {
+    8
+}
+fn default_document_max_characters() -> usize {
+    32_000
+}
+fn default_document_graph_hops() -> usize {
+    1
+}
+fn default_document_max_phases() -> usize {
+    1
+}
+fn default_document_max_tokens() -> usize {
+    64
 }
 
 #[derive(Clone)]
@@ -398,6 +440,12 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
             "tools": false,
             "json_schema": false,
             "max_output_tokens": MAX_TOKENS
+        },
+        "document_graph": {
+            "loaded": state.document_graph.is_some(),
+            "path": state.document_graph_path,
+            "shared_libtorch_authority_required": true,
+            "endpoint": "/v1/document/query"
         }
     }))
 }
@@ -459,33 +507,20 @@ async fn ready(State(state): State<AppState>) -> Json<Value> {
         "shared_weight_tensors_verified_by_data_ptr": state.shared_weight_tensors,
         "request_timeout_seconds": state
             .request_timeout
-            .map(|timeout| timeout.as_secs_f64())
+            .map(|timeout| timeout.as_secs_f64()),
+        "document_graph_loaded": state.document_graph.is_some(),
+        "document_graph_pages": state.document_graph.as_ref().map(|graph| graph.page_count()),
+        "document_graph_micro_spans": state.document_graph.as_ref().map(|graph| graph.graph_micro_span_count())
     }))
 }
 
-async fn chat(
-    State(state): State<AppState>,
-    Json(request): Json<ChatRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let dense_route = advertised_dense_model(state.model_spec.is_llama31_8b_instruct_bf16());
-    let (max_tokens, native, compare_native) =
-        validate_request(&request, &state.model_id, dense_route)?;
-    let applied_mass_tolerance = request.applied_mass_tolerance;
-    let messages = if native {
-        request.messages
-    } else {
-        with_reference_document(request.messages, request.document)
-    };
+async fn execute_model(
+    state: &AppState,
+    request: ModelRequest,
+) -> Result<TorchGeneration, ApiError> {
     let response = state
         .inference
-        .try_submit(ModelRequest {
-            messages,
-            max_tokens,
-            enable_thinking: request.enable_thinking,
-            virgin_dense: native,
-            compare_native,
-            applied_mass_tolerance,
-        })
+        .try_submit(request)
         .map_err(|error| match error {
             SubmitError::QueueFull => ApiError(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -496,7 +531,7 @@ async fn chat(
                 "worker de inferencia detenido".to_owned(),
             ),
         })?;
-    let result = match state.request_timeout {
+    match state.request_timeout {
         Some(limit) => tokio::time::timeout(limit, response).await.map_err(|_| {
             ApiError(
                 StatusCode::GATEWAY_TIMEOUT,
@@ -518,7 +553,34 @@ async fn chat(
             StatusCode::SERVICE_UNAVAILABLE,
             "worker de inferencia no disponible".to_owned(),
         ),
-    })?;
+    })
+}
+
+async fn chat(
+    State(state): State<AppState>,
+    Json(request): Json<ChatRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let dense_route = advertised_dense_model(state.model_spec.is_llama31_8b_instruct_bf16());
+    let (max_tokens, native, compare_native) =
+        validate_request(&request, &state.model_id, dense_route)?;
+    let applied_mass_tolerance = request.applied_mass_tolerance;
+    let messages = if native {
+        request.messages
+    } else {
+        with_reference_document(request.messages, request.document)
+    };
+    let result = execute_model(
+        &state,
+        ModelRequest {
+            messages,
+            max_tokens,
+            enable_thinking: request.enable_thinking,
+            virgin_dense: native,
+            compare_native,
+            applied_mass_tolerance,
+        },
+    )
+    .await?;
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -681,11 +743,146 @@ async fn chat(
     })))
 }
 
+async fn document_query(
+    State(state): State<AppState>,
+    Json(request): Json<DocumentQueryRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let graph = state.document_graph.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            "el servidor no fue iniciado con --document-graph".to_owned(),
+        )
+    })?;
+    if request.question.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "question no puede estar vacío".to_owned(),
+        ));
+    }
+    if !(1..=MAX_TOKENS).contains(&request.max_tokens) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("max_tokens debe estar entre 1 y {MAX_TOKENS}"),
+        ));
+    }
+    if !(1..=1024).contains(&request.max_phases) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "max_phases debe estar entre 1 y 1024".to_owned(),
+        ));
+    }
+    let phases = graph
+        .retrieve_phases_with_scope(
+            &request.question,
+            RetrievalBudget {
+                max_pages: request.max_pages,
+                max_characters: request.max_characters,
+                graph_hops: request.graph_hops,
+            },
+            request.scope,
+        )
+        .map_err(|error| ApiError(StatusCode::BAD_REQUEST, error.to_string()))?;
+    let mut receipts = Vec::new();
+    let mut final_generation = Value::Null;
+    let mut evidence_pages = Vec::new();
+    let mut cumulative_prompt_tokens = 0usize;
+    let mut answered = false;
+    for (index, phase) in phases.iter().take(request.max_phases).enumerate() {
+        let cited = phase
+            .assemble_cited_context()
+            .map_err(|error| ApiError(StatusCode::BAD_REQUEST, error.to_string()))?;
+        evidence_pages.extend(cited.evidence_pages.iter().copied());
+        let result = execute_model(
+            &state,
+            ModelRequest {
+                messages: vec![TorchChatMessage {
+                    role: "user".to_owned(),
+                    content: cited.prompt,
+                }],
+                max_tokens: request.max_tokens,
+                enable_thinking: false,
+                virgin_dense: true,
+                compare_native: false,
+                applied_mass_tolerance: None,
+            },
+        )
+        .await?;
+        let insufficient = is_insufficient_evidence_answer(&result.content)
+            || !has_substantive_document_answer(&result.content);
+        cumulative_prompt_tokens = cumulative_prompt_tokens
+            .checked_add(result.prompt_tokens)
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "desbordamiento contando tokens documentales".to_owned(),
+                )
+            })?;
+        final_generation = serde_json::to_value(&result)
+            .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        receipts.push(json!({
+            "phase": index + 1,
+            "evidence_pages": cited.evidence_pages,
+            "candidate_set_complete_after_phase": cited.complete_for_candidate_set,
+            "deferred_candidate_pages": cited.deferred_candidate_pages,
+            "insufficient_evidence": insufficient,
+            "generation": result
+        }));
+        if !insufficient {
+            answered = true;
+            break;
+        }
+    }
+    let phases_executed = receipts.len();
+    let candidate_set_exhausted = phases_executed == phases.len();
+    let stop_reason = if answered {
+        "answer_found"
+    } else if candidate_set_exhausted {
+        "candidate_set_exhausted_without_answer"
+    } else {
+        "max_phases_reached_without_answer"
+    };
+    Ok(Json(json!({
+        "operation":"shared_authority_document_graph_query",
+        "question":request.question,
+        "retrieval_scope":request.scope,
+        "document_pages":graph.page_count(),
+        "graph_micro_spans":graph.graph_micro_span_count(),
+        "candidate_pages":phases[0].candidate_pages,
+        "broad_match_pages":phases[0].broad_match_pages,
+        "evidence_pages":evidence_pages,
+        "phases_available":phases.len(),
+        "phases_executed":phases_executed,
+        "candidate_set_exhausted":candidate_set_exhausted,
+        "stop_reason":stop_reason,
+        "cumulative_prompt_tokens":cumulative_prompt_tokens,
+        "generation":final_generation,
+        "phases":receipts,
+        "authority":{
+            "mode":"shared_libtorch_weight_storage",
+            "workers":state.workers,
+            "shared_weight_tensors_verified_by_data_ptr":state.shared_weight_tensors,
+            "model_loads_for_request":0,
+            "dense_selected_evidence_prefill":true
+        },
+        "claim_boundary":{
+            "semantic_exhaustiveness_certified":false,
+            "whole_document_transformer_prefill":false
+        }
+    })))
+}
+
 fn validate_worker_mode(workers: usize, shared_authority: bool) -> Result<()> {
     if workers == 0 || workers > 8 {
         bail!("--workers debe estar entre 1 y 8");
     }
     let _ = shared_authority;
+    Ok(())
+}
+
+fn validate_document_graph_mode(configured: bool, shared_authority: bool) -> Result<()> {
+    if configured && !shared_authority {
+        bail!("--document-graph exige --shared-authority");
+    }
     Ok(())
 }
 
@@ -698,6 +895,7 @@ async fn main() -> Result<()> {
     let mut workers = 1_usize;
     let mut shared_authority = false;
     let mut request_timeout_secs = 0_u64;
+    let mut document_graph_path = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -711,6 +909,10 @@ async fn main() -> Result<()> {
             "--port" => port = it.next().context("falta --port")?.parse()?,
             "--workers" => workers = it.next().context("falta --workers")?.parse()?,
             "--shared-authority" => shared_authority = true,
+            "--document-graph" => {
+                document_graph_path =
+                    Some(PathBuf::from(it.next().context("falta --document-graph")?))
+            }
             "--request-timeout-secs" => {
                 request_timeout_secs = it.next().context("falta --request-timeout-secs")?.parse()?
             }
@@ -718,12 +920,17 @@ async fn main() -> Result<()> {
         }
     }
     validate_worker_mode(workers, shared_authority)?;
+    validate_document_graph_mode(document_graph_path.is_some(), shared_authority)?;
     let model_path = model.context("--model es obligatorio")?;
     let model_spec = ModelSpec::inspect(&model_path)?;
     model_spec.ensure_torch_runtime_compatible()?;
     let prefix_cache_dir =
         prefix_cache_dir.unwrap_or_else(|| model_path.join(".terrsvusion-prefix-cache"));
     let load_started = Instant::now();
+    let document_graph = document_graph_path
+        .as_ref()
+        .map(DocumentGraph::load_verified)
+        .transpose()?;
     let (inference, shared_weight_tensors) = if shared_authority {
         let authority = TorchModelRuntime::load_with_prefix_cache(&model_path, &prefix_cache_dir)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -764,6 +971,8 @@ async fn main() -> Result<()> {
         shared_weight_tensors,
         request_timeout: (request_timeout_secs > 0)
             .then_some(Duration::from_secs(request_timeout_secs)),
+        document_graph: document_graph.map(Arc::new),
+        document_graph_path,
     };
     let address = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&address).await?;
@@ -775,6 +984,7 @@ async fn main() -> Result<()> {
         .route("/v1/models", get(models))
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/chat/completions", post(chat))
+        .route("/v1/document/query", post(document_query))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
     println!("Terrsvusion Rust listo en http://{address}");
@@ -796,6 +1006,28 @@ mod api_tests {
         assert!(validate_worker_mode(2, true).is_ok());
         assert!(validate_worker_mode(8, true).is_ok());
         assert!(validate_worker_mode(2, false).is_ok());
+    }
+
+    #[test]
+    fn document_graph_cannot_claim_an_independent_authority() {
+        assert!(validate_document_graph_mode(false, false).is_ok());
+        assert!(validate_document_graph_mode(false, true).is_ok());
+        assert!(validate_document_graph_mode(true, true).is_ok());
+        assert!(validate_document_graph_mode(true, false).is_err());
+    }
+
+    #[test]
+    fn document_query_defaults_are_bounded_and_focused() {
+        let request: DocumentQueryRequest = serde_json::from_value(json!({
+            "question":"¿Cuántos habitantes tenía Puerto Gris?"
+        }))
+        .unwrap();
+        assert_eq!(request.scope, RetrievalScope::Focused);
+        assert_eq!(request.max_pages, 8);
+        assert_eq!(request.max_characters, 32_000);
+        assert_eq!(request.graph_hops, 1);
+        assert_eq!(request.max_phases, 1);
+        assert_eq!(request.max_tokens, 64);
     }
 
     fn request(fields: Value) -> ChatRequest {

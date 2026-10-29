@@ -847,6 +847,29 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+pub fn is_insufficient_evidence_answer(content: &str) -> bool {
+    let normalized = content
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    normalized == "EVIDENCIAINSUFICIENTE"
+}
+
+pub fn has_substantive_document_answer(content: &str) -> bool {
+    content
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_lowercase)
+        .any(|token| {
+            token.len() >= 2
+                && !matches!(
+                    token.as_str(),
+                    "pagina" | "page" | "página" | "sha" | "sha256"
+                )
+                && !token.chars().all(|character| character.is_ascii_digit())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

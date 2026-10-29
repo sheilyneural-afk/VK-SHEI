@@ -1,8 +1,8 @@
 # Grafo documental y micrometadatos verificables
 
-Estado: núcleo Rust funcional y ruta de consulta conectada a Llama mediante
-`terrsvusion-document-ask`; todavía no conectado al servidor HTTP ni a un
-extractor PDF/OCR.
+Estado: núcleo Rust funcional y rutas de consulta conectadas a Llama mediante
+`terrsvusion-document-ask` y `POST /v1/document/query`; todavía no conectado a
+un extractor PDF/OCR.
 
 ## Autoridad
 
@@ -100,6 +100,24 @@ cargo run --release --features torch-backend \
   --scope focused --max-pages 4 --max-characters 16000 --graph-hops 1
 ```
 
+El servidor carga el grafo una vez y exige la autoridad LibTorch compartida:
+
+```bash
+terrsvusion-server \
+  --model /ruta/Llama-3.1-8B-Instruct \
+  --shared-authority \
+  --document-graph documento.graph.json
+
+curl -X POST http://127.0.0.1:8088/v1/document/query \
+  -H 'content-type: application/json' \
+  -d '{"question":"¿Cuántos habitantes tenía Puerto Gris?","scope":"focused"}'
+```
+
+El arranque rechaza `--document-graph` sin `--shared-authority`. Las fases se
+preparan desde el grafo residente y se envían secuencialmente al pool; ninguna
+petición documental carga un checkpoint. El prefill de evidencia usa la ruta
+densa BF16 para no confundir selección documental con omisión V experimental.
+
 Para recorrer candidatos sin recargar el modelo, `--max-phases` permite varias
 fases sobre un único ranking inmutable. Cada página se materializa una sola vez;
 la inferencia continúa únicamente cuando la salida normalizada es exactamente
@@ -149,6 +167,26 @@ documento completo, evitó 115.586 posiciones y respondió
 `Dos mil habitantes. [Página 1]`. El controlador también fue probado contra
 una salida de solo cita (`[Página 1]`) y ya no la acepta como respuesta
 sustantiva.
+
+## Prueba HTTP sobre autoridad compartida
+
+Se arrancó el servidor real con Llama 3.1 8B, el grafo de 95 páginas,
+`--shared-authority`, un worker y el endpoint documental. Evidencia observada:
+
+- `/ready`: `authority_mode=shared_libtorch_weight_storage`;
+- 291 tensores de peso verificados por `data_ptr`;
+- 95 páginas y 4.091 hiperaristas residentes;
+- cargas de modelo durante la petición: 0;
+- coincidencias amplias: 94; candidatas: 1; evidencia: página 1;
+- prompt físico del worker: 1.350 tokens;
+- respuesta: `La respuesta es: 2.000 habitantes. [Página 1]`;
+- tiempo HTTP: 22,28 s;
+- RSS residente después de la petición: 16.384.728 KiB;
+- parada limpia del servidor tras la medición.
+
+Esto demuestra la conexión grafo -> endpoint -> pool -> LibTorch compartido.
+No demuestra paralelismo de dos consultas documentales ni exhaustividad
+semántica.
 
 Esta medición sí demuestra que la ruta selectiva reduce el número efectivo de
 posiciones procesadas por el Transformer en esta consulta. No demuestra que
