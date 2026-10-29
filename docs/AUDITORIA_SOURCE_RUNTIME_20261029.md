@@ -222,6 +222,19 @@ para cualquier petición con esa opción y `/v1/capabilities` la anuncia como
 deshabilitada hasta disponer de paridad y fallback exactos. La ruta normal del
 servidor continúa usando atención densa BF16.
 
+La autoridad de contexto se volvió a comprobar contra el `config.json` real:
+`max_position_embeddings=131072`. El binario rechazó antes de construir el
+libro una petición de `book_tokens=131073` con:
+
+```text
+Error: el benchmark excede la ventana: 131073 + 1 > 131072
+```
+
+Esto demuestra que el límite operativo procede de la configuración del
+checkpoint y que la comprobación de generación no conserva un `131072`
+independiente oculto. No certifica una inferencia completa a 30K, 100K o
+131.072 tokens; esas tres certificaciones siguen abiertas.
+
 ## Corrección aplicada
 
 `TerrsvusionKvCache::restore_prefix` era una envoltura usada solo por tests,
