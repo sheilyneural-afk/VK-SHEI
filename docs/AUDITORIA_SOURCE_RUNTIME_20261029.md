@@ -301,3 +301,13 @@ mismo y los logits no fueron idénticos. También demuestra que la implementaci�
 token a token es actualmente demasiado lenta en CPU; no se presenta como una
 reducción de coste. La siguiente corrección necesaria es un certificador de
 salida final o un fallback exacto antes de publicar una respuesta aproximada.
+
+La inspección del certificador confirma además el cuello exacto: `llama_certified_value_attention`
+concatena todas las K históricas, repite las K para las 32 consultas y calcula
+el tensor completo de scores antes de llamar a `select_by_exact_mass`. Por
+tanto, esa ruta reduce V leída/materializada, pero no reduce QK ni el tamaño del
+problema de atención. Las cotas regionales `key_minimum_bits`/`key_maximum_bits`
+sí existen en el certificado, pero el branch-and-bound que las consume está
+dimensionado para la ruta 16Q/2KV; no es todavía un planificador Llama 32Q/8KV
+equivalente. Activarlo por simple reutilización sería incorrecto porque no
+probaría la misma selección ni el mismo error por cabeza.
