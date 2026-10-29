@@ -249,11 +249,9 @@ fn validate_request(
                 "applied_mass_tolerance debe estar entre 0 (exclusivo) y 0.01, con valor finito",
             ));
         }
-        if native || request.compare_native {
-            return Err(unsupported(
-                "applied_mass_tolerance solo disponible en model=terrsvusion-rust; nativo siempre BF16 denso sin omisiones",
-            ));
-        }
+        return Err(unsupported(
+            "applied_mass_tolerance está deshabilitado en la API: la ruta candidata no ha demostrado paridad de logits; use la ruta densa hasta disponer de verificación y fallback exactos",
+        ));
     }
 
     if native && request.document.as_ref().is_some_and(|doc| !doc.is_empty()) {
@@ -384,12 +382,12 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "terrsvusion_kv_lod": state.model_spec.legacy_bf16_geometry_match,
         "llama_dense_bf16": state.model_spec.is_llama31_8b_instruct_bf16(),
         "certified_v_omission_api":{
-            "availability":"experimental_opt_in_not_default",
+            "availability":"disabled_until_logits_parity_and_exact_fallback",
             "parameter":"applied_mass_tolerance",
             "range":"0 < epsilon <= 0.01",
             "supported_geometry":"Llama_3.1_8B_32Q_8KV_128dim; original MiniCPM5 16Q_2KV",
             "authority":"exact BF16 K score softmax-mass, complete per-KV-head V maxima, original ColdStore partial reads",
-            "promise":"mathematical per-head attention bound only, NOT bitwise logits or universal nonzero omission",
+            "promise":"not exposed by the server until final-logit parity and exact fallback are verified",
             "legacy_prefix":"missing per-KV-head certificate -> full original BF16 V fallback"
         },
         "chat_features": {
@@ -901,7 +899,7 @@ mod api_tests {
     }
 
     #[test]
-    fn llama_optional_certified_v_is_explicit_and_never_changes_native_routing() {
+    fn positive_v_omission_is_not_exposed_until_logits_parity_is_verified() {
         let allowed = request(json!({
             "model":"terrsvusion-rust",
             "messages":[{"role":"user","content":"Hola"}],
@@ -909,8 +907,10 @@ mod api_tests {
             "applied_mass_tolerance":0.001
         }));
         assert_eq!(
-            validate_request(&allowed, "Llama-3.1-8B-Instruct", LLAMA_DENSE_MODEL).unwrap(),
-            (8, false, false)
+            validate_request(&allowed, "Llama-3.1-8B-Instruct", LLAMA_DENSE_MODEL)
+                .unwrap_err()
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
         );
         let original = request(json!({
             "model":"terrsvusion-rust",

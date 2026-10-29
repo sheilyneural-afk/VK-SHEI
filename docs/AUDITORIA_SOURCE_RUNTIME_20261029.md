@@ -214,6 +214,14 @@ Error: omisión aplicada rechazada: L∞ de logits 0.125000000 supera la toleran
 
 Esto confirma el comportamiento en runtime, no solo la compilación del guard.
 
+La auditoría del caller HTTP encontró además que el servidor aceptaba antes
+`applied_mass_tolerance` y llamaba directamente a la generación candidata,
+sin ejecutar la comparación final de logits del binario de diagnóstico. Esa
+puerta quedó cerrada: `validate_request` devuelve `422 Unprocessable Entity`
+para cualquier petición con esa opción y `/v1/capabilities` la anuncia como
+deshabilitada hasta disponer de paridad y fallback exactos. La ruta normal del
+servidor continúa usando atención densa BF16.
+
 ## Corrección aplicada
 
 `TerrsvusionKvCache::restore_prefix` era una envoltura usada solo por tests,
