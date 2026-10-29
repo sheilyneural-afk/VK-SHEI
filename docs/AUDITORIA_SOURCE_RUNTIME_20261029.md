@@ -471,3 +471,49 @@ También se corrigió `physical_bytes()` para incluir los máximos V por región
 por cabeza que antes no entraban en la cuenta. Las cifras anteriores de memoria
 del certificado subestimaban ese componente y no deben usarse para certificar
 30K/100K/131K.
+
+## Prefill selectivo por bloques, reutilizando el prefill funcional
+
+La ruta anterior deshacía cada bloque de 32 tokens en 32 llamadas completas a
+`forward_with_cache`, repitiendo las proyecciones, las 32 capas y los MLP. Se
+reemplazó por el mismo orden layer-major del prefill causal funcional: una sola
+llamada Transformer por bloque, Q/K/V y MLP batidos para todos sus tokens, y
+certificación querywise únicamente dentro de la atención. Las K/V del bloque
+permanecen temporales hasta el sello frío, igual que en el diseño OpenCL. Si una
+consulta no certifica, la capa usa el prefill causal denso existente.
+
+Para 128 tokens con `chunk_size=32`, el código ejecuta ahora cuatro llamadas de
+prefill en lugar de 128. `TorchGeneration.prefill_forward_calls` expone este
+contador para que la reducción no dependa de inferirla por tiempo.
+
+La ejecución real posterior, con el mismo checkpoint y tolerancia `1e-2`, dio:
+
+```text
+attention_dense_qk_elements=1744896
+attention_selected_qk_elements=1725632
+attention_dense_pv_elements=223346688
+attention_selected_pv_elements=220880896
+attention_v_tokens_avoided=602
+certified_v_tokens_omitted=602
+exact_token_parity=true
+max_abs_logit_difference=0.125
+omission_accepted=false
+prefill_seconds_applied=23.152619382
+prefill_seconds_canonical=2.445583158
+```
+
+El prefill aplicado es `5,39x` más rápido que la implementación selectiva
+token a token medida inmediatamente antes (`124,744600643 s`), aunque todavía
+es `9,47x` más lento que el prefill canónico. La poda QK/PV que llega a la
+salida es positiva pero pequeña (`1,10%`); los intentos descartados por fallback
+ya no se contabilizan como ahorro lógico. Las lecturas físicas de esos intentos
+sí permanecen en las métricas de I/O porque realmente ocurrieron.
+
+El campo resumen `certified_v_tokens_omitted` usa ahora la autoridad
+`attention_v_tokens_avoided`. La resta histórica
+`exact_k_tokens_scanned-exact_v_tokens_materialized` devolvía cero en la ruta
+regional aunque se hubiesen omitido V y por eso no era una medida válida.
+
+La comparación canónica sigue siendo una segunda inferencia deliberada del
+binario diagnóstico: es necesaria para medir logits finales. No existe en la
+ruta normal del servidor, que además continúa rechazando tolerancia positiva.

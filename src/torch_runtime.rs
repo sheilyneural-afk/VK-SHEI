@@ -1798,6 +1798,7 @@ impl TerrsvusionKvCache {
         query: &Tensor,
         pages: &[TerrsvusionPage],
         tail: Option<&(Tensor, Tensor)>,
+        sequence_tokens: usize,
         tolerance: f64,
     ) -> Result<Option<Tensor>> {
         if pages.is_empty() {
@@ -1882,52 +1883,76 @@ impl TerrsvusionKvCache {
         )?;
         let mut loaded = BTreeMap::<usize, (usize, Tensor, Vec<Vec<f64>>)>::new();
         let allowed = tolerance * 0.5;
-        for (block_id, page_index, local_start, local_end) in regions.iter().copied() {
-            let page = &pages[page_index];
-            let positions = (local_start..local_end).collect::<Vec<_>>();
-            let key = match &page.storage {
-                PageStorage::Pending { key, .. } => select_token_indices(key, &positions),
-                PageStorage::Cold {
-                    exact_id,
-                    immutable,
-                } => {
-                    let bytes = self.read_cold_key_tokens(*exact_id, *immutable, &positions)?;
-                    self.exact_tensor_from_bytes(&bytes, positions.len())?
+        let queries = query.to_kind(Kind::Float);
+        // Batch adjacent best-first candidates into one LibTorch launch. The
+        // certificate is still updated region by region, but every K scored
+        // by a batch is accounted as loaded before checking whether the proof
+        // closes; this avoids under-reporting speculative batch work.
+        const REGIONAL_SCORE_BATCH: usize = 16;
+        if regions.len() < 2 {
+            return Ok(None);
+        }
+        let mut region_cursor = 0usize;
+        while region_cursor + 1 < regions.len() {
+            let remaining_omissible = regions.len() - region_cursor - 1;
+            let batch_len = remaining_omissible.min(REGIONAL_SCORE_BATCH);
+            let region_batch = &regions[region_cursor..region_cursor + batch_len];
+            region_cursor += batch_len;
+            let mut batch_entries = Vec::<(usize, usize, Tensor, usize)>::new();
+            let mut batch_keys = Vec::<Tensor>::new();
+            let mut batch_tokens = 0usize;
+            for (block_id, page_index, local_start, local_end) in region_batch.iter().copied() {
+                let page = &pages[page_index];
+                let positions = (local_start..local_end).collect::<Vec<_>>();
+                let key = match &page.storage {
+                    PageStorage::Pending { key, .. } => select_token_indices(key, &positions),
+                    PageStorage::Cold {
+                        exact_id,
+                        immutable,
+                    } => {
+                        let bytes = self.read_cold_key_tokens(*exact_id, *immutable, &positions)?;
+                        self.exact_tensor_from_bytes(&bytes, positions.len())?
+                    }
                 }
-            };
-            // Keep the regional exact-score evaluation on the same device as
-            // the model. The previous implementation copied every regional K
-            // block to Rust vectors and evaluated the 32Q/8KV dot products on
-            // CPU, so this path was not a GPU branch-and-bound implementation
-            // even when the canonical Transformer ran on CUDA.
-            let queries = query.to_kind(Kind::Float);
-            let key_device = key.to_device(query.device());
-            let repeated_key = key_device
+                .to_device(query.device());
+                batch_tokens += positions.len();
+                batch_keys.push(key.shallow_clone());
+                batch_entries.push((block_id, page_index, key, positions.len()));
+            }
+            let key_refs = batch_keys.iter().collect::<Vec<_>>();
+            let batched_key = Tensor::cat(&key_refs, 2);
+            let repeated_key = batched_key
                 .repeat_interleave_self_int(4, 1, None)
                 .to_kind(Kind::Float);
             let score_tensor = (queries.matmul(&repeated_key.transpose(-2, -1))
                 / (self.head_dim as f64).sqrt())
             .to_kind(Kind::Float)
             .contiguous();
-            let mut score_values = vec![0.0_f32; 32 * positions.len()];
+            let mut score_values = vec![0.0_f32; 32 * batch_tokens];
             let score_count = score_values.len();
             score_tensor.copy_data(&mut score_values, score_count);
-            let scores = score_values
-                .chunks_exact(positions.len())
-                .map(|head| head.iter().map(|value| f64::from(*value)).collect())
-                .collect::<Vec<Vec<f64>>>();
-            // A score that exceeds its stored interval invalidates the
-            // certificate (for example because of a numerical accumulation
-            // difference between the metadata pass and LibTorch matmul). It
-            // must never abort serving or authorize an unsafe omission: fall
-            // back to the dense/legacy path instead.
-            if certificate
-                .materialize(block_id, &scores, &state_uppers, &state_value_max)
-                .is_err()
-            {
-                return Ok(None);
+            let mut offset = 0usize;
+            for (block_id, page_index, key, tokens) in batch_entries {
+                let scores = (0..32)
+                    .map(|head| {
+                        score_values
+                            [head * batch_tokens + offset..head * batch_tokens + offset + tokens]
+                            .iter()
+                            .map(|value| f64::from(*value))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                // A score that exceeds its stored interval invalidates the
+                // certificate. It must never authorize an unsafe omission.
+                if certificate
+                    .materialize(block_id, &scores, &state_uppers, &state_value_max)
+                    .is_err()
+                {
+                    return Ok(None);
+                }
+                loaded.insert(block_id, (page_index, key, scores));
+                offset += tokens;
             }
-            loaded.insert(block_id, (page_index, key_device, scores));
             if certified(&certificate.bounds(), allowed) {
                 break;
             }
@@ -1977,7 +2002,7 @@ impl TerrsvusionKvCache {
             values.push(tail_value.shallow_clone());
         }
         let tail_tokens = tail.map_or(0, |(key, _)| key.size()[2] as usize);
-        let total_tokens = self.sequence_tokens + 1;
+        let total_tokens = sequence_tokens + 1;
         let scanned_tokens = loaded_tokens.saturating_add(tail_tokens);
         let omitted = total_tokens.saturating_sub(scanned_tokens);
         if omitted == 0 {
@@ -2001,7 +2026,7 @@ impl TerrsvusionKvCache {
             query,
             &keys,
             &values,
-            self.sequence_tokens,
+            sequence_tokens,
         )))
     }
 
@@ -2024,6 +2049,7 @@ impl TerrsvusionKvCache {
         query: &Tensor,
         pages: &[TerrsvusionPage],
         tail: Option<&(Tensor, Tensor)>,
+        sequence_tokens: usize,
         tolerance: f64,
     ) -> Result<Option<Tensor>> {
         ensure!(
@@ -2043,7 +2069,7 @@ impl TerrsvusionKvCache {
         // Logical dense baseline for this Llama attention event. The regional
         // planner may avoid K/V work, but these counters remain the honest
         // dense Transformer comparison and are never reported as savings.
-        let dense_pairs = self.sequence_tokens.saturating_add(1);
+        let dense_pairs = sequence_tokens.saturating_add(1);
         self.attention_dense_qk_elements = self
             .attention_dense_qk_elements
             .saturating_add(u128::from(dense_pairs as u64) * 32);
@@ -2095,7 +2121,9 @@ impl TerrsvusionKvCache {
                 *dst = dst.max(f64::from(maxval));
             }
         }
-        if let Some(output) = self.llama_regional_attention(query, pages, tail, tolerance)? {
+        if let Some(output) =
+            self.llama_regional_attention(query, pages, tail, sequence_tokens, tolerance)?
+        {
             return Ok(Some(output));
         }
         let mut keys = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
@@ -2126,7 +2154,7 @@ impl TerrsvusionKvCache {
             return Ok(None);
         }
         ensure!(
-            cursor == self.sequence_tokens + 1,
+            cursor == sequence_tokens + 1,
             "Llama exact-score audit does not cover complete BF16 K history"
         );
         let key_refs = keys.iter().collect::<Vec<_>>();
@@ -2237,7 +2265,7 @@ impl TerrsvusionKvCache {
             }
         }
         ensure!(!values.is_empty(), "Llama certified V selection empty");
-        let output = Self::scaled_attention(query, &[selected_key], &values, self.sequence_tokens);
+        let output = Self::scaled_attention(query, &[selected_key], &values, sequence_tokens);
         self.exact_k_tokens_scanned += cursor;
         self.exact_v_tokens_materialized += chosen.len();
         self.attention_v_tokens_avoided = self
@@ -2247,6 +2275,86 @@ impl TerrsvusionKvCache {
             .exact_mass_max_bound
             .max(bounds.into_iter().fold(0.0f64, f64::max));
         Ok(Some(output))
+    }
+
+    /// Layer-major causal selective prefill for Llama. Q/K/V projections and
+    /// the MLP are produced for the complete caller tile by `forward_with_cache`;
+    /// only attention is evaluated query-by-query so each token keeps its own
+    /// causal prefix and certificate. If any query cannot certify, return None
+    /// and let the caller execute the existing dense causal tile.
+    fn llama_querywise_certified_prefill(
+        &mut self,
+        layer_index: usize,
+        query: &Tensor,
+        new_key: &Tensor,
+        new_value: &Tensor,
+        tolerance: f64,
+    ) -> Result<Option<Tensor>> {
+        let query_tokens = query.size()[2] as usize;
+        if query_tokens < 2
+            || query.size()[1] != 32
+            || new_key.size()[1] != 8
+            || new_key.size() != new_value.size()
+            || new_key.size()[2] as usize != query_tokens
+        {
+            return Ok(None);
+        }
+        let pages = self.layers[layer_index].pages.clone();
+        let existing_tail = self.layers[layer_index]
+            .tail
+            .as_ref()
+            .map(|(key, value)| (key.shallow_clone(), value.shallow_clone()));
+        let logical_snapshot = (
+            self.exact_k_tokens_scanned,
+            self.exact_v_tokens_materialized,
+            self.attention_dense_qk_elements,
+            self.attention_dense_pv_elements,
+            self.attention_selected_qk_elements,
+            self.attention_selected_pv_elements,
+            self.attention_v_tokens_avoided,
+            self.exact_mass_max_bound,
+        );
+        let mut outputs = Vec::with_capacity(query_tokens);
+        for query_index in 0..query_tokens {
+            let prefix_tokens = query_index + 1;
+            let prefix_key = new_key.narrow(2, 0, prefix_tokens as i64);
+            let prefix_value = new_value.narrow(2, 0, prefix_tokens as i64);
+            let tail = match &existing_tail {
+                Some((key, value)) => (
+                    Tensor::cat(&[key, &prefix_key], 2),
+                    Tensor::cat(&[value, &prefix_value], 2),
+                ),
+                None => (prefix_key, prefix_value),
+            };
+            let query_token = query.narrow(2, query_index as i64, 1);
+            let logical_history = self.sequence_tokens + query_index;
+            let Some(output) = self.llama_certified_value_attention(
+                layer_index,
+                &query_token,
+                &pages,
+                Some(&tail),
+                logical_history,
+                tolerance,
+            )?
+            else {
+                // Queries already evaluated in this layer are discarded when
+                // the tile falls back to dense causal attention. Keep physical
+                // I/O metrics (the work really happened), but do not claim
+                // logical Transformer savings that did not reach the output.
+                self.exact_k_tokens_scanned = logical_snapshot.0;
+                self.exact_v_tokens_materialized = logical_snapshot.1;
+                self.attention_dense_qk_elements = logical_snapshot.2;
+                self.attention_dense_pv_elements = logical_snapshot.3;
+                self.attention_selected_qk_elements = logical_snapshot.4;
+                self.attention_selected_pv_elements = logical_snapshot.5;
+                self.attention_v_tokens_avoided = logical_snapshot.6;
+                self.exact_mass_max_bound = logical_snapshot.7;
+                return Ok(None);
+            };
+            outputs.push(output);
+        }
+        let refs = outputs.iter().collect::<Vec<_>>();
+        Ok(Some(Tensor::cat(&refs, 2)))
     }
 
     fn exact_mass_attention(
@@ -3618,7 +3726,22 @@ impl AttentionCache for TerrsvusionKvCache {
                     .min(u128::from(u64::MAX)) as u64,
             );
         }
-        let prefill_hot = if is_prefill {
+        let selective_prefill_output = if is_prefill
+            && self.query_heads == 32
+            && self.kv_heads == 8
+            && let Some(tolerance) = self.applied_mass_tolerance
+        {
+            self.llama_querywise_certified_prefill(
+                layer_index,
+                query,
+                new_key,
+                new_value,
+                tolerance,
+            )?
+        } else {
+            None
+        };
+        let prefill_hot = if is_prefill && selective_prefill_output.is_none() {
             let started = std::time::Instant::now();
             let previous = self.layers[layer_index].prefill_hot.take();
             if self.suffix_against_committed {
@@ -3787,6 +3910,9 @@ impl AttentionCache for TerrsvusionKvCache {
             .as_ref()
             .map(|(key, value)| (key.shallow_clone(), value.shallow_clone()));
         if query_tokens > 1 {
+            if let Some(output) = selective_prefill_output {
+                return Ok(output);
+            }
             let (key, value) = prefill_hot.context("prefill BF16 sin estado de trabajo")?;
             return Ok(Self::scaled_attention(
                 query,
@@ -3802,6 +3928,7 @@ impl AttentionCache for TerrsvusionKvCache {
                     query,
                     &pages,
                     tail.as_ref(),
+                    self.sequence_tokens,
                     epsilon,
                 )?
             {
@@ -3904,22 +4031,17 @@ impl MiniCpmModel {
         Ok(hidden.matmul(&self.lm_head.transpose(0, 1)))
     }
 
-    /// Causal prefill path used only by the explicit positive-tolerance Llama
-    /// experiment. A multi-token SDPA call cannot apply the one-query
-    /// certificate safely, so this path advances one token at a time and
-    /// lets the cache decide whether that query can omit V. The exact default
-    /// continues to use batched prefill.
+    /// Layer-major causal prefill used by the explicit positive-tolerance
+    /// Llama experiment. The cache applies the one-query certificate inside
+    /// each attention layer while projections and MLPs remain batched for the
+    /// whole tile, matching the canonical/OpenCL prefill execution order.
     fn forward_certified_prefill<C: AttentionCache>(
         &self,
         token_ids: &[i64],
         cache: &mut C,
     ) -> Result<Tensor> {
         ensure!(!token_ids.is_empty(), "prefill certificado sin tokens");
-        let mut logits = None;
-        for &token in token_ids {
-            logits = Some(self.forward_with_cache(&[token], cache)?);
-        }
-        logits.context("prefill certificado sin salida")
+        self.forward_with_cache(token_ids, cache)
     }
 }
 
@@ -3938,6 +4060,7 @@ pub struct TorchGeneration {
     pub kv_tokens: usize,
     pub latency_seconds: f64,
     pub prefill_seconds: f64,
+    pub prefill_forward_calls: usize,
     pub seal_seconds: f64,
     pub decode_seconds: f64,
     pub drain_seconds: f64,
@@ -5170,6 +5293,7 @@ impl TorchModelRuntime {
         cache.record_step_logits = record_step_logits;
         let mut generated = Vec::with_capacity(max_tokens);
         let mut prefill_seconds = 0.0_f64;
+        let mut prefill_forward_calls = 0usize;
         let mut seal_seconds = 0.0_f64;
         let mut decode_seconds = 0.0_f64;
         let mut min_logit_margin = f64::INFINITY;
@@ -5203,6 +5327,7 @@ impl TorchModelRuntime {
                         bail!("inferencia cancelada");
                     }
                     let chunk = chunks.next().context("sufijo sin tokens")?;
+                    prefill_forward_calls += 1;
                     let output = if certified_prefill {
                         self.model.forward_certified_prefill(chunk, &mut cache)?
                     } else {
@@ -5223,6 +5348,7 @@ impl TorchModelRuntime {
                         bail!("inferencia cancelada");
                     }
                     let chunk = chunks.next().context("prefijo sin tokens")?;
+                    prefill_forward_calls += 1;
                     let output = if certified_prefill {
                         self.model.forward_certified_prefill(chunk, &mut cache)?
                     } else {
@@ -5243,6 +5369,7 @@ impl TorchModelRuntime {
                     if cancelled() {
                         bail!("inferencia cancelada");
                     }
+                    prefill_forward_calls += 1;
                     logits = if certified_prefill {
                         self.model.forward_certified_prefill(chunk, &mut cache)?
                     } else {
@@ -5257,6 +5384,7 @@ impl TorchModelRuntime {
                         bail!("inferencia cancelada");
                     }
                     let chunk = chunks.next().context("prompt sin tokens")?;
+                    prefill_forward_calls += 1;
                     let output = if certified_prefill {
                         self.model.forward_certified_prefill(chunk, &mut cache)?
                     } else {
@@ -5413,6 +5541,7 @@ impl TorchModelRuntime {
                 kv_tokens: cache.sequence_tokens(),
                 latency_seconds: started.elapsed().as_secs_f64(),
                 prefill_seconds,
+                prefill_forward_calls,
                 seal_seconds,
                 decode_seconds,
                 drain_seconds,
@@ -5515,9 +5644,7 @@ impl TorchModelRuntime {
                 prefix_cache_hydrate_seconds,
                 prefix_cache_copied_bytes: cache.prefix_copied_bytes,
                 prefix_immutable: cache.prefix_cold.is_some(),
-                certified_v_tokens_omitted: cache
-                    .exact_k_tokens_scanned
-                    .saturating_sub(cache.exact_v_tokens_materialized),
+                certified_v_tokens_omitted: cache.attention_v_tokens_avoided,
                 applied_mass_tolerance: cache.applied_mass_tolerance,
                 step_logits: std::mem::take(&mut cache.step_logits),
                 kv_sha256,
@@ -6832,6 +6959,7 @@ mod tests {
                 &q,
                 &[page.clone()],
                 Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                16,
                 1e-3,
             )
             .unwrap()
@@ -6879,6 +7007,7 @@ mod tests {
                     &q,
                     &[legacy],
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                    16,
                     1e-3
                 )
                 .unwrap()
@@ -6891,6 +7020,7 @@ mod tests {
                     &q,
                     &[page.clone()],
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                    16,
                     0.0
                 )
                 .unwrap()
@@ -6899,7 +7029,14 @@ mod tests {
         let zero = Tensor::zeros([1, 32, 1, 128], (Kind::BFloat16, Device::Cpu));
         assert!(
             cache
-                .llama_certified_value_attention(0, &zero, &[page], Some(&(tailk, tailv)), 1e-3)
+                .llama_certified_value_attention(
+                    0,
+                    &zero,
+                    &[page],
+                    Some(&(tailk, tailv)),
+                    16,
+                    1e-3,
+                )
                 .unwrap()
                 .is_none(),
             "diffuse equal scores must not certify Llama KV omission"

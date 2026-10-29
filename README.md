@@ -216,7 +216,15 @@ por la API HTTP: `applied_mass_tolerance` se rechaza hasta demostrar paridad
 final de logits y fallback exacto. El diagnóstico interno requiere un valor
 positivo y falla a atención BF16 completa cuando no hay prueba. La prueba física de datos controlados
 evitó 15 V de 17 (30.720 bytes de V fría) sin error observado,
-pero NO prueba omisiones reales del checkpoint Llama 8B.
+pero por sí sola no prueba el checkpoint completo. La ejecución real posterior
+de Llama 3.1 8B sí obtuvo poda QK/PV y 602 V omitidas en eventos que llegaron a
+la salida. El prefill selectivo reutiliza ahora el orden layer-major por bloques
+del prefill funcional, en lugar de repetir todo el Transformer token a token:
+128 tokens con bloques de 32 pasan por cuatro llamadas de prefill. La medición
+aplicada bajó de 124,74 s a 23,15 s, pero continúa siendo 9,47 veces más lenta
+que la canónica y fue rechazada por `L∞=0,125`. Por tanto, esto demuestra
+omisión real y eliminación de pasadas redundantes, no paridad ni disponibilidad
+de servicio.
 
 El servidor Llama anuncia llama-dense-bf16; la petición
 minicpm-dense-bf16 devuelve HTTP 404. document= con nativo virgen
