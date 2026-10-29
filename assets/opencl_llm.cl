@@ -99,7 +99,12 @@ __kernel void llm_rope(
     const uint num_heads,
     const uint head_dim,
     const uint position,
-    const float theta
+    const float theta,
+    const uint llama3_scaling,
+    const float scaling_factor,
+    const float low_freq_factor,
+    const float high_freq_factor,
+    const float original_max_position
 ) {
     const uint i = (uint)get_global_id(0);
     if (i >= num_heads * head_dim) return;
@@ -110,7 +115,21 @@ __kernel void llm_rope(
     const float rotated = d < half_dim
         ? -read_bf16(input[source]) : read_bf16(input[source]);
     const uint frequency_dim = (d % half_dim) * 2u;
-    const float inv_frequency = exp(-(float)frequency_dim * log(theta) / (float)head_dim);
+    float inv_frequency = exp(-(float)frequency_dim * log(theta) / (float)head_dim);
+    if (llama3_scaling != 0u) {
+        const float wavelength = 6.28318530717958647692f / inv_frequency;
+        const float low_wavelength = original_max_position / low_freq_factor;
+        const float high_wavelength = original_max_position / high_freq_factor;
+        if (wavelength > low_wavelength) {
+            inv_frequency /= scaling_factor;
+        } else if (wavelength >= high_wavelength) {
+            const float smooth =
+                (original_max_position / wavelength - low_freq_factor) /
+                (high_freq_factor - low_freq_factor);
+            inv_frequency = (1.0f - smooth) * (inv_frequency / scaling_factor)
+                + smooth * inv_frequency;
+        }
+    }
     const float phase = (float)position * inv_frequency;
     const float c = read_bf16(write_bf16(cos(phase)));
     const float s = read_bf16(write_bf16(sin(phase)));
@@ -391,7 +410,12 @@ __kernel void llm_prefill_rope(
     const uint num_heads,
     const uint dim,
     const uint start_position,
-    const float theta
+    const float theta,
+    const uint llama3_scaling,
+    const float scaling_factor,
+    const float low_freq_factor,
+    const float high_freq_factor,
+    const float original_max_position
 ) {
     const uint i=(uint)get_global_id(0);
     const uint elements=num_heads*dim;
@@ -404,7 +428,19 @@ __kernel void llm_prefill_rope(
     const uint counterpart=token*elements+head*dim+(d<half_dim?d+half_dim:d-half_dim);
     const float rotated=d<half_dim?-read_bf16(input[counterpart]):read_bf16(input[counterpart]);
     const uint frequency_dim=(d%half_dim)*2u;
-    const float inverse=exp(-(float)frequency_dim*log(theta)/(float)dim);
+    float inverse=exp(-(float)frequency_dim*log(theta)/(float)dim);
+    if(llama3_scaling!=0u){
+        const float wavelength=6.28318530717958647692f/inverse;
+        const float low_wavelength=original_max_position/low_freq_factor;
+        const float high_wavelength=original_max_position/high_freq_factor;
+        if(wavelength>low_wavelength){
+            inverse/=scaling_factor;
+        }else if(wavelength>=high_wavelength){
+            const float smooth=(original_max_position/wavelength-low_freq_factor)/
+                (high_freq_factor-low_freq_factor);
+            inverse=(1.0f-smooth)*(inverse/scaling_factor)+smooth*inverse;
+        }
+    }
     const float angle=(float)(start_position+token)*inverse;
     const float c=read_bf16(write_bf16(cos(angle)));
     const float s=read_bf16(write_bf16(sin(angle)));
@@ -1339,4 +1375,3 @@ void llm_prefill_fused_swiglu_reuse8(
         }
     }
 }
-

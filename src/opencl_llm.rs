@@ -12,7 +12,7 @@
 //! experimental engine and is not represented as active.
 //!
 //! Supported: BF16, sharded or single-file bias-free LlamaForCausalLM-like architecture
-//! with no rope scaling or custom norm/model operators. No fake compatibility
+//! with plain or Llama-3 scaling and no custom norm/model operators. No fake compatibility
 //! for arbitrary checkpoint architectures or devices. No GPU CPU fallback.
 
 use anyhow::{Context, Result, ensure};
@@ -52,6 +52,60 @@ use crate::{
 
 const LOCAL_WORK_SIZE: usize = 128;
 const BYTES_PER_BF16: usize = 2;
+
+#[derive(Clone, Copy, Debug)]
+struct RopeKernelConfig {
+    theta: f32,
+    llama3_scaling: u32,
+    factor: f32,
+    low_freq_factor: f32,
+    high_freq_factor: f32,
+    original_max_position: f32,
+}
+
+impl RopeKernelConfig {
+    fn from_spec(spec: &ModelSpec) -> Result<Self> {
+        let theta = spec.rope_theta.context("missing RoPE theta")? as f32;
+        ensure!(theta.is_finite() && theta > 0.0, "invalid RoPE theta");
+        if let Some(scaling) = &spec.llama3_rope_scaling {
+            Ok(Self {
+                theta,
+                llama3_scaling: 1,
+                factor: scaling.factor as f32,
+                low_freq_factor: scaling.low_freq_factor as f32,
+                high_freq_factor: scaling.high_freq_factor as f32,
+                original_max_position: scaling.original_max_position_embeddings as f32,
+            })
+        } else {
+            Ok(Self {
+                theta,
+                llama3_scaling: 0,
+                factor: 1.0,
+                low_freq_factor: 1.0,
+                high_freq_factor: 2.0,
+                original_max_position: 1.0,
+            })
+        }
+    }
+
+    #[cfg(test)]
+    fn inverse_frequency(self, frequency_dim: usize, head_dim: usize) -> f32 {
+        let mut inverse = (-(frequency_dim as f32) * self.theta.ln() / head_dim as f32).exp();
+        if self.llama3_scaling != 0 {
+            let wavelength = std::f32::consts::TAU / inverse;
+            let low_wavelength = self.original_max_position / self.low_freq_factor;
+            let high_wavelength = self.original_max_position / self.high_freq_factor;
+            if wavelength > low_wavelength {
+                inverse /= self.factor;
+            } else if wavelength >= high_wavelength {
+                let smooth = (self.original_max_position / wavelength - self.low_freq_factor)
+                    / (self.high_freq_factor - self.low_freq_factor);
+                inverse = (1.0 - smooth) * (inverse / self.factor) + smooth * inverse;
+            }
+        }
+        inverse
+    }
+}
 
 struct GpuWeight {
     data: Buffer<u8>,
@@ -743,7 +797,7 @@ impl GpuEngine {
         heads: u32,
         head_dim: u32,
         position: u32,
-        theta: f32,
+        rope: RopeKernelConfig,
     ) -> Result<()> {
         // SAFETY: OpenCL kernel checks work index bounds.
         unsafe {
@@ -753,7 +807,12 @@ impl GpuEngine {
                 .set_arg(&heads)
                 .set_arg(&head_dim)
                 .set_arg(&position)
-                .set_arg(&theta)
+                .set_arg(&rope.theta)
+                .set_arg(&rope.llama3_scaling)
+                .set_arg(&rope.factor)
+                .set_arg(&rope.low_freq_factor)
+                .set_arg(&rope.high_freq_factor)
+                .set_arg(&rope.original_max_position)
                 .set_global_work_size((heads as usize) * (head_dim as usize))
                 .enqueue_nd_range(&self.queue)
                 .context("GPU BF16 RoPE failed")?;
@@ -1584,12 +1643,15 @@ impl OpenClLlm {
         );
         let config_text = std::fs::read_to_string(model_dir.as_ref().join("config.json"))?;
         let config: serde_json::Value = serde_json::from_str(&config_text)?;
-        ensure!(
-            config
-                .get("rope_scaling")
-                .is_none_or(serde_json::Value::is_null),
-            "rope_scaling not yet implemented"
-        );
+        if config
+            .get("rope_scaling")
+            .is_some_and(|value| !value.is_null())
+        {
+            ensure!(
+                spec.llama3_rope_scaling.is_some(),
+                "only validated llama3 rope_scaling is implemented"
+            );
+        }
         ensure!(
             config.get("attention_bias").and_then(|v| v.as_bool()) != Some(true),
             "attention bias not implemented"
@@ -2804,7 +2866,7 @@ impl OpenClLlm {
         let head_q = geom.query_elements();
         let head_kv = geom.kv_elements_per_token();
         let head_dim = geom.head_dim;
-        let theta = spec.rope_theta.context("rope_theta missing")? as f32;
+        let rope = RopeKernelConfig::from_spec(spec)?;
         let eps = spec.rms_norm_eps.context("rms_norm_eps missing")? as f32;
         let position_u32 = u32::try_from(position)?;
         let hidden_u32 = u32::try_from(hidden)?;
@@ -2830,16 +2892,9 @@ impl OpenClLlm {
             heads_q,
             dim_u32,
             position_u32,
-            theta,
+            rope,
         )?;
-        engine.rope(
-            &ws.key,
-            &ws.key_rope,
-            heads_kv,
-            dim_u32,
-            position_u32,
-            theta,
-        )?;
+        engine.rope(&ws.key, &ws.key_rope, heads_kv, dim_u32, position_u32, rope)?;
 
         // New key/value are appended to the device KV buffers of this layer.
         let page_bytes = head_kv
@@ -3491,6 +3546,46 @@ pub struct OpenClGeneration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn llama3_rope_frequencies_match_huggingface_reference() {
+        use super::*;
+        let rope = RopeKernelConfig {
+            theta: 500_000.0,
+            llama3_scaling: 1,
+            factor: 8.0,
+            low_freq_factor: 1.0,
+            high_freq_factor: 4.0,
+            original_max_position: 8192.0,
+        };
+        // Generated independently with transformers 4.51.3
+        // `_compute_llama3_parameters` for the local Llama-3.1-8B config.
+        for (dimension, expected) in [
+            (0, 1.0_f32),
+            (20, 0.1286873817),
+            (40, 0.01656044088),
+            (60, 0.001371893683),
+            (80, 0.00003428102355),
+            (100, 0.000004411534519),
+            (120, 0.0000005677088097),
+            (126, 0.0000003068925878),
+        ] {
+            let actual = rope.inverse_frequency(dimension, 128);
+            let relative = (actual - expected).abs() / expected.max(f32::MIN_POSITIVE);
+            assert!(
+                relative <= 2.0e-6,
+                "Llama 3 RoPE frequency {dimension}: {actual} != {expected} ({relative})"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a physical OpenCL GPU to compile the complete kernel program"]
+    fn gpu_actual_opencl_program_compiles_llama3_rope_kernels() {
+        use super::*;
+        let engine = GpuEngine::new(false).unwrap();
+        assert!(!engine.name.is_empty());
+    }
+
     #[test]
     fn checkpoint_shards_resolve_tensors_and_reject_duplicates() {
         use super::*;

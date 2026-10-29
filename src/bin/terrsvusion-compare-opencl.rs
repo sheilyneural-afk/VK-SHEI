@@ -1,5 +1,5 @@
 //! Strict, opt-in comparison of native BF16 Rust/OpenCL GPU inference versus
-//! the already verified original MiniCPM5-1B dense BF16 LibTorch CPU model.
+//! the supported dense BF16 LibTorch CPU model (MiniCPM5 or Llama 3.1 8B).
 //! Same original safetensors, tokenizer, greedy input IDs and generation steps.
 //! Neither the model checkpoint nor the Terrsvusion historical path is changed.
 
@@ -64,6 +64,10 @@ fn main() -> Result<()> {
         !ids.is_empty() && ids.len() + max_tokens <= max_context,
         "insufficient GPU context capacity"
     );
+    let model_spec = terrsvusion::model_config::ModelSpec::inspect(&model)?;
+    let model_family = model_spec
+        .torch_runtime_family()
+        .context("model is not supported by the dense LibTorch reference")?;
 
     eprintln!("GPU model and BF16 KV reference comparison: {:?}", ids);
     let mut gpu = OpenClLlm::load(&model, max_context, mode)?;
@@ -181,7 +185,8 @@ fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "comparison":"MiniCPM5-1B_dense_BF16_CPU_vs_native_Rust_OpenCL_iGPU",
+            "comparison":"supported_dense_BF16_LibTorch_CPU_vs_native_Rust_OpenCL_iGPU",
+            "model_family":model_family,
             "same_weights":true,
             "same_tokenizer":true,
             "same_input_token_ids":ids,

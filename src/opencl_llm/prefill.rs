@@ -328,7 +328,7 @@ impl BatchKernels {
         heads: usize,
         dim: usize,
         prior: usize,
-        theta: f32,
+        rope: RopeKernelConfig,
     ) -> Result<()> {
         let (t, h, d, pos) = (
             u32::try_from(tokens)?,
@@ -347,7 +347,12 @@ impl BatchKernels {
                 .set_arg(&h)
                 .set_arg(&d)
                 .set_arg(&pos)
-                .set_arg(&theta)
+                .set_arg(&rope.theta)
+                .set_arg(&rope.llama3_scaling)
+                .set_arg(&rope.factor)
+                .set_arg(&rope.low_freq_factor)
+                .set_arg(&rope.high_freq_factor)
+                .set_arg(&rope.original_max_position)
                 .set_global_work_size(tokens * heads * dim)
                 .enqueue_nd_range(&engine.queue)
                 .context("GPU batch prefill rotary embeddings failed")?;
@@ -614,7 +619,7 @@ impl OpenClLlm {
                 .context("GPU restored BF16 prefix V staging barrier")?;
         }
         let eps = self.spec.rms_norm_eps.context("missing RMSNorm epsilon")? as f32;
-        let theta = self.spec.rope_theta.context("missing RoPE theta")? as f32;
+        let rope = RopeKernelConfig::from_spec(&self.spec)?;
         let hidden = self.spec.hidden_size;
         let middle = self
             .spec
@@ -678,7 +683,7 @@ impl OpenClLlm {
                         hidden,
                         middle,
                         eps,
-                        theta,
+                        rope,
                     )?;
                 } else {
                     let checkpoint = self
@@ -705,7 +710,7 @@ impl OpenClLlm {
                         hidden,
                         middle,
                         eps,
-                        theta,
+                        rope,
                     )?;
                     // No GPU kernel may reference streamed weights after
                     // buffers are dropped at the end of this iteration.
@@ -883,7 +888,7 @@ fn run_batch_layer(
     hidden: usize,
     middle: usize,
     eps: f32,
-    theta: f32,
+    rope: RopeKernelConfig,
 ) -> Result<()> {
     let geom = spec.attention;
     kernels.norm(
@@ -944,7 +949,7 @@ fn run_batch_layer(
         geom.query_heads,
         geom.head_dim,
         prior,
-        theta,
+        rope,
     )?;
     kernels.rope(
         engine,
@@ -954,7 +959,7 @@ fn run_batch_layer(
         geom.kv_heads,
         geom.head_dim,
         prior,
-        theta,
+        rope,
     )?;
     let kv_bytes = geom.kv_elements_per_token() * 2;
     let size = tokens * kv_bytes;

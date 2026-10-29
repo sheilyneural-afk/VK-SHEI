@@ -243,12 +243,13 @@ TERRSVUSION_OPENCL_DEVICE=AMD cargo run --locked \
    **NO se usan todavía** en la nueva ruta GPU; se conservan en
    el backend BF16 CPU histórico. Integrarlos requiere nuevas pruebas
    de logits y KV, para no introducir pérdida de información.
-2. GPU de inicio solo ejecuta modelos de configuración Llama
-   de un único shard BF16, sin bias ni rope_scaling. MiniCPM5-1B está
-   probado; otros modelos, FP16/FP32 end-to-end y otros backends GPU
-   no están certificados.
-3. Prefill GPU procesa un token por vez, por lo que 32K/100K tokens
-   no son aún prácticos ni certificados en esta ruta.
+2. La ruta admite uno o varios shards BF16 y RoPE simple o `llama3`.
+   MiniCPM5-1B tiene pruebas amplias; Llama-3.1-8B tiene por ahora
+   carga, una inferencia mínima y comparación LibTorch de una posición,
+   no certificación larga. Otros modelos, FP16/FP32 end-to-end y otros
+   backends GPU no están certificados.
+3. Existe prefill GPU por lotes de hasta 512 posiciones, pero 30K/100K/131K
+   no son aún prácticos ni están certificados en esta ruta.
 4. La GPU calcula FP32 y redondea intermedios BF16: la paridad de
    logits/KV con LibTorch BF16 NO es exacta.
 5. No hay aún kernels GPU para la compresión/LOD original, atención
@@ -267,3 +268,43 @@ con --features torch-backend. La implementación OpenCL es optativa
 y separada; no ha reemplazado el servicio CPU preexistente. Todos
 los datos y la copia previa permanecen recuperables.
 
+## Llama 3.1 8B multishard y RoPE llama3: evidencia física
+
+La ruta OpenCL ya resuelve tensores directamente entre los cuatro shards,
+sin concatenar el checkpoint. Un test contra el checkpoint local encontró
+291 tensores y 16.060.522.496 bytes. Los nombres duplicados entre shards
+se rechazan. El modo streaming conserva mmap de solo lectura y sube una
+capa cada vez.
+
+Se implementó el escalado RoPE `llama3` declarado en `config.json`:
+factor 8, factores de frecuencia 1/4 y contexto original 8192. Ocho
+frecuencias entre dimensiones 0 y 126 coinciden con la referencia
+`transformers 4.51.3` dentro de 2e-6 relativo. El programa OpenCL completo
+compiló físicamente en Radeon Phoenix.
+
+Prueba `--load-only`, Llama-3.1-8B-Instruct, cuatro shards, streaming,
+capacidad de dos posiciones:
+
+| Métrica | Resultado |
+|---|---:|
+| Inicialización física | 0,829 s |
+| RSS máximo | 2.181.392 KiB |
+| Pesos reconocidos | 16.060.522.496 bytes |
+| Memoria global reportada por iGPU | 4.294.967.296 bytes |
+
+Inferencia mínima real, ID 128000, una posición y una salida:
+
+| Métrica | OpenCL iGPU | LibTorch CPU |
+|---|---:|---:|
+| Token greedy | 14924 | 14924 |
+| Inferencia | 1,953 s | 0,419 s |
+| L-infinito logits | \- | 0,0625 frente a OpenCL |
+
+La paridad de token en este único caso NO demuestra paridad de logits.
+Solo 66.165 de 128.256 logits fueron bit a bit iguales. Hubo 31.299
+elementos KV BF16 diferentes y `L∞ KV=0,015625`. Dos componentes V ya
+difieren en la capa 0 y posición 0 (`4,768e-7`), donde RoPE es identidad;
+esto localiza la primera divergencia en el orden/redondeo de proyección,
+no en el nuevo escalado de posiciones. El modo streaming tampoco es más
+rápido que LibTorch en esta geometría mínima. No se autoriza todavía el
+servidor Llama OpenCL ni se extrapola esta prueba a contexto largo.
