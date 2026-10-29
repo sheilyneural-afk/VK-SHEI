@@ -2004,6 +2004,16 @@ impl TerrsvusionKvCache {
         {
             return Ok(None); // never reinterpret unrelated geometry
         }
+        // Logical dense baseline for this Llama attention event. The regional
+        // planner may avoid K/V work, but these counters remain the honest
+        // dense Transformer comparison and are never reported as savings.
+        let dense_pairs = self.sequence_tokens.saturating_add(1);
+        self.attention_dense_qk_elements = self
+            .attention_dense_qk_elements
+            .saturating_add(u128::from(dense_pairs as u64) * 32);
+        self.attention_dense_pv_elements = self
+            .attention_dense_pv_elements
+            .saturating_add(u128::from(dense_pairs as u64) * 32 * 128);
         let mut max_per_kv = [0.0f64; 8];
         for page in pages {
             // A legacy v1 prefix lacked complete 8-KV-head bounds:
