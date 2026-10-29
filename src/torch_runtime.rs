@@ -255,6 +255,7 @@ pub struct MiniCpmModel {
     kv_heads: i64,
     head_dim: i64,
     streaming_prefill: bool,
+    declared_context_limit: usize,
 }
 
 pub struct DenseKvCache {
@@ -3527,6 +3528,9 @@ impl MiniCpmModel {
             kv_heads: geometry.kv_heads,
             head_dim: geometry.head_dim,
             streaming_prefill: geometry.chat == ChatTemplateFamily::Llama3,
+            declared_context_limit: spec
+                .max_position_embeddings
+                .context("config.json necesita max_position_embeddings")?,
         })
     }
 
@@ -4480,7 +4484,7 @@ impl TorchModelRuntime {
     }
 
     pub fn context_limit_tokens(&self) -> usize {
-        131_072
+        self.model.declared_context_limit
     }
 
     /// Encode an externally supplied document/query for a real long-context
@@ -4760,8 +4764,9 @@ impl TorchModelRuntime {
         );
         let started = std::time::Instant::now();
         ensure!(
-            prompt_ids.len() + max_tokens <= 131_072,
-            "prompt y generación exceden 131072 tokens"
+            prompt_ids.len() + max_tokens <= self.model.declared_context_limit,
+            "prompt y generación exceden el límite declarado de {} tokens",
+            self.model.declared_context_limit
         );
         let prefix_key = (prefix_tokens > 0)
             .then(|| self.prefix_digest(&prompt_ids[..prefix_tokens], storage_frame_tokens));
@@ -5147,8 +5152,9 @@ impl TorchModelRuntime {
         ensure!(!prompt_ids.is_empty(), "prompt sin tokens");
         ensure!(chunk_size > 0, "chunk_size debe ser positivo");
         ensure!(
-            prompt_ids.len() + candidates <= 131_072,
-            "prompt y candidatos exceden 131072 tokens"
+            prompt_ids.len() + candidates <= self.model.declared_context_limit,
+            "prompt y candidatos exceden el límite declarado de {} tokens",
+            self.model.declared_context_limit
         );
         tch::no_grad(|| -> Result<MultiTokenVerificationOracle> {
             let mut sequential_cache = DenseKvCache::with_layers(self.model.layers.len());
@@ -5602,8 +5608,9 @@ impl TorchModelRuntime {
         ensure!(!prompt_ids.is_empty(), "prompt sin tokens");
         ensure!(chunk_size > 0, "chunk_size debe ser positivo");
         ensure!(
-            prompt_ids.len() + max_tokens <= 131_072,
-            "prompt y generación exceden 131072 tokens"
+            prompt_ids.len() + max_tokens <= self.model.declared_context_limit,
+            "prompt y generación exceden el límite declarado de {} tokens",
+            self.model.declared_context_limit
         );
         let started = std::time::Instant::now();
         let mut cache = DenseKvCache::with_layers(self.model.layers.len());

@@ -161,3 +161,15 @@ que la implementación de runtime no conserve una ruta desconectada ni emita
 un warning de código muerto. Las rutas de producción usan las variantes
 geométricas/manifiesto que sí tienen callers.
 
+## Corrección posterior en la copia del Escritorio
+
+El runtime tenía el valor `131072` repetido en las comprobaciones de generación,
+verificación y atención densa. Se sustituyó por el `max_position_embeddings`
+declarado por el `config.json` del modelo cargado y se exige que ese campo exista
+al construir `MiniCpmModel`. Esto corrige un límite interno hardcodeado y evita
+aceptar una longitud distinta de la declarada por el checkpoint.
+
+Esta corrección no amplía el contexto ni convierte 131.072 en 3 millones: RoPE,
+la memoria de atención y la capacidad del modelo siguen limitadas por el
+checkpoint. Es una corrección de autoridad de configuración, no una certificación
+de contexto largo.
