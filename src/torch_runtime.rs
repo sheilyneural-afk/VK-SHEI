@@ -1901,23 +1901,70 @@ impl TerrsvusionKvCache {
             let mut batch_entries = Vec::<(usize, usize, Tensor, usize)>::new();
             let mut batch_keys = Vec::<Tensor>::new();
             let mut batch_tokens = 0usize;
-            for (block_id, page_index, local_start, local_end) in region_batch.iter().copied() {
+            let mut page_entries = BTreeMap::<usize, Vec<usize>>::new();
+            for (entry, (_, page_index, _, _)) in region_batch.iter().enumerate() {
+                page_entries.entry(*page_index).or_default().push(entry);
+            }
+            let mut key_slots = (0..region_batch.len())
+                .map(|_| None)
+                .collect::<Vec<Option<Tensor>>>();
+            for (page_index, entries) in page_entries {
                 let page = &pages[page_index];
-                let positions = (local_start..local_end).collect::<Vec<_>>();
-                let key = match &page.storage {
-                    PageStorage::Pending { key, .. } => select_token_indices(key, &positions),
+                match &page.storage {
+                    PageStorage::Pending { key, .. } => {
+                        for entry in entries {
+                            let (_, _, local_start, local_end) = region_batch[entry];
+                            let positions = (local_start..local_end).collect::<Vec<_>>();
+                            key_slots[entry] = Some(select_token_indices(key, &positions));
+                        }
+                    }
                     PageStorage::Cold {
                         exact_id,
                         immutable,
                     } => {
+                        let mut requested = Vec::new();
+                        for &entry in &entries {
+                            let (_, _, local_start, local_end) = region_batch[entry];
+                            requested
+                                .extend((local_start..local_end).map(|position| (position, entry)));
+                        }
+                        requested.sort_unstable_by_key(|(position, _)| *position);
+                        ensure!(
+                            requested.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                            "regiones K certificadas solapadas en una página"
+                        );
+                        let positions = requested
+                            .iter()
+                            .map(|(position, _)| *position)
+                            .collect::<Vec<_>>();
+                        // One verified partial ColdStore read per physical
+                        // page and score batch, rather than one read for every
+                        // certificate region. The planner's best-first order
+                        // is restored after satisfying ColdStore's strictly
+                        // increasing coordinate contract.
                         let bytes = self.read_cold_key_tokens(*exact_id, *immutable, &positions)?;
-                        self.exact_tensor_from_bytes(&bytes, positions.len())?
+                        let grouped = self.exact_tensor_from_bytes(&bytes, positions.len())?;
+                        let mut offsets = BTreeMap::<usize, Vec<usize>>::new();
+                        for (offset, (_, entry)) in requested.into_iter().enumerate() {
+                            offsets.entry(entry).or_default().push(offset);
+                        }
+                        for (entry, offsets) in offsets {
+                            key_slots[entry] = Some(select_token_indices(&grouped, &offsets));
+                        }
                     }
                 }
-                .to_device(query.device());
-                batch_tokens += positions.len();
+            }
+            for (entry, (block_id, page_index, local_start, local_end)) in
+                region_batch.iter().copied().enumerate()
+            {
+                let tokens = local_end - local_start;
+                let key = key_slots[entry]
+                    .take()
+                    .context("K regional agrupada ausente")?
+                    .to_device(query.device());
+                batch_tokens += tokens;
                 batch_keys.push(key.shallow_clone());
-                batch_entries.push((block_id, page_index, key, positions.len()));
+                batch_entries.push((block_id, page_index, key, tokens));
             }
             let key_refs = batch_keys.iter().collect::<Vec<_>>();
             let batched_key = Tensor::cat(&key_refs, 2);
@@ -1973,27 +2020,68 @@ impl TerrsvusionKvCache {
         let mut keys = Vec::new();
         let mut values = Vec::new();
         let mut loaded_tokens = 0usize;
-        for (block_id, (page_index, key, _)) in ordered {
-            let page = &pages[page_index];
-            let region = page
+        let mut value_regions = Vec::with_capacity(ordered.len());
+        let mut value_pages = BTreeMap::<usize, Vec<usize>>::new();
+        for (entry, (block_id, (page_index, _, _))) in ordered.iter().enumerate() {
+            let region = pages[*page_index]
                 .certificate
                 .regions
                 .iter()
-                .find(|region| region.block_id == block_id)
+                .find(|region| region.block_id == *block_id)
                 .context("región Llama cargada ausente")?;
-            let positions = (region.local_start..region.local_end).collect::<Vec<_>>();
-            let value = match &page.storage {
-                PageStorage::Pending { value, .. } => select_token_indices(value, &positions),
+            value_regions.push((*page_index, region.local_start, region.local_end));
+            value_pages.entry(*page_index).or_default().push(entry);
+        }
+        let mut value_slots = (0..ordered.len())
+            .map(|_| None)
+            .collect::<Vec<Option<Tensor>>>();
+        for (page_index, entries) in value_pages {
+            let page = &pages[page_index];
+            match &page.storage {
+                PageStorage::Pending { value, .. } => {
+                    for entry in entries {
+                        let (_, start, end) = value_regions[entry];
+                        let positions = (start..end).collect::<Vec<_>>();
+                        value_slots[entry] = Some(select_token_indices(value, &positions));
+                    }
+                }
                 PageStorage::Cold {
                     exact_id,
                     immutable,
                 } => {
+                    let mut requested = Vec::new();
+                    for &entry in &entries {
+                        let (_, start, end) = value_regions[entry];
+                        requested.extend((start..end).map(|position| (position, entry)));
+                    }
+                    requested.sort_unstable_by_key(|(position, _)| *position);
+                    ensure!(
+                        requested.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                        "regiones V certificadas solapadas en una página"
+                    );
+                    let positions = requested
+                        .iter()
+                        .map(|(position, _)| *position)
+                        .collect::<Vec<_>>();
                     let bytes = self.read_cold_value_tokens(*exact_id, *immutable, &positions)?;
-                    self.exact_tensor_from_bytes(&bytes, positions.len())?
+                    let grouped = self.exact_tensor_from_bytes(&bytes, positions.len())?;
+                    let mut offsets = BTreeMap::<usize, Vec<usize>>::new();
+                    for (offset, (_, entry)) in requested.into_iter().enumerate() {
+                        offsets.entry(entry).or_default().push(offset);
+                    }
+                    for (entry, offsets) in offsets {
+                        value_slots[entry] = Some(select_token_indices(&grouped, &offsets));
+                    }
                 }
-            };
-            let value = value.to_device(query.device());
-            loaded_tokens += positions.len();
+            }
+        }
+        for (entry, (_, (_, key, _))) in ordered.into_iter().enumerate() {
+            let (_, start, end) = value_regions[entry];
+            let value = value_slots[entry]
+                .take()
+                .context("V regional agrupada ausente")?
+                .to_device(query.device());
+            loaded_tokens += end - start;
             keys.push(key);
             values.push(value);
         }

@@ -514,6 +514,32 @@ El campo resumen `certified_v_tokens_omitted` usa ahora la autoridad
 `exact_k_tokens_scanned-exact_v_tokens_materialized` devolvía cero en la ruta
 regional aunque se hubiesen omitido V y por eso no era una medida válida.
 
+La ruta layer-major todavía hacía una lectura física por región certificada.
+Como el planificador recorre las regiones en orden best-first y `ColdStore`
+exige coordenadas estrictamente crecientes, la corrección agrupa K y V por
+página física, ordena únicamente las coordenadas de lectura y remapea los
+tensores devueltos al orden lógico original. La misma ejecución real de 128
+tokens y tolerancia `1e-2`, realizada una vez después de la corrección, produjo:
+
+```text
+prefill_forward_calls=4
+prefill_seconds_applied=6.026726889
+prefill_seconds_canonical=2.506684261
+kv_exact_partial_key_reads=11327       (antes 66850)
+kv_exact_partial_value_reads=767       (antes 62226)
+attention_selected_qk_elements=1725632 (sin cambio)
+attention_selected_pv_elements=220880896 (sin cambio)
+certified_v_tokens_omitted=602          (sin cambio)
+exact_token_parity=true
+max_abs_logit_difference=0.125
+omission_accepted=false
+```
+
+Esto reduce el prefill selectivo otro `3,84x` frente a 23,15 s y `20,69x`
+frente a la variante token a token de 124,74 s. No es todavía una aceleración
+frente a la canónica: en esta corrida sigue siendo `2,40x` más lento. Tampoco
+cambia el rechazo de paridad ni autoriza la ruta en el servidor.
+
 La comparación canónica sigue siendo una segunda inferencia deliberada del
 binario diagnóstico: es necesaria para medir logits finales. No existe en la
 ruta normal del servidor, que además continúa rechazando tolerancia positiva.

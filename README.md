@@ -221,10 +221,14 @@ de Llama 3.1 8B sí obtuvo poda QK/PV y 602 V omitidas en eventos que llegaron a
 la salida. El prefill selectivo reutiliza ahora el orden layer-major por bloques
 del prefill funcional, en lugar de repetir todo el Transformer token a token:
 128 tokens con bloques de 32 pasan por cuatro llamadas de prefill. La medición
-aplicada bajó de 124,74 s a 23,15 s, pero continúa siendo 9,47 veces más lenta
-que la canónica y fue rechazada por `L∞=0,125`. Por tanto, esto demuestra
-omisión real y eliminación de pasadas redundantes, no paridad ni disponibilidad
-de servicio.
+aplicada bajó primero de 124,74 s a 23,15 s. Al agrupar las lecturas regionales
+por página física, ordenar las coordenadas para `ColdStore` y reconstruir luego
+el orden best-first, bajó a 6,03 s; las lecturas parciales K/V pasaron de
+66.850/62.226 a 11.327/767. La canónica de control tardó 2,51 s, así que la
+ruta selectiva continúa siendo 2,40 veces más lenta y fue rechazada por
+`L∞=0,125`. Por tanto, esto demuestra omisión real, eliminación de pasadas
+redundantes y reducción de I/O regional, no paridad ni disponibilidad de
+servicio.
 
 El servidor Llama anuncia llama-dense-bf16; la petición
 minicpm-dense-bf16 devuelve HTTP 404. document= con nativo virgen
