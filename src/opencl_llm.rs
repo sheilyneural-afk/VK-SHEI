@@ -11,7 +11,7 @@
 //! The historical Terrsvusion KV/LOD optimization is not yet wired to this
 //! experimental engine and is not represented as active.
 //!
-//! Supported: BF16, one-shard, bias-free LlamaForCausalLM-like architecture
+//! Supported: BF16, sharded or single-file bias-free LlamaForCausalLM-like architecture
 //! with no rope scaling or custom norm/model operators. No fake compatibility
 //! for arbitrary checkpoint architectures or devices. No GPU CPU fallback.
 
@@ -26,9 +26,10 @@ use opencl3::{
     program::Program,
     types::CL_BLOCKING,
 };
-use safetensors::{Dtype, SafeTensors};
+use safetensors::{Dtype, SafeTensors, tensor::TensorView};
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     fs::File,
     path::Path,
     ptr,
@@ -68,6 +69,87 @@ struct GpuLayer {
     gate: GpuWeight,
     up: GpuWeight,
     down: GpuWeight,
+}
+
+/// Read-only collection of every safetensors shard in one checkpoint.
+/// Tensor ownership is discovered from the files themselves instead of
+/// assuming that all weights live in one archive. This is deliberately kept
+/// independent of Hugging Face's optional index JSON: the BF16 payload is the
+/// authority and duplicate tensor names fail closed.
+struct CheckpointShards {
+    mappings: Vec<memmap2::Mmap>,
+    tensor_to_shard: HashMap<String, usize>,
+    payload_bytes: usize,
+}
+
+impl CheckpointShards {
+    fn open(model_dir: &Path, shard_names: &[String]) -> Result<Self> {
+        ensure!(
+            !shard_names.is_empty(),
+            "checkpoint has no safetensors shards"
+        );
+        let mut mappings = Vec::with_capacity(shard_names.len());
+        let mut tensor_to_shard = HashMap::new();
+        let mut payload_bytes = 0usize;
+        for (shard_index, shard_name) in shard_names.iter().enumerate() {
+            let path = model_dir.join(shard_name);
+            let file = File::open(&path)
+                .with_context(|| format!("open checkpoint shard {}", path.display()))?;
+            // SAFETY: Immutable, read-only mapping retained by this owner.
+            let mapping = unsafe { MmapOptions::new().map(&file)? };
+            let archive = SafeTensors::deserialize(&mapping)
+                .with_context(|| format!("parse checkpoint shard {}", path.display()))?;
+            for name in archive.names() {
+                let view = archive.tensor(name).with_context(|| {
+                    format!("read tensor directory {name} in {}", path.display())
+                })?;
+                payload_bytes = payload_bytes
+                    .checked_add(view.data().len())
+                    .context("checkpoint BF16 payload byte count overflow")?;
+                ensure!(
+                    tensor_to_shard
+                        .insert(name.to_owned(), shard_index)
+                        .is_none(),
+                    "duplicate checkpoint tensor across shards: {name}"
+                );
+            }
+            mappings.push(mapping);
+        }
+        Ok(Self {
+            mappings,
+            tensor_to_shard,
+            payload_bytes,
+        })
+    }
+
+    fn with_tensor<R>(
+        &self,
+        name: &str,
+        use_tensor: impl FnOnce(TensorView<'_>) -> Result<R>,
+    ) -> Result<R> {
+        let shard = *self
+            .tensor_to_shard
+            .get(name)
+            .with_context(|| format!("required original weight not found: {name}"))?;
+        let archive = SafeTensors::deserialize(
+            self.mappings
+                .get(shard)
+                .context("checkpoint tensor shard index invalid")?,
+        )?;
+        let view = archive
+            .tensor(name)
+            .with_context(|| format!("checkpoint tensor directory lost {name}"))?;
+        use_tensor(view)
+    }
+
+    fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
+    #[cfg(test)]
+    fn tensor_count(&self) -> usize {
+        self.tensor_to_shard.len()
+    }
 }
 
 struct GpuKv {
@@ -1192,13 +1274,21 @@ impl GpuEngine {
 impl GpuWeight {
     fn load(
         engine: &GpuEngine,
-        archive: &SafeTensors,
+        checkpoint: &CheckpointShards,
         name: &str,
         expected_shape: &[usize],
     ) -> Result<Self> {
-        let view = archive
-            .tensor(name)
-            .with_context(|| format!("required original weight not found: {name}"))?;
+        checkpoint.with_tensor(name, |view| {
+            Self::load_view(engine, name, expected_shape, view)
+        })
+    }
+
+    fn load_view(
+        engine: &GpuEngine,
+        name: &str,
+        expected_shape: &[usize],
+        view: TensorView<'_>,
+    ) -> Result<Self> {
         ensure!(view.dtype() == Dtype::BF16, "{name} is not BF16");
         ensure!(
             view.shape() == expected_shape,
@@ -1243,7 +1333,7 @@ impl GpuWeight {
 impl GpuLayer {
     fn load(
         engine: &GpuEngine,
-        archive: &SafeTensors,
+        checkpoint: &CheckpointShards,
         index: usize,
         spec: &ModelSpec,
     ) -> Result<Self> {
@@ -1255,7 +1345,7 @@ impl GpuLayer {
         let qsize = spec.attention.query_elements();
         let kvsize = spec.attention.kv_elements_per_token();
         let weight = |name: &str, shape: &[usize]| {
-            GpuWeight::load(engine, archive, &format!("{p}.{name}"), shape)
+            GpuWeight::load(engine, checkpoint, &format!("{p}.{name}"), shape)
         };
         Ok(Self {
             input_norm: weight("input_layernorm.weight", &[hidden])?,
@@ -1391,9 +1481,9 @@ pub struct OpenClLlm {
     engine: GpuEngine,
     spec: ModelSpec,
     mode: WeightMode,
-    // In streamed mode, we retain a mapped checkpoint to upload each layer
-    // only for the current token. The mmap is read-only, original unchanged.
-    checkpoint: Option<memmap2::Mmap>,
+    // In streamed mode, retain every read-only checkpoint shard so each layer
+    // can be uploaded on demand without copying or concatenating 16 GB.
+    checkpoint: Option<CheckpointShards>,
     layers: Vec<GpuLayer>,
     embedding: GpuWeight,
     final_norm: GpuWeight,
@@ -1492,10 +1582,6 @@ impl OpenClLlm {
             spec.storage_format == Some(crate::portable::FloatFormat::Bf16),
             "GPU LLM currently supports BF16 model weights only"
         );
-        ensure!(
-            spec.weight_shards.len() == 1,
-            "one safetensors shard required"
-        );
         let config_text = std::fs::read_to_string(model_dir.as_ref().join("config.json"))?;
         let config: serde_json::Value = serde_json::from_str(&config_text)?;
         ensure!(
@@ -1541,23 +1627,23 @@ impl OpenClLlm {
             "vocabulary exceeds tested resource budget"
         );
         let engine = GpuEngine::new(hip_enabled)?;
-        let file = File::open(model_dir.as_ref().join(&spec.weight_shards[0]))
-            .context("open original safetensors")?;
-        // SAFETY: Read-only immutable mmap valid until weights are uploaded.
-        let mapping = unsafe { MmapOptions::new().map(&file)? };
-        let archive = SafeTensors::deserialize(&mapping).context("parse original safetensors")?;
+        let checkpoint = CheckpointShards::open(model_dir.as_ref(), &spec.weight_shards)?;
 
         let embedding = GpuWeight::load(
             &engine,
-            &archive,
+            &checkpoint,
             "model.embed_tokens.weight",
             &[vocab, spec.hidden_size],
         )?;
-        let final_norm =
-            GpuWeight::load(&engine, &archive, "model.norm.weight", &[spec.hidden_size])?;
+        let final_norm = GpuWeight::load(
+            &engine,
+            &checkpoint,
+            "model.norm.weight",
+            &[spec.hidden_size],
+        )?;
         let lm_head = GpuWeight::load(
             &engine,
-            &archive,
+            &checkpoint,
             "lm_head.weight",
             &[vocab, spec.hidden_size],
         )?;
@@ -1570,17 +1656,13 @@ impl OpenClLlm {
         if mode == WeightMode::Resident {
             for layer in 0..spec.num_hidden_layers {
                 layers.push(
-                    GpuLayer::load(&engine, &archive, layer, &spec)
+                    GpuLayer::load(&engine, &checkpoint, layer, &spec)
                         .with_context(|| format!("GPU weight residency at layer {layer}"))?,
                 );
             }
         }
-        let gpu_weight_payload_bytes = archive
-            .names()
-            .iter()
-            .map(|name| archive.tensor(name).map(|v| v.data().len()).unwrap_or(0))
-            .sum();
-        let checkpoint = (mode == WeightMode::Stream).then_some(mapping);
+        let gpu_weight_payload_bytes = checkpoint.payload_bytes();
+        let checkpoint = (mode == WeightMode::Stream).then_some(checkpoint);
         Ok(Self {
             engine,
             spec,
@@ -2120,65 +2202,61 @@ impl OpenClLlm {
             self.mode == WeightMode::Resident,
             "weight verification requires --resident; streamed layers not retained"
         );
-        let file = File::open(self.spec.model_dir.join(&self.spec.weight_shards[0]))
-            .context("reopen original safetensors for GPU weight verification")?;
-        // SAFETY: Read-only mapping, not modified by this verifier.
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
-        let archive = SafeTensors::deserialize(&mmap)?;
+        let checkpoint = CheckpointShards::open(&self.spec.model_dir, &self.spec.weight_shards)
+            .context("reopen original safetensors shards for GPU weight verification")?;
         let mut original_hash = Sha256::new();
         let mut gpu_hash = Sha256::new();
         let mut total_bytes = 0usize;
         let mut total_tensors = 0usize;
         let mut scratch = vec![0u8; 1024 * 1024];
         let mut verify = |name: &str, weight: &GpuWeight| -> Result<()> {
-            let view = archive
-                .tensor(name)
-                .with_context(|| format!("checkpoint tensor {name} missing"))?;
-            ensure!(
-                view.dtype() == Dtype::BF16,
-                "unexpected non BF16 tensor during readback: {name}"
-            );
-            for (chunk_index, original) in view.data().chunks(scratch.len()).enumerate() {
-                let offset = chunk_index * scratch.len();
-                let sample = &mut scratch[..original.len()];
-                #[cfg(feature = "hip-backend")]
-                if let Some(ref hip_weight) = weight.hip {
-                    self.engine
-                        .hip
-                        .as_ref()
-                        .context("HIP weight has no native GPU context")?
-                        .read_bf16(hip_weight, offset, sample)
-                        .with_context(|| format!("HIP BF16 weight readback {name} {offset}"))?;
-                } else {
-                    // SAFETY: Exact BF16 OpenCL buffer, blocking copy.
-                    unsafe {
-                        self.engine
-                            .queue
-                            .enqueue_read_buffer(&weight.data, CL_BLOCKING, offset, sample, &[])
-                            .with_context(|| format!("OpenCL BF16 readback {name} {offset}"))?;
-                    }
-                }
-                #[cfg(not(feature = "hip-backend"))]
-                {
-                    // SAFETY: Source OpenCL BF16 buffer has enough bytes,
-                    // CL_BLOCKING retains host sample through the readback.
-                    unsafe {
-                        self.engine
-                            .queue
-                            .enqueue_read_buffer(&weight.data, CL_BLOCKING, offset, sample, &[])
-                            .with_context(|| format!("OpenCL BF16 readback {name} {offset}"))?;
-                    }
-                }
-                original_hash.update(original);
-                gpu_hash.update(&*sample);
+            checkpoint.with_tensor(name, |view| {
                 ensure!(
-                    sample == original,
-                    "lossless verification failed: {name} byte offset {offset}"
+                    view.dtype() == Dtype::BF16,
+                    "unexpected non BF16 tensor during readback: {name}"
                 );
-            }
-            total_bytes += view.data().len();
-            total_tensors += 1;
-            Ok(())
+                for (chunk_index, original) in view.data().chunks(scratch.len()).enumerate() {
+                    let offset = chunk_index * scratch.len();
+                    let sample = &mut scratch[..original.len()];
+                    #[cfg(feature = "hip-backend")]
+                    if let Some(ref hip_weight) = weight.hip {
+                        self.engine
+                            .hip
+                            .as_ref()
+                            .context("HIP weight has no native GPU context")?
+                            .read_bf16(hip_weight, offset, sample)
+                            .with_context(|| format!("HIP BF16 weight readback {name} {offset}"))?;
+                    } else {
+                        // SAFETY: Exact BF16 OpenCL buffer, blocking copy.
+                        unsafe {
+                            self.engine
+                                .queue
+                                .enqueue_read_buffer(&weight.data, CL_BLOCKING, offset, sample, &[])
+                                .with_context(|| format!("OpenCL BF16 readback {name} {offset}"))?;
+                        }
+                    }
+                    #[cfg(not(feature = "hip-backend"))]
+                    {
+                        // SAFETY: Source OpenCL BF16 buffer has enough bytes,
+                        // CL_BLOCKING retains host sample through the readback.
+                        unsafe {
+                            self.engine
+                                .queue
+                                .enqueue_read_buffer(&weight.data, CL_BLOCKING, offset, sample, &[])
+                                .with_context(|| format!("OpenCL BF16 readback {name} {offset}"))?;
+                        }
+                    }
+                    original_hash.update(original);
+                    gpu_hash.update(&*sample);
+                    ensure!(
+                        sample == original,
+                        "lossless verification failed: {name} byte offset {offset}"
+                    );
+                }
+                total_bytes += view.data().len();
+                total_tensors += 1;
+                Ok(())
+            })
         };
         verify("model.embed_tokens.weight", &self.embedding)?;
         verify("model.norm.weight", &self.final_norm)?;
@@ -3051,8 +3129,7 @@ impl OpenClLlm {
                     .checkpoint
                     .as_ref()
                     .context("missing streamed checkpoint")?;
-                let archive = SafeTensors::deserialize(checkpoint)?;
-                let layer = GpuLayer::load(engine, &archive, layer_index, &self.spec)?;
+                let layer = GpuLayer::load(engine, checkpoint, layer_index, &self.spec)?;
                 Self::run_layer(
                     engine,
                     &self.spec,
@@ -3414,6 +3491,89 @@ pub struct OpenClGeneration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkpoint_shards_resolve_tensors_and_reject_duplicates() {
+        use super::*;
+        use safetensors::tensor::serialize_to_file;
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_bytes = [0_u8, 0x3f, 0, 0x40];
+        let second_bytes = [0_u8, 0x41];
+        let first = TensorView::new(Dtype::BF16, vec![2], &first_bytes).unwrap();
+        let second = TensorView::new(Dtype::BF16, vec![1], &second_bytes).unwrap();
+        serialize_to_file(
+            [("model.embed_tokens.weight", first)],
+            &None,
+            &dir.path().join("model-00001-of-00002.safetensors"),
+        )
+        .unwrap();
+        serialize_to_file(
+            [("lm_head.weight", second)],
+            &None,
+            &dir.path().join("model-00002-of-00002.safetensors"),
+        )
+        .unwrap();
+        let names = vec![
+            "model-00001-of-00002.safetensors".to_owned(),
+            "model-00002-of-00002.safetensors".to_owned(),
+        ];
+        let checkpoint = CheckpointShards::open(dir.path(), &names).unwrap();
+        assert_eq!(checkpoint.payload_bytes(), 6);
+        assert_eq!(checkpoint.tensor_count(), 2);
+        checkpoint
+            .with_tensor("model.embed_tokens.weight", |view| {
+                assert_eq!(view.shape(), [2]);
+                assert_eq!(view.data(), first_bytes);
+                Ok(())
+            })
+            .unwrap();
+        checkpoint
+            .with_tensor("lm_head.weight", |view| {
+                assert_eq!(view.shape(), [1]);
+                assert_eq!(view.data(), second_bytes);
+                Ok(())
+            })
+            .unwrap();
+        assert!(checkpoint.with_tensor("missing", |_| Ok(())).is_err());
+
+        let duplicate = TensorView::new(Dtype::BF16, vec![1], &second_bytes).unwrap();
+        serialize_to_file(
+            [("model.embed_tokens.weight", duplicate)],
+            &None,
+            &dir.path().join("duplicate.safetensors"),
+        )
+        .unwrap();
+        let mut duplicate_names = names;
+        duplicate_names.push("duplicate.safetensors".to_owned());
+        let error = CheckpointShards::open(dir.path(), &duplicate_names)
+            .err()
+            .expect("duplicate tensor names must fail closed");
+        assert!(error.to_string().contains("duplicate checkpoint tensor"));
+    }
+
+    #[test]
+    #[ignore = "requires the local four-shard Llama 3.1 8B checkpoint"]
+    fn local_llama31_checkpoint_shards_are_complete() {
+        use super::*;
+        let model = std::env::var("TERRSVUSION_LLAMA_MODEL")
+            .unwrap_or_else(|_| "/home/yo/models/Llama-3.1-8B-Instruct".to_owned());
+        let spec = ModelSpec::inspect(&model).unwrap();
+        assert!(spec.is_llama31_8b_instruct_bf16());
+        assert_eq!(spec.weight_shards.len(), 4);
+        let checkpoint = CheckpointShards::open(Path::new(&model), &spec.weight_shards).unwrap();
+        assert_eq!(checkpoint.tensor_count(), 291);
+        assert_eq!(checkpoint.payload_bytes(), 16_060_522_496);
+        for name in [
+            "model.embed_tokens.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.31.mlp.down_proj.weight",
+            "model.norm.weight",
+            "lm_head.weight",
+        ] {
+            checkpoint.with_tensor(name, |_| Ok(())).unwrap();
+        }
+    }
+
     #[test]
     #[ignore = "requires actual physical OpenCL GPU and a local MiniCPM5-1B BF16 checkpoint"]
     fn gpu_actual_full_minicpm5_hola_and_independent_session_reset() {

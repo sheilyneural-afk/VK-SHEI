@@ -685,8 +685,7 @@ impl OpenClLlm {
                         .checkpoint
                         .as_ref()
                         .context("missing streamed BF16 checkpoint")?;
-                    let archive = SafeTensors::deserialize(checkpoint)?;
-                    let layer = GpuLayer::load(engine, &archive, layer_index, &self.spec)?;
+                    let layer = GpuLayer::load(engine, checkpoint, layer_index, &self.spec)?;
                     let cache = &mut self.workspace.kv[layer_index];
                     let value_cache = if let Some(temp) = temp_values.as_mut() {
                         &mut temp[layer_index]
