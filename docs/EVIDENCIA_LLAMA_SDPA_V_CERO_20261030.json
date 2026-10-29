@@ -1,0 +1,49 @@
+{
+  "schema": "terrsvusion-llama-sdpa-zero-filled-v-parity-v1",
+  "date": "2026-10-30",
+  "implementation": {
+    "runtime": "rust-tch-libtorch-terrsvusion",
+    "model": "/home/yo/models/Llama-3.1-8B-Instruct",
+    "candidate_attention": "canonical_libtorch_sdpa_with_full_k_and_zero_filled_unread_v",
+    "v_omission_scope": "coldstore_read_and_materialization_only",
+    "transformer_pv_scope": "dense_full_cursor",
+    "server_authority": "disabled_until_positive_omission_and_exact_final_logit_parity"
+  },
+  "synthetic_physical_coldstore_regression": {
+    "geometry": "32Q/8KV/128D",
+    "tokens": 17,
+    "selected_v_tokens_max": 2,
+    "omitted_v_tokens_min": 15,
+    "coldstore_partial_value_reads": 1,
+    "coldstore_partial_value_bytes_avoided_positive": true,
+    "bf16_attention_output_bit_exact": true,
+    "rounding_cell_checked_events": 1,
+    "rounding_cell_certified_events": 1,
+    "submitted_pv_elements": 69632,
+    "test": "torch_runtime::tests::llama_32q8kv_certified_v_read_from_physical_coldstore_is_partial_and_bounded"
+  },
+  "complete_checkpoint_run": {
+    "book_tokens": 128,
+    "chunk_size": 64,
+    "storage_frame_tokens": 64,
+    "generated_tokens": 2,
+    "tolerance": 0.001,
+    "wall_seconds": 40.73,
+    "max_rss_kib": 31392560,
+    "candidate_attention_events": 11,
+    "candidate_v_tokens": 20,
+    "attention_events_bit_exact": 0,
+    "rounding_cell_checked_events": 11,
+    "rounding_cell_certified_events": 0,
+    "accepted_v_tokens_omitted": 0,
+    "hierarchy_k_tokens_avoided": 0,
+    "partial_value_reads_attempted": 2,
+    "partial_value_bytes_avoided_before_fallback": 4096,
+    "exact_logit_parity_after_fallback": true,
+    "max_abs_logit_difference_after_fallback": 0.0,
+    "canonical_token_ids": [31976, 7873],
+    "applied_token_ids": [31976, 7873],
+    "omission_accepted": false
+  },
+  "conclusion": "The same-kernel construction proves that positive V read omission can be bit-exact on a controlled physical ColdStore case. It does not produce an accepted positive omission in the measured complete Llama checkpoint. Exact final logits in that run are caused by dense fallback, not by omission. Zero-filled V preserves canonical SDPA geometry, so it avoids V I/O but does not reduce dense Transformer PV arithmetic."
+}

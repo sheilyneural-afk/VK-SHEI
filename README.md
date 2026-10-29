@@ -213,23 +213,40 @@ siquiera ejecutaba el certificado exact_mass, exclusivo de MiniCPM
 16Q/2KV. La ruta 32Q/8KV nueva es experimental y no está expuesta actualmente
 por la API HTTP: `applied_mass_tolerance` se rechaza hasta demostrar paridad
 final de logits y fallback exacto. El diagnóstico interno requiere un valor
-positivo y falla a atención BF16 completa cuando no hay prueba. La prueba física de datos controlados
-evitó 15 V de 17 (30.720 bytes de V fría) sin error observado,
-pero por sí sola no prueba el checkpoint completo. La ejecución real posterior
-de Llama 3.1 8B sí obtuvo poda QK/PV y 602 V omitidas en eventos que llegaron a
-la salida. El prefill selectivo reutiliza ahora el orden layer-major por bloques
+positivo y falla a atención BF16 completa cuando no hay prueba. La prueba física
+de datos controlados evita al menos 15 V de 17 (más de 30.720 bytes de V fría)
+y produce una salida BF16 bit a bit idéntica. La candidata conserva ahora la
+misma geometría SDPA que el control: rellena con cero las posiciones V no leídas
+y mantiene todo K para el denominador. Esto demuestra omisión de **lectura y
+materialización V** en esa entrada, pero no reducción PV del Transformer: el
+kernel sigue recibiendo las 17 posiciones y la contabilidad las declara como
+densa.
+
+La ejecución real Llama 3.1 8B de 128 tokens, bloques y marcos de 64 y dos
+tokens generados encontró 11 eventos candidatos y 20 V candidatas a omisión.
+Ninguna candidata igualó la atención canónica y ninguna cerró el certificado de
+celda BF16. El oráculo rechazó las 20; por eso los dos pasos terminaron con
+logits exactamente iguales e ids `[31976, 7873]`, pero
+`certified_v_tokens_omitted=0`. Las dos lecturas parciales evitaron 4.096 bytes
+antes del rechazo; no son ahorro final. Esto refuta que la paridad observada sea
+una omisión positiva: procede del fallback denso. Evidencia completa en
+`docs/EVIDENCIA_LLAMA_SDPA_V_CERO_20261030.json`.
+
+La ruta experimental anterior de softmax+matmul compacto obtuvo 602 V omitidas
+en eventos que llegaron a la salida, pero mezclaba omisión con un kernel y orden
+de acumulación distintos. Su `L∞=0,125` no autorizó servicio ni paridad. El
+prefill selectivo reutiliza ahora el orden layer-major por bloques
 del prefill funcional, en lugar de repetir todo el Transformer token a token:
 128 tokens con bloques de 32 pasan por cuatro llamadas de prefill. La medición
 aplicada bajó primero de 124,74 s a 23,15 s. Al agrupar las lecturas regionales
 por página física, ordenar las coordenadas para `ColdStore` y reconstruir luego
 el orden best-first, bajó a 6,03 s; las lecturas parciales K/V pasaron de
 66.850/62.226 a 11.327/767. La canónica de control tardó 2,51 s, así que la
-ruta selectiva continúa siendo 2,40 veces más lenta y fue rechazada por
-`L∞=0,125`. Por tanto, esto demuestra omisión real, eliminación de pasadas
-redundantes y reducción de I/O regional, no paridad ni disponibilidad de
-servicio.
+ruta selectiva continúa siendo 2,40 veces más lenta. Esas cifras históricas
+demuestran eliminación de pasadas redundantes y reducción de I/O regional, no
+paridad, reducción PV canónica ni disponibilidad de servicio.
 
-La traza BF16 por capa sitúa la primera divergencia en la capa 1 del bloque que
+La traza histórica BF16 por capa situó la primera divergencia en la capa 1 del bloque que
 termina en la posición 96 (`L∞=0,0009765625`); el máximo dentro de las capas
 crece hasta `0,5`. Una prueba separada confirma que SDPA causal batida y
 querywise con K/V completo son bit a bit idénticas, por lo que la diferencia

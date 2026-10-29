@@ -2322,7 +2322,6 @@ impl TerrsvusionKvCache {
         tail: Option<&(Tensor, Tensor)>,
         preassembled_key: Option<&Tensor>,
         precomputed_scores: Option<&Tensor>,
-        precomputed_probabilities: Option<&Tensor>,
         sequence_tokens: usize,
         tolerance: f64,
     ) -> Result<Option<Tensor>> {
@@ -2582,21 +2581,26 @@ impl TerrsvusionKvCache {
         ensure!(!values.is_empty(), "Llama certified V selection empty");
         let selected_indices =
             Tensor::from_slice(&chosen.iter().map(|&x| x as i64).collect::<Vec<_>>());
-        let probabilities = if let Some(probabilities) = precomputed_probabilities {
-            ensure!(
-                probabilities.size() == [1, 32, 1, cursor as i64],
-                "probabilidades Llama precomputadas incompatibles"
-            );
-            probabilities.shallow_clone()
-        } else {
-            scores.softmax(-1, Kind::Float)
-        };
-        let selected_probabilities = probabilities.index_select(3, &selected_indices);
         let value_refs = values.iter().collect::<Vec<_>>();
-        let selected_values = Tensor::cat(&value_refs, 2)
-            .repeat_interleave_self_int(gqa, 1, None)
-            .to_kind(Kind::Float);
-        let output_float = selected_probabilities.matmul(&selected_values).contiguous();
+        let selected_values = Tensor::cat(&value_refs, 2);
+        // Preserve the canonical LibTorch SDPA geometry and accumulation
+        // order.  The omitted V positions are represented by exact BF16
+        // zeros, so their payload is never read from ColdStore, while full K
+        // still supplies the original softmax denominator.  Using a compact
+        // FP32 softmax+matmul here would mix two effects in the parity oracle:
+        // omitted V and a different attention kernel.
+        let zero_values = Tensor::zeros(
+            [1, self.kv_heads, cursor as i64, self.head_dim],
+            (query.kind(), query.device()),
+        );
+        let sparse_values = zero_values.index_copy(2, &selected_indices, &selected_values);
+        let output = Self::scaled_attention(
+            query,
+            &[full_key.shallow_clone()],
+            &[sparse_values],
+            sequence_tokens,
+        );
+        let output_float = output.to_kind(Kind::Float).contiguous();
         let mut output_components = vec![0.0f32; 32 * 128];
         output_float.copy_data(&mut output_components, 32 * 128);
         // Bound FP32 PV accumulation conservatively in addition to the
@@ -2642,16 +2646,18 @@ impl TerrsvusionKvCache {
         if rounding_cell_certified {
             self.rounding_cell_certified_events += 1;
         }
-        let output = output_float.to_kind(query.kind());
         let omitted = cursor.saturating_sub(chosen.len());
         self.exact_k_tokens_scanned += cursor;
         self.exact_v_tokens_materialized += chosen.len();
         self.attention_selected_qk_elements = self
             .attention_selected_qk_elements
             .saturating_add(u128::from(cursor as u64) * 32);
+        // The sparse payload avoids V materialization, but the zero-filled
+        // canonical tensor still submits a dense PV geometry to SDPA.  Do not
+        // misreport I/O savings as Transformer arithmetic savings.
         self.attention_selected_pv_elements = self
             .attention_selected_pv_elements
-            .saturating_add(u128::from(chosen.len() as u64) * 32 * 128);
+            .saturating_add(u128::from(cursor as u64) * 32 * 128);
         self.attention_v_tokens_avoided = self.attention_v_tokens_avoided.saturating_add(omitted);
         self.exact_mass_max_bound = self
             .exact_mass_max_bound
@@ -2707,18 +2713,6 @@ impl TerrsvusionKvCache {
             / (self.head_dim as f64).sqrt())
         .to_kind(Kind::Float)
         .contiguous();
-        let total_tokens = preassembled_key.size()[2] as usize;
-        let mut mask_values = vec![0.0f32; query_tokens * total_tokens];
-        for query_index in 0..query_tokens {
-            for key_index in self.sequence_tokens + query_index + 1..total_tokens {
-                mask_values[query_index * total_tokens + key_index] = f32::NEG_INFINITY;
-            }
-        }
-        let causal_mask =
-            Tensor::from_slice(&mask_values).view([1, 1, query_tokens as i64, total_tokens as i64]);
-        let precomputed_probabilities = (precomputed_scores.shallow_clone() + causal_mask)
-            .softmax(-1, Kind::Float)
-            .contiguous();
         // Exact diagnostic authority must have the same batched geometry and
         // causal mask as the canonical prefill. A sequence of one-query SDPA
         // calls is mathematically equivalent, but not necessarily bit-exact
@@ -2754,10 +2748,6 @@ impl TerrsvusionKvCache {
                 .narrow(2, query_index as i64, 1)
                 .narrow(3, 0, causal_tokens as i64)
                 .contiguous();
-            let query_probabilities = precomputed_probabilities
-                .narrow(2, query_index as i64, 1)
-                .narrow(3, 0, causal_tokens as i64)
-                .contiguous();
             let avoided_before = self.attention_v_tokens_avoided;
             let candidate = self.llama_certified_value_attention(
                 layer_index,
@@ -2766,7 +2756,6 @@ impl TerrsvusionKvCache {
                 Some(&tail),
                 Some(&preassembled_key),
                 Some(&query_scores),
-                Some(&query_probabilities),
                 logical_history,
                 tolerance,
             )?;
@@ -4577,7 +4566,6 @@ impl AttentionCache for TerrsvusionKvCache {
                     query,
                     &pages,
                     tail.as_ref(),
-                    None,
                     None,
                     None,
                     self.sequence_tokens,
@@ -8008,7 +7996,6 @@ mod tests {
                 Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
                 None,
                 None,
-                None,
                 16,
                 1e-3,
             )
@@ -8025,6 +8012,18 @@ mod tests {
             "la selección de contribución materializó demasiada V: {selected}"
         );
         assert!(count >= selected);
+        assert!(
+            output.equal(&full),
+            "la V omitida y rellenada con cero debe conservar la salida BF16 exacta"
+        );
+        assert_eq!(cache.rounding_cell_checked_events, 1);
+        assert_eq!(cache.rounding_cell_certified_events, 1);
+        assert_eq!(cache.attention_v_tokens_avoided, 17 - selected);
+        assert_eq!(
+            cache.attention_selected_pv_elements,
+            17 * 32 * 128,
+            "omitir lecturas V no debe declararse como PV disperso: SDPA recibió la geometría completa"
+        );
         let result = output.to_kind(Kind::Float).contiguous();
         let reference = full.to_kind(Kind::Float).contiguous();
         let mut actual = vec![0.0f32; 32 * 128];
@@ -8059,7 +8058,6 @@ mod tests {
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
                     None,
                     None,
-                    None,
                     16,
                     1e-3
                 )
@@ -8073,7 +8071,6 @@ mod tests {
                     &q,
                     std::slice::from_ref(&page),
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
-                    None,
                     None,
                     None,
                     16,
@@ -8090,7 +8087,6 @@ mod tests {
                     &zero,
                     &[page],
                     Some(&(tailk, tailv)),
-                    None,
                     None,
                     None,
                     16,
