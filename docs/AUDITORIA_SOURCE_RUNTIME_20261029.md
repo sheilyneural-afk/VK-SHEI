@@ -153,6 +153,51 @@ concurrencia entre ejecutores, pero no varias inferencias compartiendo una
 - Equivalencia entre menos lecturas de `ColdStore` y menos operaciones de
   atención del Transformer.
 
+## Revalidación real desde la copia canónica del Escritorio
+
+La ejecución se repitió después de añadir los contadores de trabajo lógico al
+runtime actual, usando el binario construido desde este checkout:
+
+```text
+model=/home/yo/models/Llama-3.1-8B-Instruct
+book_tokens=128
+chunk_size=32
+storage_frame_tokens=32
+generate_tokens=1
+applied_mass_tolerance=0.001
+```
+
+Resultado de la inferencia real:
+
+```text
+certified_v_tokens_omitted=4
+attention_v_tokens_avoided=4
+exact_token_parity=true
+applied_token_ids=[31976]
+canonical_token_ids=[31976]
+max_abs_logit_difference=0.125
+tolerance=0.001
+applied_prefill_seconds=57.775381028
+canonical_prefill_seconds=3.135374928
+applied_cold_reads=18420
+canonical_cold_reads=384
+applied_exact_v_tokens_materialized=485
+canonical_exact_v_tokens_materialized=0
+attention_dense_qk_elements=0
+attention_dense_pv_elements=0
+hierarchy_k_tokens_avoided=0
+```
+
+Esta corrida cambia dos conclusiones anteriores: sí queda demostrada una
+omisión V positiva dentro de una inferencia completa de Llama, con paridad del
+token elegido en un caso real; pero no queda demostrada paridad de logits. El
+`L∞=0.125` contradice la tolerancia `1e-3`, por lo que la ruta no puede
+presentarse como equivalente exacta. Además, reducir lecturas y materialización
+de V no redujo el trabajo del Transformer: los contadores de operaciones
+densas no atribuyen ningún ahorro QK/PV y el prefill aplicado fue 18,4 veces
+más lento en esta geometría. La instrumentación es contabilidad lógica del
+runtime, no una prueba de kernels LibTorch fusionados.
+
 ## Corrección aplicada
 
 `TerrsvusionKvCache::restore_prefix` era una envoltura usada solo por tests,
