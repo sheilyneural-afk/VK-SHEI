@@ -14,10 +14,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
-use terrsvusion::document_graph::{
-    DocumentGraph, RetrievalBudget, RetrievalScope, has_substantive_document_answer,
-    is_insufficient_evidence_answer,
-};
+use terrsvusion::document_graph::DocumentGraph;
 use terrsvusion::inference_worker::{
     InferenceError, InferenceExecutor, InferencePool, SubmitError,
 };
@@ -111,37 +108,13 @@ struct AppState {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocumentQueryRequest {
     question: String,
-    #[serde(default = "default_document_scope")]
-    scope: RetrievalScope,
-    #[serde(default = "default_document_max_pages")]
-    max_pages: usize,
-    #[serde(default = "default_document_max_characters")]
-    max_characters: usize,
-    #[serde(default = "default_document_graph_hops")]
-    graph_hops: usize,
-    #[serde(default = "default_document_max_phases")]
-    max_phases: usize,
     #[serde(default = "default_document_max_tokens")]
     max_tokens: usize,
 }
 
-fn default_document_scope() -> RetrievalScope {
-    RetrievalScope::Focused
-}
-fn default_document_max_pages() -> usize {
-    8
-}
-fn default_document_max_characters() -> usize {
-    32_000
-}
-fn default_document_graph_hops() -> usize {
-    1
-}
-fn default_document_max_phases() -> usize {
-    1
-}
 fn default_document_max_tokens() -> usize {
     64
 }
@@ -445,7 +418,11 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
             "loaded": state.document_graph.is_some(),
             "path": state.document_graph_path,
             "shared_libtorch_authority_required": true,
-            "endpoint": "/v1/document/query"
+            "endpoint": "/v1/document/query",
+            "serving_mode":"persistent_full_document_exact_bf16_kv",
+            "text_retrieval_before_inference":false,
+            "first_query_builds_dense_prefix":true,
+            "later_queries_reuse_immutable_prefix":true
         }
     }))
 }
@@ -765,108 +742,58 @@ async fn document_query(
             format!("max_tokens debe estar entre 1 y {MAX_TOKENS}"),
         ));
     }
-    if !(1..=1024).contains(&request.max_phases) {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "max_phases debe estar entre 1 y 1024".to_owned(),
-        ));
-    }
-    let phases = graph
-        .retrieve_phases_with_scope(
-            &request.question,
-            RetrievalBudget {
-                max_pages: request.max_pages,
-                max_characters: request.max_characters,
-                graph_hops: request.graph_hops,
-            },
-            request.scope,
-        )
+    let document = graph
+        .full_document_context()
         .map_err(|error| ApiError(StatusCode::BAD_REQUEST, error.to_string()))?;
-    let mut receipts = Vec::new();
-    let mut final_generation = Value::Null;
-    let mut evidence_pages = Vec::new();
-    let mut cumulative_prompt_tokens = 0usize;
-    let mut answered = false;
-    for (index, phase) in phases.iter().take(request.max_phases).enumerate() {
-        let cited = phase
-            .assemble_cited_context()
-            .map_err(|error| ApiError(StatusCode::BAD_REQUEST, error.to_string()))?;
-        evidence_pages.extend(cited.evidence_pages.iter().copied());
-        let result = execute_model(
-            &state,
-            ModelRequest {
-                messages: vec![TorchChatMessage {
-                    role: "user".to_owned(),
-                    content: cited.prompt,
-                }],
-                max_tokens: request.max_tokens,
-                enable_thinking: false,
-                virgin_dense: true,
-                compare_native: false,
-                applied_mass_tolerance: None,
-            },
-        )
-        .await?;
-        let insufficient = is_insufficient_evidence_answer(&result.content)
-            || !has_substantive_document_answer(&result.content);
-        cumulative_prompt_tokens = cumulative_prompt_tokens
-            .checked_add(result.prompt_tokens)
-            .ok_or_else(|| {
-                ApiError(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "desbordamiento contando tokens documentales".to_owned(),
-                )
-            })?;
-        final_generation = serde_json::to_value(&result)
-            .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-        receipts.push(json!({
-            "phase": index + 1,
-            "evidence_pages": cited.evidence_pages,
-            "candidate_set_complete_after_phase": cited.complete_for_candidate_set,
-            "deferred_candidate_pages": cited.deferred_candidate_pages,
-            "insufficient_evidence": insufficient,
-            "generation": result
-        }));
-        if !insufficient {
-            answered = true;
-            break;
-        }
-    }
-    let phases_executed = receipts.len();
-    let candidate_set_exhausted = phases_executed == phases.len();
-    let stop_reason = if answered {
-        "answer_found"
-    } else if candidate_set_exhausted {
-        "candidate_set_exhausted_without_answer"
-    } else {
-        "max_phases_reached_without_answer"
-    };
+    let messages = with_reference_document(
+        vec![TorchChatMessage {
+            role: "user".to_owned(),
+            content: request.question.clone(),
+        }],
+        Some(document.text),
+    );
+    let result = execute_model(
+        &state,
+        ModelRequest {
+            messages,
+            max_tokens: request.max_tokens,
+            enable_thinking: false,
+            virgin_dense: false,
+            compare_native: false,
+            applied_mass_tolerance: None,
+        },
+    )
+    .await?;
     Ok(Json(json!({
-        "operation":"shared_authority_document_graph_query",
+        "operation":"persistent_full_document_kv_query",
         "question":request.question,
-        "retrieval_scope":request.scope,
         "document_pages":graph.page_count(),
         "graph_micro_spans":graph.graph_micro_span_count(),
-        "candidate_pages":phases[0].candidate_pages,
-        "broad_match_pages":phases[0].broad_match_pages,
-        "evidence_pages":evidence_pages,
-        "phases_available":phases.len(),
-        "phases_executed":phases_executed,
-        "candidate_set_exhausted":candidate_set_exhausted,
-        "stop_reason":stop_reason,
-        "cumulative_prompt_tokens":cumulative_prompt_tokens,
-        "generation":final_generation,
-        "phases":receipts,
+        "document_original_characters":document.original_characters,
+        "document_assembled_sha256":document.assembled_sha256,
+        "generation":result,
+        "persistent_prefix":{
+            "hit":result.prefix_cache_hit,
+            "tokens":result.prefix_cache_tokens,
+            "lookup_seconds":result.prefix_cache_lookup_seconds,
+            "suffix_prefill_seconds":result.prefix_cache_hydrate_seconds,
+            "copied_bytes":result.prefix_cache_copied_bytes,
+            "immutable":result.prefix_immutable
+        },
         "authority":{
             "mode":"shared_libtorch_weight_storage",
             "workers":state.workers,
             "shared_weight_tensors_verified_by_data_ptr":state.shared_weight_tensors,
             "model_loads_for_request":0,
-            "dense_selected_evidence_prefill":true
+            "full_document_original_text_prefix":true,
+            "persistent_exact_bf16_kv":true,
+            "text_retrieval_before_inference":false
         },
         "claim_boundary":{
-            "semantic_exhaustiveness_certified":false,
-            "whole_document_transformer_prefill":false
+            "first_document_prefill_is_dense":!result.prefix_cache_hit,
+            "whole_document_transformer_prefix":true,
+            "subsequent_question_reuses_prefix_kv":result.prefix_cache_hit,
+            "model_position_limit_tokens":state.model_spec.max_position_embeddings
         }
     })))
 }
@@ -1017,17 +944,23 @@ mod api_tests {
     }
 
     #[test]
-    fn document_query_defaults_are_bounded_and_focused() {
+    fn document_query_defaults_to_persistent_full_document_memory() {
         let request: DocumentQueryRequest = serde_json::from_value(json!({
             "question":"¿Cuántos habitantes tenía Puerto Gris?"
         }))
         .unwrap();
-        assert_eq!(request.scope, RetrievalScope::Focused);
-        assert_eq!(request.max_pages, 8);
-        assert_eq!(request.max_characters, 32_000);
-        assert_eq!(request.graph_hops, 1);
-        assert_eq!(request.max_phases, 1);
         assert_eq!(request.max_tokens, 64);
+    }
+
+    #[test]
+    fn document_query_rejects_obsolete_rag_controls() {
+        for obsolete in [
+            json!({"question":"dato", "scope":"focused"}),
+            json!({"question":"dato", "max_pages":8}),
+            json!({"question":"dato", "max_phases":2}),
+        ] {
+            assert!(serde_json::from_value::<DocumentQueryRequest>(obsolete).is_err());
+        }
     }
 
     fn request(fields: Value) -> ChatRequest {

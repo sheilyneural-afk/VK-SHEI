@@ -1,8 +1,15 @@
 # Grafo documental y micrometadatos verificables
 
-Estado: núcleo Rust funcional y rutas de consulta conectadas a Llama mediante
-`terrsvusion-document-ask` y `POST /v1/document/query`; todavía no conectado a
-un extractor PDF/OCR.
+Estado actual: el CLI `terrsvusion-document-ask` conserva la ruta experimental
+de recuperación textual para comparación. `POST /v1/document/query` ya no usa
+esa ruta: ensambla todas las páginas verificadas en orden, crea una vez el
+prefijo K/V BF16 de Llama y restaura ese prefijo inmutable en preguntas
+posteriores. Todavía no está conectado a un extractor PDF/OCR.
+
+Esta separación es deliberada. Recuperar páginas y reinyectarlas como prompt es
+RAG, aunque el índice sea grafal. El endpoint canónico de servicio usa memoria
+K/V completa; el grafo conserva la autoridad de páginas y micrometadatos, pero
+no selecciona texto antes de la inferencia.
 
 ## Autoridad
 
@@ -110,13 +117,31 @@ terrsvusion-server \
 
 curl -X POST http://127.0.0.1:8088/v1/document/query \
   -H 'content-type: application/json' \
-  -d '{"question":"¿Cuántos habitantes tenía Puerto Gris?","scope":"focused"}'
+  -d '{"question":"¿Cuántos habitantes tenía Puerto Gris?"}'
 ```
 
-El arranque rechaza `--document-graph` sin `--shared-authority`. Las fases se
-preparan desde el grafo residente y se envían secuencialmente al pool; ninguna
-petición documental carga un checkpoint. El prefill de evidencia usa la ruta
-densa BF16 para no confundir selección documental con omisión V experimental.
+El arranque rechaza `--document-graph` sin `--shared-authority`. Ninguna petición
+documental carga un checkpoint. La primera consulta calcula densamente el
+prefijo de todas las páginas y lo persiste en el `ColdStore` exacto. Las
+siguientes preguntas restauran ese K/V por digest, mantienen sus posiciones y
+ejecutan el Transformer solo sobre el sufijo de la pregunta. Un hit publica
+`prefix_cache.hit=true`, `immutable=true` y `copied_bytes=0`.
+
+## Prueba física del endpoint con memoria K/V
+
+La fixture de dos páginas fue atendida por Llama 3.1 8B desde el endpoint real:
+
+- primera pregunta: 192 tokens de prompt, 152 de prefijo documental, cache
+  miss, prefill 3,3725 s, total HTTP 4,8245 s, respuesta `COBALTO-73.`;
+- segunda pregunta distinta: los mismos 152 tokens de prefijo, cache hit,
+  backing inmutable, cero bytes copiados, prefill de sufijo 0,9313 s;
+- la segunda respuesta tardó 8,4447 s porque su decode consumió 6,5839 s, no
+  porque se releyera el documento;
+- las dos respuestas fueron generadas por Llama; no hubo ranking, conjunto de
+  candidatos ni páginas recuperadas.
+
+Esto demuestra reutilización K/V en el endpoint canónico para esta fixture. No
+certifica todavía el prefill físico de las 95 páginas/117K tokens de El Faro.
 
 Para recorrer candidatos sin recargar el modelo, `--max-phases` permite varias
 fases sobre un único ranking inmutable. Cada página se materializa una sola vez;
@@ -168,7 +193,7 @@ documento completo, evitó 115.586 posiciones y respondió
 una salida de solo cita (`[Página 1]`) y ya no la acepta como respuesta
 sustantiva.
 
-## Prueba HTTP sobre autoridad compartida
+## Prueba HTTP histórica de la antigua ruta RAG
 
 Se arrancó el servidor real con Llama 3.1 8B, el grafo de 95 páginas,
 `--shared-authority`, un worker y el endpoint documental. Evidencia observada:
@@ -184,8 +209,9 @@ Se arrancó el servidor real con Llama 3.1 8B, el grafo de 95 páginas,
 - RSS residente después de la petición: 16.384.728 KiB;
 - parada limpia del servidor tras la medición.
 
-Esto demuestra la conexión grafo -> endpoint -> pool -> LibTorch compartido.
-No demuestra exhaustividad semántica.
+Esta medición corresponde al endpoint anterior a la memoria K/V completa. Se
+conserva como comparación histórica de coste, no como descripción del servicio
+actual ni como arquitectura Terravision final.
 
 ## Concurrencia documental multiworker
 
@@ -254,10 +280,11 @@ evitado supere el coste de las instrucciones repetidas.
 
 - No extrae directamente PDF, EPUB, DOCX ni imágenes.
 - No genera entidades o relaciones mediante Llama.
-- No enlaza todavía páginas documentales con prefijos/KV de ColdStore.
-- Ensambla el prompt final y continúa por el ranking cuando Llama devuelve
-  exactamente evidencia insuficiente. Todavía no cambia automáticamente de
-  alcance focal a exhaustivo ni usa una síntesis acumulativa entre fases.
+- El endpoint canónico ya enlaza el documento completo con un prefijo K/V de
+  ColdStore. El primer prefill sigue siendo denso y no se ha ejecutado todavía
+  físicamente a 30K/100K/131K.
+- La recuperación por fases permanece solo en el CLI experimental; no es la
+  autoridad del endpoint documental.
 - No certifica exhaustividad semántica.
 - La medición anterior demuestra menos posiciones QK/PV para una consulta; no
   constituye todavía una equivalencia general entre esa contabilidad y tiempo

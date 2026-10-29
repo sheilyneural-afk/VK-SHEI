@@ -138,6 +138,14 @@ pub struct CitedEvidenceContext {
     pub deferred_candidate_pages: Vec<u32>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FullDocumentContext {
+    pub text: String,
+    pub pages: usize,
+    pub original_characters: usize,
+    pub assembled_sha256: String,
+}
+
 impl RetrievalPhase {
     /// Builds a model-facing context without changing or summarizing evidence.
     /// Exact tokenizer accounting belongs to the selected model runtime.
@@ -274,6 +282,31 @@ impl DocumentGraph {
 
     pub fn page_metadata(&self, page_number: u32) -> Option<&PageMicroMetadata> {
         self.metadata.get(&page_number)
+    }
+
+    /// Assemble the complete verified document for one persistent Transformer
+    /// prefix. This is not retrieval: every page is included in authority
+    /// order and later questions reuse the resulting immutable BF16 K/V.
+    pub fn full_document_context(&self) -> Result<FullDocumentContext> {
+        self.verify_original_authority()?;
+        let original_characters = self
+            .pages
+            .values()
+            .map(|page| page.original_text.chars().count())
+            .sum();
+        let mut text = String::new();
+        for page in self.pages.values() {
+            text.push_str(&format!("\n[PÁGINA {}]\n", page.page_number));
+            text.push_str(&page.original_text);
+            text.push('\n');
+        }
+        let assembled_sha256 = sha256_hex(text.as_bytes());
+        Ok(FullDocumentContext {
+            text,
+            pages: self.pages.len(),
+            original_characters,
+            assembled_sha256,
+        })
     }
 
     pub fn full_evidence_phase(&self, query: &str) -> Result<RetrievalPhase> {
@@ -1062,6 +1095,31 @@ mod tests {
         );
         assert!(phase.complete_for_candidate_set);
         assert!(phase.deferred_candidate_pages.is_empty());
+    }
+
+    #[test]
+    fn full_document_context_contains_every_original_page_once_in_order() {
+        let graph = sample();
+        let context = graph.full_document_context().unwrap();
+        assert_eq!(context.pages, 4);
+        assert_eq!(
+            context.original_characters,
+            (1..=4)
+                .map(|page| graph.page(page).unwrap().original_text.chars().count())
+                .sum::<usize>()
+        );
+        let mut previous = 0usize;
+        for page_number in 1..=4 {
+            let page = graph.page(page_number).unwrap();
+            assert_eq!(context.text.matches(&page.original_text).count(), 1);
+            let position = context.text.find(&page.original_text).unwrap();
+            assert!(position >= previous);
+            previous = position;
+        }
+        assert_eq!(
+            context.assembled_sha256,
+            sha256_hex(context.text.as_bytes())
+        );
     }
 
     #[test]
