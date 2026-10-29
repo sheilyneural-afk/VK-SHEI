@@ -235,6 +235,24 @@ checkpoint y que la comprobación de generación no conserva un `131072`
 independiente oculto. No certifica una inferencia completa a 30K, 100K o
 131.072 tokens; esas tres certificaciones siguen abiertas.
 
+### Intento de certificación real a 30.000 tokens
+
+Se lanzó la ruta canónica densa del binario Rust contra el checkpoint Llama
+real, sin omisión:
+
+```text
+book_tokens=30000
+chunk_size=512
+storage_frame_tokens=512
+generate_tokens=1
+timeout=300 s
+```
+
+El proceso permaneció activo hasta el timeout sin emitir el JSON final. La
+observación del proceso registró aproximadamente `16.406.172 KiB` de RSS y
+`~811%` de CPU antes de su terminación. Resultado de certificación: `TIMEOUT`,
+no certificado. No se extrapola este intento a 100K ni 131.072 tokens.
+
 ## Corrección aplicada
 
 `TerrsvusionKvCache::restore_prefix` era una envoltura usada solo por tests,
