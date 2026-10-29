@@ -2086,7 +2086,7 @@ impl TerrsvusionKvCache {
             tail_float.copy_data(&mut tail_values, 2 * tail_tokens * 128);
             exact_scores(&query_values, &tail_values, tail_tokens, scale)
         });
-        let mut regional_certificate = IncrementalRegionCertificate::new(
+        let mut regional_certificate = IncrementalRegionCertificate::<16, 2>::new(
             &state_uppers,
             &state_value_max,
             tail_scores.as_ref(),
@@ -3070,22 +3070,22 @@ fn omitted_region_bounds(
 /// region after each widening round is unnecessary.  This accumulator keeps
 /// the same proof quantities in a fixed exponential reference frame and
 /// updates only the state that has just been materialized.
-struct IncrementalRegionCertificate {
-    reference: [f64; 16],
-    kept_mass: [f64; 16],
-    omitted_upper_mass: [f64; 16],
-    kept_value_max: [f64; 2],
-    omitted_value_desc: [Vec<(usize, f64)>; 2],
-    omitted_value_cursor: [usize; 2],
+struct IncrementalRegionCertificate<const Q: usize, const KV: usize> {
+    reference: [f64; Q],
+    kept_mass: [f64; Q],
+    omitted_upper_mass: [f64; Q],
+    kept_value_max: [f64; KV],
+    omitted_value_desc: [Vec<(usize, f64)>; KV],
+    omitted_value_cursor: [usize; KV],
     remaining: BTreeSet<usize>,
 }
 
-impl IncrementalRegionCertificate {
+impl<const Q: usize, const KV: usize> IncrementalRegionCertificate<Q, KV> {
     fn new(
-        state_uppers: &BTreeMap<usize, [f64; 16]>,
-        state_value_max: &BTreeMap<usize, [f64; 2]>,
+        state_uppers: &BTreeMap<usize, [f64; Q]>,
+        state_value_max: &BTreeMap<usize, [f64; KV]>,
         always_kept_scores: Option<&Vec<Vec<f64>>>,
-        always_kept_value_max: [f64; 2],
+        always_kept_value_max: [f64; KV],
     ) -> Result<Self> {
         ensure!(
             !state_uppers.is_empty(),
@@ -3138,7 +3138,7 @@ impl IncrementalRegionCertificate {
             omitted_upper_mass,
             kept_value_max: always_kept_value_max,
             omitted_value_desc,
-            omitted_value_cursor: [0; 2],
+            omitted_value_cursor: std::array::from_fn(|_| 0),
             remaining: state_uppers.keys().copied().collect(),
         })
     }
@@ -3147,15 +3147,15 @@ impl IncrementalRegionCertificate {
         &mut self,
         state: usize,
         exact_scores: &[Vec<f64>],
-        state_uppers: &BTreeMap<usize, [f64; 16]>,
-        state_value_max: &BTreeMap<usize, [f64; 2]>,
+        state_uppers: &BTreeMap<usize, [f64; Q]>,
+        state_value_max: &BTreeMap<usize, [f64; KV]>,
     ) -> Result<()> {
         ensure!(
             self.remaining.remove(&state),
             "región materializada dos veces"
         );
         ensure!(
-            exact_scores.len() == 16
+            exact_scores.len() == Q
                 && exact_scores.iter().all(
                     |scores| !scores.is_empty() && scores.iter().all(|score| score.is_finite())
                 ),
@@ -3164,7 +3164,7 @@ impl IncrementalRegionCertificate {
         let upper = state_uppers
             .get(&state)
             .context("cota incremental ausente")?;
-        for head in 0..16 {
+        for head in 0..Q {
             let exact_log_mass = logsumexp_finite(exact_scores[head].iter().copied());
             ensure!(
                 exact_log_mass <= upper[head] + 1e-8,
@@ -3192,7 +3192,7 @@ impl IncrementalRegionCertificate {
     }
 
     fn bounds(&self) -> Vec<f64> {
-        (0..16)
+        (0..Q)
             .map(|head| {
                 if self.remaining.is_empty() {
                     return 0.0;
@@ -6233,9 +6233,13 @@ mod tests {
         let state_uppers = BTreeMap::from([(10, [-3.0; 16]), (20, [-7.0; 16]), (30, [-11.0; 16])]);
         let state_value_max =
             BTreeMap::from([(10, [1.0, 1.5]), (20, [2.0, 2.5]), (30, [3.0, 3.5])]);
-        let mut incremental =
-            IncrementalRegionCertificate::new(&state_uppers, &state_value_max, None, [0.0; 2])
-                .unwrap();
+        let mut incremental = IncrementalRegionCertificate::<16, 2>::new(
+            &state_uppers,
+            &state_value_max,
+            None,
+            [0.0; 2],
+        )
+        .unwrap();
         let exact = vec![vec![-8.0, -9.0]; 16];
         incremental
             .materialize(20, &exact, &state_uppers, &state_value_max)
@@ -6256,14 +6260,14 @@ mod tests {
         let state_uppers = BTreeMap::from([(10, [-10.0; 16])]);
         let state_value_max = BTreeMap::from([(10, [1.0, 1.0])]);
         let tail_scores = vec![vec![0.0]; 16];
-        let without_tail_value = IncrementalRegionCertificate::new(
+        let without_tail_value = IncrementalRegionCertificate::<16, 2>::new(
             &state_uppers,
             &state_value_max,
             Some(&tail_scores),
             [0.0; 2],
         )
         .unwrap();
-        let with_tail_value = IncrementalRegionCertificate::new(
+        let with_tail_value = IncrementalRegionCertificate::<16, 2>::new(
             &state_uppers,
             &state_value_max,
             Some(&tail_scores),
@@ -6271,6 +6275,25 @@ mod tests {
         )
         .unwrap();
         assert!(with_tail_value.bounds()[0] > without_tail_value.bounds()[0] * 50.0);
+    }
+
+    #[test]
+    fn incremental_region_certificate_supports_llama_32q_8kv_geometry() {
+        let state_uppers = BTreeMap::from([(10, [(-3.0_f64); 32]), (20, [(-7.0_f64); 32])]);
+        let state_value_max = BTreeMap::from([(10, [1.0_f64; 8]), (20, [2.0_f64; 8])]);
+        let mut certificate = IncrementalRegionCertificate::<32, 8>::new(
+            &state_uppers,
+            &state_value_max,
+            None,
+            [0.0; 8],
+        )
+        .unwrap();
+        let exact = vec![vec![-8.0, -9.0]; 32];
+        certificate
+            .materialize(20, &exact, &state_uppers, &state_value_max)
+            .unwrap();
+        assert_eq!(certificate.bounds().len(), 32);
+        assert!(certificate.bounds().iter().all(|bound| bound.is_finite()));
     }
 
     #[test]
