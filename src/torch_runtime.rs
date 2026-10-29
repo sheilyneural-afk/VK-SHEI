@@ -4562,6 +4562,60 @@ impl TorchModelRuntime {
         })
     }
 
+    /// Build another movable executor whose LibTorch tensor handles reference
+    /// the exact same immutable checkpoint storage. KV caches remain local to
+    /// each generation call and are never shared by this operation.
+    pub fn shallow_clone_shared_weights(&self) -> Result<Self> {
+        let clone = Self {
+            model: MiniCpmModel {
+                embedding: self.model.embedding.shallow_clone(),
+                layers: self
+                    .model
+                    .layers
+                    .iter()
+                    .map(MiniCpmLayer::shallow_clone_shared_weights)
+                    .collect(),
+                final_norm: self.model.final_norm.shallow_clone(),
+                lm_head: self.model.lm_head.shallow_clone(),
+                rms_eps: self.model.rms_eps,
+                eos: self.model.eos.clone(),
+                chat: self.model.chat,
+                query_heads: self.model.query_heads,
+                kv_heads: self.model.kv_heads,
+                head_dim: self.model.head_dim,
+                streaming_prefill: self.model.streaming_prefill,
+                declared_context_limit: self.model.declared_context_limit,
+            },
+            tokenizer: self.tokenizer.clone(),
+            prefix_cache_dir: self.prefix_cache_dir.clone(),
+            model_identity: self.model_identity.clone(),
+        };
+        ensure!(
+            self.shares_all_weight_storage_with(&clone),
+            "el clon LibTorch no comparte todos los pesos del checkpoint"
+        );
+        Ok(clone)
+    }
+
+    pub fn weight_storage_count(&self) -> usize {
+        self.weight_storage_ids().len()
+    }
+
+    pub fn shares_all_weight_storage_with(&self, other: &Self) -> bool {
+        self.weight_storage_ids() == other.weight_storage_ids()
+    }
+
+    fn weight_storage_ids(&self) -> Vec<usize> {
+        let mut ids = Vec::with_capacity(3 + self.model.layers.len() * 9);
+        ids.push(self.model.embedding.data_ptr() as usize);
+        for layer in &self.model.layers {
+            layer.weight_storage_ids(&mut ids);
+        }
+        ids.push(self.model.final_norm.data_ptr() as usize);
+        ids.push(self.model.lm_head.data_ptr() as usize);
+        ids
+    }
+
     fn runtime_identity(weight_path: &Path, tokenizer_path: &Path) -> Result<String> {
         let mut digest = Sha256::new();
         for path in [weight_path, tokenizer_path] {
@@ -6496,6 +6550,40 @@ impl TorchModelRuntime {
 }
 
 impl MiniCpmLayer {
+    fn shallow_clone_shared_weights(&self) -> Self {
+        Self {
+            input_norm: self.input_norm.shallow_clone(),
+            q: self.q.shallow_clone(),
+            k: self.k.shallow_clone(),
+            v: self.v.shallow_clone(),
+            o: self.o.shallow_clone(),
+            post_norm: self.post_norm.shallow_clone(),
+            gate: self.gate.shallow_clone(),
+            up: self.up.shallow_clone(),
+            down: self.down.shallow_clone(),
+            query_heads: self.query_heads,
+            kv_heads: self.kv_heads,
+            head_dim: self.head_dim,
+            rope_theta: self.rope_theta,
+            rms_eps: self.rms_eps,
+            llama3_rope: self.llama3_rope,
+        }
+    }
+
+    fn weight_storage_ids(&self, ids: &mut Vec<usize>) {
+        ids.extend([
+            self.input_norm.data_ptr() as usize,
+            self.q.data_ptr() as usize,
+            self.k.data_ptr() as usize,
+            self.v.data_ptr() as usize,
+            self.o.data_ptr() as usize,
+            self.post_norm.data_ptr() as usize,
+            self.gate.data_ptr() as usize,
+            self.up.data_ptr() as usize,
+            self.down.data_ptr() as usize,
+        ]);
+    }
+
     fn load(weights: &WeightArchive, layer: usize, geometry: &DecoderGeometry) -> Result<Self> {
         let p = format!("model.layers.{layer}");
         let hidden = geometry.hidden;
@@ -6868,6 +6956,50 @@ mod tests {
             batched_output.equal(&querywise_output),
             "SDPA causal batida y querywise completa divergen: L∞={linf}"
         );
+    }
+
+    #[test]
+    fn shallow_runtime_clone_shares_every_weight_storage() {
+        let weight = || Tensor::zeros([1], (Kind::BFloat16, Device::Cpu));
+        let authority = TorchModelRuntime {
+            model: MiniCpmModel {
+                embedding: weight(),
+                layers: vec![MiniCpmLayer {
+                    input_norm: weight(),
+                    q: weight(),
+                    k: weight(),
+                    v: weight(),
+                    o: weight(),
+                    post_norm: weight(),
+                    gate: weight(),
+                    up: weight(),
+                    down: weight(),
+                    query_heads: 1,
+                    kv_heads: 1,
+                    head_dim: 1,
+                    rope_theta: 1.0,
+                    rms_eps: 1e-5,
+                    llama3_rope: false,
+                }],
+                final_norm: weight(),
+                lm_head: weight(),
+                rms_eps: 1e-5,
+                eos: vec![1],
+                chat: ChatTemplateFamily::MiniCpm5,
+                query_heads: 1,
+                kv_heads: 1,
+                head_dim: 1,
+                streaming_prefill: false,
+                declared_context_limit: 16,
+            },
+            tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
+            prefix_cache_dir: None,
+            model_identity: "test-authority".to_owned(),
+        };
+        let clone = authority.shallow_clone_shared_weights().unwrap();
+        assert_eq!(authority.weight_storage_count(), 12);
+        assert!(authority.shares_all_weight_storage_with(&clone));
+        assert_eq!(authority.model_identity, clone.model_identity);
     }
 
     #[test]

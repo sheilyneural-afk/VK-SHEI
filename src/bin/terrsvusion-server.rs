@@ -8,7 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -100,6 +100,7 @@ struct AppState {
     preload_seconds: f64,
     workers: usize,
     shared_authority: bool,
+    shared_weight_tensors: usize,
     request_timeout: Option<Duration>,
 }
 
@@ -368,11 +369,12 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "model_checkpoint": state.model_id,
         "workers": state.workers,
         "authority_mode": if state.shared_authority {
-            "single_libtorch_authority"
+            "shared_libtorch_weight_storage"
         } else {
             "independent_libtorch_authorities"
         },
-        "libtorch_model_shared_between_workers": false,
+        "libtorch_model_shared_between_workers": state.shared_authority,
+        "shared_weight_tensors_verified_by_data_ptr": state.shared_weight_tensors,
         "model_metadata": state.model_spec.support_summary(),
         "supported_chat_models": [
             TERRSVUSION_MODEL,
@@ -425,10 +427,11 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "preload": {"model_load_seconds": state.preload_seconds},
         "workers": state.workers,
         "authority_mode": if state.shared_authority {
-            "single_libtorch_authority"
+            "shared_libtorch_weight_storage"
         } else {
             "independent_libtorch_authorities"
         },
+        "shared_weight_tensors_verified_by_data_ptr": state.shared_weight_tensors,
         "request_timeout_seconds": state
             .request_timeout
             .map(|timeout| timeout.as_secs_f64()),
@@ -449,10 +452,11 @@ async fn ready(State(state): State<AppState>) -> Json<Value> {
         "status": "ready",
         "workers": state.workers,
         "authority_mode": if state.shared_authority {
-            "single_libtorch_authority"
+            "shared_libtorch_weight_storage"
         } else {
             "independent_libtorch_authorities"
         },
+        "shared_weight_tensors_verified_by_data_ptr": state.shared_weight_tensors,
         "request_timeout_seconds": state
             .request_timeout
             .map(|timeout| timeout.as_secs_f64())
@@ -681,9 +685,7 @@ fn validate_worker_mode(workers: usize, shared_authority: bool) -> Result<()> {
     if workers == 0 || workers > 8 {
         bail!("--workers debe estar entre 1 y 8");
     }
-    if shared_authority && workers != 1 {
-        bail!("--shared-authority requiere --workers 1: tch::Tensor no es Sync");
-    }
+    let _ = shared_authority;
     Ok(())
 }
 
@@ -722,11 +724,32 @@ async fn main() -> Result<()> {
     let prefix_cache_dir =
         prefix_cache_dir.unwrap_or_else(|| model_path.join(".terrsvusion-prefix-cache"));
     let load_started = Instant::now();
-    let inference = InferencePool::spawn_many(workers, 8, |_| {
-        let runtime = TorchModelRuntime::load_with_prefix_cache(&model_path, &prefix_cache_dir)
+    let (inference, shared_weight_tensors) = if shared_authority {
+        let authority = TorchModelRuntime::load_with_prefix_cache(&model_path, &prefix_cache_dir)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(TorchExecutor { runtime })
-    })?;
+        let shared_weight_tensors = authority.weight_storage_count();
+        let mut executors = VecDeque::with_capacity(workers);
+        for _ in 1..workers {
+            let runtime = authority
+                .shallow_clone_shared_weights()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            executors.push_back(TorchExecutor { runtime });
+        }
+        executors.push_front(TorchExecutor { runtime: authority });
+        let inference = InferencePool::spawn_many(workers, 8, |_| {
+            executors
+                .pop_front()
+                .ok_or_else(|| std::io::Error::other("falta executor LibTorch compartido"))
+        })?;
+        (inference, shared_weight_tensors)
+    } else {
+        let inference = InferencePool::spawn_many(workers, 8, |_| {
+            let runtime = TorchModelRuntime::load_with_prefix_cache(&model_path, &prefix_cache_dir)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            Ok(TorchExecutor { runtime })
+        })?;
+        (inference, 0)
+    };
     let state = AppState {
         inference,
         model_id: model_path
@@ -738,6 +761,7 @@ async fn main() -> Result<()> {
         model_spec,
         workers,
         shared_authority,
+        shared_weight_tensors,
         request_timeout: (request_timeout_secs > 0)
             .then_some(Duration::from_secs(request_timeout_secs)),
     };
@@ -767,14 +791,10 @@ mod api_tests {
     use super::*;
 
     #[test]
-    fn shared_authority_is_explicitly_single_worker() {
+    fn shared_authority_accepts_multiple_workers() {
         assert!(validate_worker_mode(1, true).is_ok());
-        let error = validate_worker_mode(2, true).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("--shared-authority requiere --workers 1")
-        );
+        assert!(validate_worker_mode(2, true).is_ok());
+        assert!(validate_worker_mode(8, true).is_ok());
         assert!(validate_worker_mode(2, false).is_ok());
     }
 

@@ -77,9 +77,8 @@ es la ruta predeterminada.
   `1e-6`.
 - Certificación de 30.000, 100.000 o 131.072 tokens.
 - Métricas completas de RSS, workspace interno de LibTorch o VRAM.
-- Varias inferencias sobre la misma autoridad LibTorch. El paralelismo medido
-  corresponde a N copias del modelo, no a varias inferencias concurrentes
-  compartiendo una única autoridad LibTorch.
+- Rendimiento, RSS total y escalado bajo carga de varias inferencias
+  concurrentes sobre los pesos LibTorch compartidos.
 
 ## Compilación
 
@@ -1014,11 +1013,15 @@ curl -sS http://127.0.0.1:8088/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Hola"}],"max_tokens":32}'
 ```
 
-El servidor usa un pool de hilos propietarios (`--workers`, 1–8). Cada worker
-carga su propia autoridad BF16; no se comparte un módulo LibTorch entre
-peticiones. La cola de cada worker tiene ocho slots. La saturación se devuelve
-como HTTP 429; un pool detenido se devuelve como 503. Dos peticiones pueden
-ejecutarse a la vez si hay al menos dos workers.
+El servidor usa un pool de hilos propietarios (`--workers`, 1–8). Sin opciones
+adicionales, cada worker carga una autoridad BF16 independiente. Con
+`--shared-authority`, el checkpoint se carga una vez y cada worker recibe
+handles `Tensor::shallow_clone()` que comparten el mismo almacenamiento
+LibTorch inmutable; el arranque comprueba la identidad de todos los `data_ptr`.
+Las cachés KV siguen siendo privadas por petición. La cola de cada worker tiene
+ocho slots. La saturación se devuelve como HTTP 429; un pool detenido se
+devuelve como 503. Dos peticiones pueden ejecutarse a la vez si hay al menos
+dos workers.
 
 Límites operativos actuales:
 
@@ -1156,10 +1159,12 @@ coste cuadrático del primer prefill.
 
 ### Servidor y paralelismo verificado
 
-- 52 tests, incluido un pool de dos ejecutores que atiende dos jobs a la vez.
-  Esto demuestra aislamiento y servicio concurrente, no varias inferencias
-  compartiendo una única autoridad LibTorch: cada ejecutor mantiene su propia
-  copia del modelo.
+- El pool de dos ejecutores atiende dos jobs a la vez. En modo
+  `--shared-authority`, los workers conservan ejecutores separados pero todos
+  los tensores de peso apuntan al mismo almacenamiento LibTorch.
+- Arranque real MiniCPM5-1B con dos workers compartidos: 219 tensores de peso
+  verificados por igualdad de `data_ptr`; `/v1/capabilities` devolvió
+  `libtorch_model_shared_between_workers=true`.
 - Release con `panic = "unwind"`: el test de pánico recupera y sirve el job
   siguiente.
 - Drop de la respuesta cancela un job aún en cola.
@@ -1191,8 +1196,8 @@ coste cuadrático del primer prefill.
   `1e-6`.
 - Certificación de 30.000, 100.000 o 131.072 tokens.
 - Métricas completas de RSS, workspace interno de LibTorch o VRAM.
-- Varias inferencias sobre *la misma* autoridad LibTorch (el paralelismo real
-  es N copias del modelo).
+- Escalado de latencia, throughput y RSS con carga concurrente prolongada sobre
+  la autoridad LibTorch compartida.
 
 ## Próxima decisión basada en evidencia
 

@@ -134,10 +134,29 @@ solución para el primer análisis de un documento nuevo.
 
 ### Paralelismo LibTorch
 
-`src/bin/terrsvusion-server.rs` llama a `InferencePool::spawn_many`. Cada
-ejecutor carga su propio `TorchModelRuntime`. El pool prueba aislamiento y
-concurrencia entre ejecutores, pero no varias inferencias compartiendo una
-única autoridad LibTorch.
+`src/bin/terrsvusion-server.rs` llama a `InferencePool::spawn_many`. El modo
+predeterminado conserva autoridades independientes. El modo explícito
+`--shared-authority` carga un único `TorchModelRuntime` y construye los demás
+ejecutores mediante clones superficiales de todos los tensores de peso. Cada
+handle se mueve a su hilo propietario, mientras el almacenamiento C++ BF16
+permanece compartido. El arranque compara los `data_ptr` de embeddings, pesos
+de todas las capas, norma final y `lm_head`; cualquier diferencia impide
+arrancar.
+
+Prueba real con MiniCPM5-1B:
+
+```text
+--workers 2 --shared-authority
+authority_mode=shared_libtorch_weight_storage
+libtorch_model_shared_between_workers=true
+shared_weight_tensors_verified_by_data_ptr=219
+GET /v1/capabilities -> HTTP 200
+GET /ready -> HTTP 200
+```
+
+Esto demuestra una sola residencia física de pesos LibTorch accesible desde
+dos ejecutores. Las cachés KV continúan siendo privadas por petición. No mide
+todavía throughput, RSS total ni escalado bajo carga concurrente prolongada.
 
 ## No demostrado después de la auditoría
 
@@ -149,7 +168,8 @@ concurrencia entre ejecutores, pero no varias inferencias compartiendo una
 - Reducción del coste cuadrático del primer prefill.
 - Equivalencia certificada a 30K, 100K o 131.072 tokens.
 - RSS completo, workspace interno de LibTorch o VRAM total en las pruebas CPU.
-- Varias inferencias sobre una única instancia LibTorch compartida.
+- Rendimiento y RSS bajo carga concurrente sobre los pesos LibTorch
+  compartidos.
 - Equivalencia entre menos lecturas de `ColdStore` y menos operaciones de
   atención del Transformer.
 
