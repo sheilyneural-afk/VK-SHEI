@@ -1,0 +1,138 @@
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use terrsvusion::document_graph::{DocumentGraph, RetrievalBudget};
+
+#[derive(Debug, Deserialize)]
+struct InputPage {
+    page_number: u32,
+    #[serde(default)]
+    section: Option<String>,
+    original_text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BuildReceipt {
+    operation: &'static str,
+    document_id: String,
+    version_hash: String,
+    page_count: usize,
+    output: PathBuf,
+    original_text_authority_verified: bool,
+}
+
+fn main() -> Result<()> {
+    let mut arguments = std::env::args().skip(1);
+    match arguments.next().as_deref() {
+        Some("build") => build(arguments.collect()),
+        Some("query") => query(arguments.collect()),
+        Some("--help" | "-h") | None => {
+            print_help();
+            Ok(())
+        }
+        Some(command) => bail!("unknown terrsvusion-document command: {command}"),
+    }
+}
+
+fn build(arguments: Vec<String>) -> Result<()> {
+    let mut document_id = None;
+    let mut version_hash = None;
+    let mut pages_path = None;
+    let mut output = None;
+    let mut values = arguments.into_iter();
+    while let Some(argument) = values.next() {
+        match argument.as_str() {
+            "--document-id" => document_id = values.next(),
+            "--version" => version_hash = values.next(),
+            "--pages" => pages_path = values.next().map(PathBuf::from),
+            "--output" => output = values.next().map(PathBuf::from),
+            other => bail!("unknown build option: {other}"),
+        }
+    }
+    let document_id = document_id.context("build requires --document-id")?;
+    let version_hash = version_hash.context("build requires --version")?;
+    let pages_path = pages_path.context("build requires --pages")?;
+    let output = output.context("build requires --output")?;
+    let bytes = std::fs::read(&pages_path)
+        .with_context(|| format!("read page input {}", pages_path.display()))?;
+    let pages: Vec<InputPage> = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse page input {}", pages_path.display()))?;
+    let graph = DocumentGraph::build(
+        document_id.clone(),
+        version_hash.clone(),
+        pages
+            .into_iter()
+            .map(|page| (page.page_number, page.section, page.original_text))
+            .collect(),
+    )?;
+    graph.save_atomic(&output)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&BuildReceipt {
+            operation: "document_graph_build",
+            document_id,
+            version_hash,
+            page_count: graph.page_count(),
+            output,
+            original_text_authority_verified: true,
+        })?
+    );
+    Ok(())
+}
+
+fn query(arguments: Vec<String>) -> Result<()> {
+    let mut graph_path = None;
+    let mut text = None;
+    let mut max_pages = 8usize;
+    let mut max_characters = 32_000usize;
+    let mut graph_hops = 1usize;
+    let mut values = arguments.into_iter();
+    while let Some(argument) = values.next() {
+        match argument.as_str() {
+            "--graph" => graph_path = values.next().map(PathBuf::from),
+            "--text" => text = values.next(),
+            "--max-pages" => {
+                max_pages = values
+                    .next()
+                    .context("--max-pages requires a value")?
+                    .parse()?
+            }
+            "--max-characters" => {
+                max_characters = values
+                    .next()
+                    .context("--max-characters requires a value")?
+                    .parse()?
+            }
+            "--graph-hops" => {
+                graph_hops = values
+                    .next()
+                    .context("--graph-hops requires a value")?
+                    .parse()?
+            }
+            other => bail!("unknown query option: {other}"),
+        }
+    }
+    let graph_path = graph_path.context("query requires --graph")?;
+    let text = text.context("query requires --text")?;
+    let graph = DocumentGraph::load_verified(&graph_path)?;
+    let phase = graph.retrieve_phase(
+        &text,
+        RetrievalBudget {
+            max_pages,
+            max_characters,
+            graph_hops,
+        },
+    )?;
+    println!("{}", serde_json::to_string_pretty(&phase)?);
+    Ok(())
+}
+
+fn print_help() {
+    println!("Terrsvusion lossless document graph and micro-metadata router");
+    println!(
+        "  terrsvusion-document build --document-id ID --version HASH --pages pages.json --output graph.json"
+    );
+    println!(
+        "  terrsvusion-document query --graph graph.json --text QUESTION [--max-pages 8] [--max-characters 32000] [--graph-hops 1]"
+    );
+}

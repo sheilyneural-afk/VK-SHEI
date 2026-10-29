@@ -9,6 +9,7 @@ pub mod adaptive_extent;
 pub mod attention_certificate;
 pub mod cold_store;
 pub mod conversion_worker;
+pub mod document_graph;
 pub mod inference_worker;
 #[cfg(feature = "torch-backend")]
 pub mod prefill_tch;
