@@ -342,3 +342,19 @@ Error: omisión aplicada rechazada: L∞ de logits 0.125000000 supera la toleran
 El planificador queda integrado como candidato fail-closed; la API sigue
 deshabilitada y la paridad de logits del checkpoint real continúa sin
 demostrarse.
+
+La instrumentación de esta ruta separa ahora cuatro magnitudes lógicas:
+
+```text
+attention_dense_qk_elements
+attention_dense_pv_elements
+attention_selected_qk_elements
+attention_selected_pv_elements
+```
+
+Las dos primeras son el baseline denso por evento y las dos últimas cuentan
+las regiones realmente cargadas por el planificador. `attention_v_tokens_avoided`
+se mantiene como métrica de almacenamiento/lectura V. Estas cifras son
+contabilidad de operaciones lógicas del runtime; no son una prueba de los
+kernels internos ni de RSS/VRAM de LibTorch. La API no expone el planificador
+mientras la comparación final de logits siga fallando.
