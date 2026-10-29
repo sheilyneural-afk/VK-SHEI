@@ -2613,14 +2613,24 @@ fn state_score_uppers(
     query_values: &[f32],
     scale: f64,
 ) -> BTreeMap<usize, [f64; 16]> {
-    let mut fragments = BTreeMap::<usize, [Vec<f64>; 16]>::new();
+    state_score_uppers_generic::<16, 2>(pages, query_values, scale)
+}
+
+fn state_score_uppers_generic<const Q: usize, const KV: usize>(
+    pages: &[TerrsvusionPage],
+    query_values: &[f32],
+    scale: f64,
+) -> BTreeMap<usize, [f64; Q]> {
+    debug_assert_eq!(Q % KV, 0);
+    debug_assert_eq!(query_values.len(), Q * 128);
+    let mut fragments = BTreeMap::<usize, [Vec<f64>; Q]>::new();
     for page in pages {
         for region in &page.certificate.regions {
             let state = fragments
                 .entry(region.block_id)
                 .or_insert_with(|| std::array::from_fn(|_| Vec::new()));
-            for head in 0..16 {
-                let kv_head = head / 8;
+            for head in 0..Q {
+                let kv_head = head / (Q / KV);
                 let query = &query_values[head * 128..(head + 1) * 128];
                 let mut upper = 0.0_f64;
                 for (dimension, query_value) in query.iter().copied().enumerate() {
