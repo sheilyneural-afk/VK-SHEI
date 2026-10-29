@@ -173,3 +173,31 @@ Esta corrección no amplía el contexto ni convierte 131.072 en 3 millones: RoPE
 la memoria de atención y la capacidad del modelo siguen limitadas por el
 checkpoint. Es una corrección de autoridad de configuración, no una certificación
 de contexto largo.
+
+## Prefill Llama con tolerancia positiva: primera ejecución completa
+
+Se añadió una ruta opt-in de prefill causal token a token para Llama cuando la
+petición incluye `applied_mass_tolerance`. La ruta usa la misma función de
+certificación de V que el decode de un token; la ruta exacta predeterminada
+continúa usando prefill por bloques.
+
+Ejecución contra `/home/yo/models/Llama-3.1-8B-Instruct`:
+
+```text
+book_tokens=256
+chunk_size=32
+storage_frame_tokens=32
+applied_mass_tolerance=0.001
+certified_v_tokens_omitted=71
+exact_token_parity=true
+max_abs_logit_difference=0.125
+prefill_seconds_applied=149.780652217
+prefill_seconds_canonical=5.443281626
+```
+
+Esto cierra la afirmación de que la omisión positiva puede ejecutarse en el
+prefill completo de Llama, pero no cierra la paridad de logits: el token fue el
+mismo y los logits no fueron idénticos. También demuestra que la implementación
+token a token es actualmente demasiado lenta en CPU; no se presenta como una
+reducción de coste. La siguiente corrección necesaria es un certificador de
+salida final o un fallback exacto antes de publicar una respuesta aproximada.

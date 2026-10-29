@@ -3564,6 +3564,24 @@ impl MiniCpmModel {
         let hidden = MiniCpmLayer::rms_norm(&hidden, &self.final_norm, self.rms_eps);
         Ok(hidden.matmul(&self.lm_head.transpose(0, 1)))
     }
+
+    /// Causal prefill path used only by the explicit positive-tolerance Llama
+    /// experiment. A multi-token SDPA call cannot apply the one-query
+    /// certificate safely, so this path advances one token at a time and
+    /// lets the cache decide whether that query can omit V. The exact default
+    /// continues to use batched prefill.
+    fn forward_certified_prefill<C: AttentionCache>(
+        &self,
+        token_ids: &[i64],
+        cache: &mut C,
+    ) -> Result<Tensor> {
+        ensure!(!token_ids.is_empty(), "prefill certificado sin tokens");
+        let mut logits = None;
+        for &token in token_ids {
+            logits = Some(self.forward_with_cache(&[token], cache)?);
+        }
+        logits.context("prefill certificado sin salida")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4801,6 +4819,7 @@ impl TorchModelRuntime {
             && !shadow_metrics_enabled
             && applied_mass_tolerance.is_none()
             && !record_step_logits;
+        let certified_prefill = self.model.streaming_prefill && applied_mass_tolerance.is_some();
         let drafter = DeterministicSuffixDrafter::build(prompt_ids);
         let mut speculation_policy = AdaptiveSpeculationPolicy::new();
         let mut speculative_rounds = 0_usize;
@@ -4825,7 +4844,11 @@ impl TorchModelRuntime {
                         bail!("inferencia cancelada");
                     }
                     let chunk = chunks.next().context("sufijo sin tokens")?;
-                    let output = self.model.forward_with_cache(chunk, &mut cache)?;
+                    let output = if certified_prefill {
+                        self.model.forward_certified_prefill(chunk, &mut cache)?
+                    } else {
+                        self.model.forward_with_cache(chunk, &mut cache)?
+                    };
                     if chunks.peek().is_none() {
                         break output;
                     }
@@ -4841,7 +4864,11 @@ impl TorchModelRuntime {
                         bail!("inferencia cancelada");
                     }
                     let chunk = chunks.next().context("prefijo sin tokens")?;
-                    let output = self.model.forward_with_cache(chunk, &mut cache)?;
+                    let output = if certified_prefill {
+                        self.model.forward_certified_prefill(chunk, &mut cache)?
+                    } else {
+                        self.model.forward_with_cache(chunk, &mut cache)?
+                    };
                     if chunks.peek().is_none() {
                         break output;
                     }
@@ -4857,7 +4884,11 @@ impl TorchModelRuntime {
                     if cancelled() {
                         bail!("inferencia cancelada");
                     }
-                    logits = self.model.forward_with_cache(chunk, &mut cache)?;
+                    logits = if certified_prefill {
+                        self.model.forward_certified_prefill(chunk, &mut cache)?
+                    } else {
+                        self.model.forward_with_cache(chunk, &mut cache)?
+                    };
                 }
                 prefix_cache_hydrate_seconds = hydrate_started.elapsed().as_secs_f64();
             } else {
@@ -4867,7 +4898,11 @@ impl TorchModelRuntime {
                         bail!("inferencia cancelada");
                     }
                     let chunk = chunks.next().context("prompt sin tokens")?;
-                    let output = self.model.forward_with_cache(chunk, &mut cache)?;
+                    let output = if certified_prefill {
+                        self.model.forward_certified_prefill(chunk, &mut cache)?
+                    } else {
+                        self.model.forward_with_cache(chunk, &mut cache)?
+                    };
                     if chunks.peek().is_none() {
                         break output;
                     }
