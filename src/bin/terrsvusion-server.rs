@@ -99,6 +99,7 @@ struct AppState {
     model_spec: ModelSpec,
     preload_seconds: f64,
     workers: usize,
+    shared_authority: bool,
     request_timeout: Option<Duration>,
 }
 
@@ -367,6 +368,13 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_reference_attention_compiled": cfg!(feature = "opencl-backend"),
         "gpu_reference_attention_used_by_this_server": false,
         "model_checkpoint": state.model_id,
+        "workers": state.workers,
+        "authority_mode": if state.shared_authority {
+            "single_libtorch_authority"
+        } else {
+            "independent_libtorch_authorities"
+        },
+        "libtorch_model_shared_between_workers": false,
         "model_metadata": state.model_spec.support_summary(),
         "supported_chat_models": [
             TERRSVUSION_MODEL,
@@ -418,6 +426,11 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         },
         "preload": {"model_load_seconds": state.preload_seconds},
         "workers": state.workers,
+        "authority_mode": if state.shared_authority {
+            "single_libtorch_authority"
+        } else {
+            "independent_libtorch_authorities"
+        },
         "request_timeout_seconds": state
             .request_timeout
             .map(|timeout| timeout.as_secs_f64()),
@@ -437,6 +450,11 @@ async fn ready(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ready",
         "workers": state.workers,
+        "authority_mode": if state.shared_authority {
+            "single_libtorch_authority"
+        } else {
+            "independent_libtorch_authorities"
+        },
         "request_timeout_seconds": state
             .request_timeout
             .map(|timeout| timeout.as_secs_f64())
@@ -661,6 +679,16 @@ async fn chat(
     })))
 }
 
+fn validate_worker_mode(workers: usize, shared_authority: bool) -> Result<()> {
+    if workers == 0 || workers > 8 {
+        bail!("--workers debe estar entre 1 y 8");
+    }
+    if shared_authority && workers != 1 {
+        bail!("--shared-authority requiere --workers 1: tch::Tensor no es Sync");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut model = None;
@@ -668,6 +696,7 @@ async fn main() -> Result<()> {
     let mut host = String::from("127.0.0.1");
     let mut port = 8088_u16;
     let mut workers = 1_usize;
+    let mut shared_authority = false;
     let mut request_timeout_secs = 0_u64;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -681,15 +710,14 @@ async fn main() -> Result<()> {
             "--host" => host = it.next().context("falta --host")?,
             "--port" => port = it.next().context("falta --port")?.parse()?,
             "--workers" => workers = it.next().context("falta --workers")?.parse()?,
+            "--shared-authority" => shared_authority = true,
             "--request-timeout-secs" => {
                 request_timeout_secs = it.next().context("falta --request-timeout-secs")?.parse()?
             }
             other => bail!("argumento desconocido: {other}"),
         }
     }
-    if workers == 0 || workers > 8 {
-        bail!("--workers debe estar entre 1 y 8");
-    }
+    validate_worker_mode(workers, shared_authority)?;
     let model_path = model.context("--model es obligatorio")?;
     let model_spec = ModelSpec::inspect(&model_path)?;
     model_spec.ensure_torch_runtime_compatible()?;
@@ -711,6 +739,7 @@ async fn main() -> Result<()> {
         preload_seconds: load_started.elapsed().as_secs_f64(),
         model_spec,
         workers,
+        shared_authority,
         request_timeout: (request_timeout_secs > 0)
             .then_some(Duration::from_secs(request_timeout_secs)),
     };
@@ -738,6 +767,18 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod api_tests {
     use super::*;
+
+    #[test]
+    fn shared_authority_is_explicitly_single_worker() {
+        assert!(validate_worker_mode(1, true).is_ok());
+        let error = validate_worker_mode(2, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--shared-authority requiere --workers 1")
+        );
+        assert!(validate_worker_mode(2, false).is_ok());
+    }
 
     fn request(fields: Value) -> ChatRequest {
         serde_json::from_value(fields).expect("valid JSON request")
