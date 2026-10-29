@@ -1923,6 +1923,34 @@ impl TerrsvusionKvCache {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
+        // Validate the newly dimensioned 32Q/8KV regional bounds against the
+        // exact scores before they can ever authorize future QK pruning.
+        // This is deliberately a verification-only step for now: a failed
+        // regional proof falls back to dense attention.
+        let mut query_values = vec![0.0_f32; 32 * 128];
+        queries.copy_data(&mut query_values, 32 * 128);
+        let regional_uppers = state_score_uppers_generic::<32, 8>(
+            pages,
+            &query_values,
+            1.0 / (self.head_dim as f64).sqrt(),
+        );
+        for page in pages {
+            for region in &page.certificate.regions {
+                let start = page.token_start + region.local_start;
+                let end = page.token_start + region.local_end;
+                let upper = match regional_uppers.get(&region.block_id) {
+                    Some(upper) => upper,
+                    None => return Ok(None),
+                };
+                for head in 0..32 {
+                    let exact_log_mass =
+                        logsumexp_finite(scores_by_head[head][start..end].iter().copied());
+                    if !exact_log_mass.is_finite() || exact_log_mass > upper[head] + 1e-8 {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
         let max_per_query = (0..32)
             .map(|head| max_per_kv[head / (32 / 8)])
             .collect::<Vec<_>>();
