@@ -1832,6 +1832,15 @@ impl TerrsvusionKvCache {
             if page.certificate.value_abs_max_by_kv_head.len() != 8 {
                 return Ok(None);
             }
+            if page.certificate.regions.iter().any(|region| {
+                region.key_minimum_bits.len() != 8 * 128
+                    || region.key_maximum_bits.len() != 8 * 128
+                    || region.value_abs_max_by_kv_head.len() != 8
+            }) {
+                // A legacy or partially written regional certificate cannot
+                // authorize a Llama 32Q/8KV omission. Preserve dense BF16.
+                return Ok(None);
+            }
             for (dst, &maxval) in max_per_kv
                 .iter_mut()
                 .zip(&page.certificate.value_abs_max_by_kv_head)
