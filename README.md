@@ -893,8 +893,9 @@ Prueba canónica posterior con 1.024/256/8:
 La prueba adversarial canónica posterior produjo diez tokens con Terrsvusion en
 `0,904 s` frente a `0,936 s` del BF16 denso: 14 propuestas, 8 aceptadas, una
 ronda rechazada y 5 forwards objetivo. Conservó también la paridad exacta de
-ids y SHA-256. Son ejecuciones individuales, no una distribución estadística,
-pero la aceleración ya gobierna la ruta del servidor y no es solo un benchmark.
+ids y SHA-256. Es una ejecución individual de una geometría concreta, no una
+demostración de aceleración general ni una base suficiente para promover la
+política a todas las peticiones del servidor.
 
 ## Evidencia real más reciente
 
@@ -1131,9 +1132,12 @@ prefill del sufijo ensambló el histórico por capa y no retuvo las 24 capas
 de prefijo en `prefill_hot`. Speedup de prefill ≈ `12,86x`. No elimina el
 coste cuadrático del primer prefill.
 
-### Producción y paralelismo
+### Servidor y paralelismo verificado
 
 - 52 tests, incluido un pool de dos ejecutores que atiende dos jobs a la vez.
+  Esto demuestra aislamiento y servicio concurrente, no varias inferencias
+  compartiendo una única autoridad LibTorch: cada ejecutor mantiene su propia
+  copia del modelo.
 - Release con `panic = "unwind"`: el test de pánico recupera y sirve el job
   siguiente.
 - Drop de la respuesta cancela un job aún en cola.
