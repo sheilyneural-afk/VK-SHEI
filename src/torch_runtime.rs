@@ -275,6 +275,22 @@ pub trait AttentionCache {
         new_value: &Tensor,
     ) -> Result<Tensor>;
     fn finish_step(&mut self, added_tokens: usize);
+    fn record_layer_output(
+        &mut self,
+        _layer_index: usize,
+        _sequence_start: usize,
+        _output: &Tensor,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct LayerOutputTrace {
+    layer_index: usize,
+    sequence_end: usize,
+    last_token: Vec<f32>,
 }
 
 impl DenseKvCache {
@@ -725,6 +741,7 @@ pub struct TerrsvusionKvCache {
     prefix_copied_bytes: u64,
     record_step_logits: bool,
     step_logits: Vec<Vec<f32>>,
+    layer_output_traces: Vec<LayerOutputTrace>,
     suffix_against_committed: bool,
 }
 
@@ -853,6 +870,7 @@ impl TerrsvusionKvCache {
             prefix_copied_bytes: 0,
             record_step_logits: false,
             step_logits: Vec::new(),
+            layer_output_traces: Vec::new(),
             suffix_against_committed: false,
         })
     }
@@ -4053,6 +4071,35 @@ impl AttentionCache for TerrsvusionKvCache {
     fn finish_step(&mut self, added_tokens: usize) {
         self.sequence_tokens += added_tokens;
     }
+
+    fn record_layer_output(
+        &mut self,
+        layer_index: usize,
+        sequence_start: usize,
+        output: &Tensor,
+    ) -> Result<()> {
+        if !self.record_step_logits {
+            return Ok(());
+        }
+        ensure!(
+            output.size().len() == 3 && output.size()[0] == 1 && output.size()[1] > 0,
+            "salida de capa inválida para diagnóstico"
+        );
+        let tokens = output.size()[1] as usize;
+        let last = output
+            .narrow(1, (tokens - 1) as i64, 1)
+            .to_kind(Kind::Float)
+            .contiguous();
+        let mut values = vec![0.0_f32; last.numel()];
+        let count = values.len();
+        last.copy_data(&mut values, count);
+        self.layer_output_traces.push(LayerOutputTrace {
+            layer_index,
+            sequence_end: sequence_start + tokens,
+            last_token: values,
+        });
+        Ok(())
+    }
 }
 
 impl MiniCpmModel {
@@ -4246,6 +4293,9 @@ pub struct TorchGeneration {
     pub applied_mass_tolerance: Option<f64>,
     #[serde(skip_serializing)]
     pub step_logits: Vec<Vec<f32>>,
+    #[serde(skip_serializing)]
+    #[doc(hidden)]
+    pub layer_output_traces: Vec<LayerOutputTrace>,
     pub kv_sha256: String,
     pub speculative_enabled: bool,
     pub speculative_rounds: usize,
@@ -4263,9 +4313,18 @@ pub struct TorchGeneration {
 pub struct AppliedOmissionReport {
     pub tolerance: f64,
     pub omission_accepted: bool,
+    pub exact_logit_parity: bool,
+    pub within_requested_logit_tolerance: bool,
     pub exact_token_parity: bool,
     pub max_abs_logit_difference: f64,
     pub logit_steps_compared: usize,
+    pub layer_output_events_compared: usize,
+    pub first_divergent_layer: Option<usize>,
+    pub first_divergent_sequence_end: Option<usize>,
+    pub first_divergent_layer_linf: f64,
+    pub max_layer_output_linf: f64,
+    pub max_divergent_layer: Option<usize>,
+    pub max_divergent_sequence_end: Option<usize>,
     pub certified_v_tokens_omitted: usize,
     pub hierarchy_k_tokens_avoided: usize,
     pub canonical_token_ids: Vec<u32>,
@@ -5274,7 +5333,12 @@ impl TorchModelRuntime {
                 None,
             )?
             .0;
-        let steps = canonical.step_logits.len().min(applied.step_logits.len());
+        ensure!(
+            !canonical.step_logits.is_empty()
+                && canonical.step_logits.len() == applied.step_logits.len(),
+            "comparación de omisión necesita el mismo número positivo de pasos de logits"
+        );
+        let steps = canonical.step_logits.len();
         let mut max_abs_logit_difference = 0.0_f64;
         for index in 0..steps {
             ensure!(
@@ -5285,16 +5349,69 @@ impl TorchModelRuntime {
                 .iter()
                 .zip(&applied.step_logits[index])
             {
+                ensure!(
+                    left.is_finite() && right.is_finite(),
+                    "logit no finito en comparación de omisión aplicada"
+                );
                 max_abs_logit_difference =
                     max_abs_logit_difference.max((*left as f64 - *right as f64).abs());
             }
         }
+        ensure!(
+            canonical.layer_output_traces.len() == applied.layer_output_traces.len(),
+            "trazas de capa canónica y aplicada con longitudes distintas"
+        );
+        let mut first_divergent_layer = None;
+        let mut first_divergent_sequence_end = None;
+        let mut first_divergent_layer_linf = 0.0_f64;
+        let mut max_layer_output_linf = 0.0_f64;
+        let mut max_divergent_layer = None;
+        let mut max_divergent_sequence_end = None;
+        for (canonical_trace, applied_trace) in canonical
+            .layer_output_traces
+            .iter()
+            .zip(&applied.layer_output_traces)
+        {
+            ensure!(
+                canonical_trace.layer_index == applied_trace.layer_index
+                    && canonical_trace.sequence_end == applied_trace.sequence_end
+                    && canonical_trace.last_token.len() == applied_trace.last_token.len(),
+                "eventos de capa canónico y aplicado incompatibles"
+            );
+            let linf = canonical_trace
+                .last_token
+                .iter()
+                .zip(&applied_trace.last_token)
+                .map(|(left, right)| (*left as f64 - *right as f64).abs())
+                .fold(0.0_f64, f64::max);
+            if linf > max_layer_output_linf {
+                max_layer_output_linf = linf;
+                max_divergent_layer = Some(canonical_trace.layer_index);
+                max_divergent_sequence_end = Some(canonical_trace.sequence_end);
+            }
+            if linf > 0.0 && first_divergent_layer.is_none() {
+                first_divergent_layer = Some(canonical_trace.layer_index);
+                first_divergent_sequence_end = Some(canonical_trace.sequence_end);
+                first_divergent_layer_linf = linf;
+            }
+        }
+        let exact_logit_parity = max_abs_logit_difference == 0.0;
+        let within_requested_logit_tolerance = max_abs_logit_difference <= tolerance;
         Ok(AppliedOmissionReport {
             tolerance,
-            omission_accepted: max_abs_logit_difference <= tolerance,
+            omission_accepted: exact_logit_parity && applied.certified_v_tokens_omitted > 0,
+            exact_logit_parity,
+            within_requested_logit_tolerance,
             exact_token_parity: canonical.token_ids == applied.token_ids,
             max_abs_logit_difference,
             logit_steps_compared: steps,
+            layer_output_events_compared: canonical.layer_output_traces.len(),
+            first_divergent_layer,
+            first_divergent_sequence_end,
+            first_divergent_layer_linf,
+            max_layer_output_linf,
+            max_divergent_layer,
+            max_divergent_sequence_end,
             certified_v_tokens_omitted: applied.certified_v_tokens_omitted,
             hierarchy_k_tokens_avoided: applied.hierarchy_k_tokens_avoided,
             canonical_token_ids: canonical.token_ids.clone(),
@@ -5735,6 +5852,7 @@ impl TorchModelRuntime {
                 certified_v_tokens_omitted: cache.attention_v_tokens_avoided,
                 applied_mass_tolerance: cache.applied_mass_tolerance,
                 step_logits: std::mem::take(&mut cache.step_logits),
+                layer_output_traces: std::mem::take(&mut cache.layer_output_traces),
                 kv_sha256,
                 speculative_enabled,
                 speculative_rounds,
@@ -6531,7 +6649,9 @@ impl MiniCpmLayer {
         let normalized = Self::rms_norm(&hidden, &self.post_norm, self.rms_eps);
         let mlp =
             Self::linear(&normalized, &self.gate).silu() * Self::linear(&normalized, &self.up);
-        Ok(hidden + Self::linear(&mlp, &self.down))
+        let output = hidden + Self::linear(&mlp, &self.down);
+        cache.record_layer_output(layer_index, past_tokens, &output)?;
+        Ok(output)
     }
 }
 
@@ -6692,6 +6812,62 @@ mod tests {
         let (querywise_key, querywise_value) = querywise.layers[0].as_ref().unwrap();
         assert!(sequential_key.equal(querywise_key));
         assert!(sequential_value.equal(querywise_value));
+    }
+
+    #[test]
+    fn llama_batched_causal_attention_matches_querywise_full_attention() {
+        let prefix_tokens = 5_i64;
+        let query_tokens = 4_i64;
+        let prefix_query = (Tensor::arange(32 * prefix_tokens * 128, (Kind::Float, Device::Cpu))
+            * 0.0017)
+            .sin()
+            .view([1, 32, prefix_tokens, 128])
+            .to_kind(Kind::BFloat16);
+        let prefix_key = (Tensor::arange(8 * prefix_tokens * 128, (Kind::Float, Device::Cpu))
+            * 0.0023)
+            .cos()
+            .view([1, 8, prefix_tokens, 128])
+            .to_kind(Kind::BFloat16);
+        let prefix_value = (Tensor::arange(8 * prefix_tokens * 128, (Kind::Float, Device::Cpu))
+            * 0.0031)
+            .sin()
+            .view([1, 8, prefix_tokens, 128])
+            .to_kind(Kind::BFloat16);
+        let query = (Tensor::arange(32 * query_tokens * 128, (Kind::Float, Device::Cpu)) * 0.0041)
+            .cos()
+            .view([1, 32, query_tokens, 128])
+            .to_kind(Kind::BFloat16);
+        let key = (Tensor::arange(8 * query_tokens * 128, (Kind::Float, Device::Cpu)) * 0.0053)
+            .sin()
+            .view([1, 8, query_tokens, 128])
+            .to_kind(Kind::BFloat16);
+        let value = (Tensor::arange(8 * query_tokens * 128, (Kind::Float, Device::Cpu)) * 0.0067)
+            .cos()
+            .view([1, 8, query_tokens, 128])
+            .to_kind(Kind::BFloat16);
+
+        let mut batched = DenseKvCache::with_layers(1);
+        let mut querywise = DenseKvCache::with_layers(1);
+        let _ = batched
+            .attend(0, &prefix_query, &prefix_key, &prefix_value)
+            .unwrap();
+        batched.finish_step(prefix_tokens as usize);
+        let _ = querywise
+            .attend(0, &prefix_query, &prefix_key, &prefix_value)
+            .unwrap();
+        querywise.finish_step(prefix_tokens as usize);
+        querywise.querywise_attention = true;
+
+        let batched_output = batched.attend(0, &query, &key, &value).unwrap();
+        let querywise_output = querywise.attend(0, &query, &key, &value).unwrap();
+        let linf = (&batched_output - &querywise_output)
+            .abs()
+            .max()
+            .double_value(&[]);
+        assert!(
+            batched_output.equal(&querywise_output),
+            "SDPA causal batida y querywise completa divergen: L∞={linf}"
+        );
     }
 
     #[test]

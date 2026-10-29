@@ -230,6 +230,15 @@ ruta selectiva continúa siendo 2,40 veces más lenta y fue rechazada por
 redundantes y reducción de I/O regional, no paridad ni disponibilidad de
 servicio.
 
+La traza BF16 por capa sitúa la primera divergencia en la capa 1 del bloque que
+termina en la posición 96 (`L∞=0,0009765625`); el máximo dentro de las capas
+crece hasta `0,5`. Una prueba separada confirma que SDPA causal batida y
+querywise con K/V completo son bit a bit idénticas, por lo que la diferencia
+procede de la omisión y su propagación, no de dividir el bloque. La aceptación
+experimental exige ahora logits exactamente iguales (`L∞=0`) y omisión
+positiva; coincidencia de tokens o error dentro de epsilon se informan por
+separado y no autorizan servicio.
+
 El servidor Llama anuncia llama-dense-bf16; la petición
 minicpm-dense-bf16 devuelve HTTP 404. document= con nativo virgen
 devuelve 422 y NO constituye la misma plantilla de chat.

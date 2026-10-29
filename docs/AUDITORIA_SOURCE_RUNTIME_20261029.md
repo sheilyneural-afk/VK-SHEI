@@ -540,6 +540,41 @@ frente a la variante token a token de 124,74 s. No es todavía una aceleración
 frente a la canónica: en esta corrida sigue siendo `2,40x` más lento. Tampoco
 cambia el rechazo de paridad ni autoriza la ruta en el servidor.
 
+## Localización de la divergencia extremo a extremo
+
+El diagnóstico comparativo conserva ahora, solo cuando ya se solicitaron
+logits de control, el último estado BF16 de cada bloque y capa. La ruta normal
+del servidor no activa esta traza. Una regresión adicional comprobó que SDPA
+causal batida y SDPA querywise con el K/V completo son bit a bit idénticas en
+la geometría Llama 32Q/8KV; dividir el bloque no explica por sí solo la pérdida
+de paridad.
+
+La ejecución real de 128 tokens a `1e-2` comparó 128 eventos de capa y localizó:
+
+```text
+first_divergent_layer=1
+first_divergent_sequence_end=96
+first_divergent_layer_linf=0.0009765625
+max_layer_output_linf=0.5
+max_abs_logit_difference=0.125
+```
+
+Los primeros 64 tokens y la capa 0 del tercer bloque coincidieron. La primera
+diferencia BF16 apareció tras la capa 1 del bloque que termina en la posición
+96; después las proyecciones, residuales, MLP y capas restantes la amplificaron.
+Por tanto, el certificado actual es una cota local de salida de atención y no
+una cota de logits. El informe separa desde ahora tres propiedades distintas:
+
+```text
+exact_token_parity
+within_requested_logit_tolerance
+exact_logit_parity
+```
+
+`omission_accepted` exige `exact_logit_parity=true`, `L∞=0` y al menos una V
+realmente omitida. Una tolerancia local o la coincidencia del token argmax ya
+no pueden autorizar por sí solas la omisión.
+
 La comparación canónica sigue siendo una segunda inferencia deliberada del
 binario diagnóstico: es necesaria para medir logits finales. No existe en la
 ruta normal del servidor, que además continúa rechazando tolerancia positiva.
