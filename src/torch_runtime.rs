@@ -684,6 +684,8 @@ pub struct TerrsvusionKvCache {
     /// logical BF16 element counts, not claims about opaque LibTorch kernels.
     attention_dense_qk_elements: u128,
     attention_dense_pv_elements: u128,
+    attention_selected_qk_elements: u128,
+    attention_selected_pv_elements: u128,
     attention_v_tokens_avoided: usize,
     /// Maximum known temporary allocation footprint of one autoregressive
     /// attention call. This is an accounting lower bound, not process RSS:
@@ -815,6 +817,8 @@ impl TerrsvusionKvCache {
             decode_sdpa_nanos: 0,
             attention_dense_qk_elements: 0,
             attention_dense_pv_elements: 0,
+            attention_selected_qk_elements: 0,
+            attention_selected_pv_elements: 0,
             attention_v_tokens_avoided: 0,
             known_attention_scratch_peak_bytes: 0,
             prefill_working_peak_bytes: 0,
@@ -1957,6 +1961,12 @@ impl TerrsvusionKvCache {
         self.exact_v_tokens_materialized = self
             .exact_v_tokens_materialized
             .saturating_add(scanned_tokens);
+        self.attention_selected_qk_elements = self
+            .attention_selected_qk_elements
+            .saturating_add(u128::from(scanned_tokens as u64) * 32);
+        self.attention_selected_pv_elements = self
+            .attention_selected_pv_elements
+            .saturating_add(u128::from(scanned_tokens as u64) * 32 * 128);
         self.attention_v_tokens_avoided = self.attention_v_tokens_avoided.saturating_add(omitted);
         self.exact_mass_max_bound = self
             .exact_mass_max_bound
@@ -3950,6 +3960,8 @@ pub struct TorchGeneration {
     pub decode_sdpa_nanos: u64,
     pub attention_dense_qk_elements: u128,
     pub attention_dense_pv_elements: u128,
+    pub attention_selected_qk_elements: u128,
+    pub attention_selected_pv_elements: u128,
     pub attention_v_tokens_avoided: usize,
     pub hierarchy_events: usize,
     pub hierarchy_states_total: usize,
@@ -5418,6 +5430,8 @@ impl TorchModelRuntime {
                 decode_sdpa_nanos: cache.decode_sdpa_nanos,
                 attention_dense_qk_elements: cache.attention_dense_qk_elements,
                 attention_dense_pv_elements: cache.attention_dense_pv_elements,
+                attention_selected_qk_elements: cache.attention_selected_qk_elements,
+                attention_selected_pv_elements: cache.attention_selected_pv_elements,
                 attention_v_tokens_avoided: cache.attention_v_tokens_avoided,
                 hierarchy_events: cache.hierarchy_events,
                 hierarchy_states_total: cache.hierarchy_states_total,
