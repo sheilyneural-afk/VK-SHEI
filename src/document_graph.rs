@@ -130,7 +130,7 @@ impl RetrievalPhase {
         ensure!(!self.evidence.is_empty(), "cannot assemble empty evidence");
         let mut prompt = String::from(
             "Responde la pregunta usando exclusivamente las evidencias originales citadas.\n\
-             Distingue hechos textuales de inferencias. Cita cada afirmación como [página N].\n\
+             Distingue hechos textuales de inferencias. Cita cada afirmación únicamente como [página N]; no copies el SHA256.\n\
              Si las evidencias no bastan, responde exactamente EVIDENCIA_INSUFICIENTE.\n\n",
         );
         prompt.push_str("PREGUNTA:\n");
@@ -359,6 +359,50 @@ impl DocumentGraph {
         scope: RetrievalScope,
     ) -> Result<RetrievalPhase> {
         let budget = budget.validate()?;
+        let (candidates, broad_match_pages) =
+            self.rank_candidates(query, budget.graph_hops, scope)?;
+        self.materialize_candidate_phase(query, scope, &candidates, broad_match_pages, budget, 0)
+            .map(|(phase, _)| phase)
+    }
+
+    /// Partitions one immutable ranking into bounded phases. The ranking and
+    /// original-page authority are verified once; phases never reload or
+    /// silently repeat a candidate. Completion becomes true only on the final
+    /// phase.
+    pub fn retrieve_phases_with_scope(
+        &self,
+        query: &str,
+        budget: RetrievalBudget,
+        scope: RetrievalScope,
+    ) -> Result<Vec<RetrievalPhase>> {
+        let budget = budget.validate()?;
+        let (candidates, broad_match_pages) =
+            self.rank_candidates(query, budget.graph_hops, scope)?;
+        let mut phases = Vec::new();
+        let mut offset = 0usize;
+        while offset < candidates.len() {
+            let (phase, next_offset) = self.materialize_candidate_phase(
+                query,
+                scope,
+                &candidates,
+                broad_match_pages,
+                budget,
+                offset,
+            )?;
+            ensure!(next_offset > offset, "retrieval phase made no progress");
+            phases.push(phase);
+            offset = next_offset;
+        }
+        ensure!(!phases.is_empty(), "retrieval produced no phases");
+        Ok(phases)
+    }
+
+    fn rank_candidates(
+        &self,
+        query: &str,
+        graph_hops: usize,
+        scope: RetrievalScope,
+    ) -> Result<(Vec<(u32, u64, usize)>, usize)> {
         ensure!(!query.trim().is_empty(), "retrieval query cannot be empty");
         self.verify_original_authority()?;
         let query_micro = micro_metadata(1, query);
@@ -423,7 +467,7 @@ impl DocumentGraph {
         let mut queue = VecDeque::from(seeds);
         while let Some(page) = queue.pop_front() {
             let current = distance[&page];
-            if current >= budget.graph_hops {
+            if current >= graph_hops {
                 continue;
             }
             if let Some(next) = self.neighbours.get(&page) {
@@ -454,11 +498,27 @@ impl DocumentGraph {
                 .then(left.2.cmp(&right.2))
                 .then(left.0.cmp(&right.0))
         });
+        Ok((candidates, broad_match_pages))
+    }
+
+    fn materialize_candidate_phase(
+        &self,
+        query: &str,
+        scope: RetrievalScope,
+        candidates: &[(u32, u64, usize)],
+        broad_match_pages: usize,
+        budget: RetrievalBudget,
+        offset: usize,
+    ) -> Result<(RetrievalPhase, usize)> {
+        ensure!(
+            offset < candidates.len(),
+            "retrieval phase offset is exhausted"
+        );
         let candidate_pages = candidates.len();
         let mut evidence = Vec::new();
-        let mut deferred = Vec::new();
         let mut selected_characters = 0usize;
-        for (page_number, score, graph_distance) in candidates {
+        let mut next_offset = offset;
+        for &(page_number, score, graph_distance) in &candidates[offset..] {
             let page = self
                 .pages
                 .get(&page_number)
@@ -478,26 +538,34 @@ impl DocumentGraph {
                     routing_score: score,
                     graph_distance,
                 });
+                next_offset += 1;
             } else {
-                deferred.push(page_number);
+                break;
             }
         }
         ensure!(
             !evidence.is_empty(),
             "retrieval budget cannot fit any candidate page"
         );
-        Ok(RetrievalPhase {
-            query: query.to_owned(),
-            scope,
-            evidence,
-            deferred_candidate_pages: deferred.clone(),
-            candidate_pages,
-            broad_match_pages,
-            selected_characters,
-            complete_for_candidate_set: deferred.is_empty(),
-            original_text_authority: true,
-            semantic_exhaustiveness_certified: false,
-        })
+        let deferred = candidates[next_offset..]
+            .iter()
+            .map(|(page, _, _)| *page)
+            .collect::<Vec<_>>();
+        Ok((
+            RetrievalPhase {
+                query: query.to_owned(),
+                scope,
+                evidence,
+                deferred_candidate_pages: deferred.clone(),
+                candidate_pages,
+                broad_match_pages,
+                selected_characters,
+                complete_for_candidate_set: deferred.is_empty(),
+                original_text_authority: true,
+                semantic_exhaustiveness_certified: false,
+            },
+            next_offset,
+        ))
     }
 
     fn build_edges(&mut self) {
@@ -886,5 +954,36 @@ mod tests {
         assert_eq!(phase.candidate_pages, 3);
         assert!(phase.complete_for_candidate_set);
         assert!(!phase.semantic_exhaustiveness_certified);
+    }
+
+    #[test]
+    fn bounded_phases_preserve_one_ranking_without_repeating_candidates() {
+        let graph = sample();
+        let phases = graph
+            .retrieve_phases_with_scope(
+                "contenido que no existe",
+                RetrievalBudget {
+                    max_pages: 1,
+                    max_characters: 500,
+                    graph_hops: 0,
+                },
+                RetrievalScope::Exhaustive,
+            )
+            .unwrap();
+        assert_eq!(phases.len(), 4);
+        let pages = phases
+            .iter()
+            .flat_map(|phase| phase.evidence.iter().map(|page| page.page_number))
+            .collect::<Vec<_>>();
+        assert_eq!(pages, vec![1, 2, 3, 4]);
+        assert_eq!(pages.iter().copied().collect::<BTreeSet<_>>().len(), 4);
+        assert!(
+            phases[..3]
+                .iter()
+                .all(|phase| !phase.complete_for_candidate_set)
+        );
+        assert!(phases[3].complete_for_candidate_set);
+        assert_eq!(phases[0].deferred_candidate_pages, vec![2, 3, 4]);
+        assert!(phases[3].deferred_candidate_pages.is_empty());
     }
 }

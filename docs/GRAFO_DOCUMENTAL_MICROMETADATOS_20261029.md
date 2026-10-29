@@ -77,6 +77,18 @@ cargo run --release --features torch-backend \
   --scope focused --max-pages 4 --max-characters 16000 --graph-hops 1
 ```
 
+Para recorrer candidatos sin recargar el modelo, `--max-phases` permite varias
+fases sobre un único ranking inmutable. Cada página se materializa una sola vez;
+la inferencia continúa únicamente cuando la salida normalizada es exactamente
+`EVIDENCIA_INSUFICIENTE`:
+
+```bash
+cargo run --release --features torch-backend \
+  --bin terrsvusion-document-ask -- \
+  --graph contrato.graph.json --question '¿Cuál es el valor?' \
+  --scope exhaustive --max-pages 1 --max-phases 8
+```
+
 ## Medición física con El Faro
 
 Prueba ejecutada el 29 de octubre de 2026 con
@@ -100,13 +112,37 @@ posiciones procesadas por el Transformer en esta consulta. No demuestra que
 toda pregunta se enrute correctamente ni que el coste baje en la misma
 proporción para cualquier geometría.
 
+## Medición física de continuación por fases
+
+La fixture `assets/document-phases-example.json` fuerza una respuesta ausente
+en la primera página y presente en la segunda. Con una sola autoridad LibTorch:
+
+- fases disponibles y ejecutadas: 2;
+- cargas del modelo: 1;
+- fase 1, página 1: 308 tokens y `EVIDENCIA_INSUFICIENTE`;
+- fase 2, página 2: 278 tokens y `COBALTO-73. [Página 2]`;
+- páginas repetidas: 0;
+- RSS máximo: 31.468.252 KiB;
+- tokens acumulados por fases: 586;
+- prompt denso completo equivalente: 350 tokens;
+- delta frente al denso: -236 tokens, es decir, 236 tokens adicionales.
+
+La prueba demuestra continuación, no una ganancia universal. En este documento
+de dos páginas las instrucciones repetidas cuestan más que el denso completo.
+Por eso el recibo publica simultáneamente
+`transformer_prompt_tokens_avoided`, `transformer_prompt_tokens_extra` y un
+`transformer_prompt_token_delta_vs_full` con signo. Un router posterior debe
+escoger denso para documentos pequeños y fases para documentos cuyo contexto
+evitado supere el coste de las instrucciones repetidas.
+
 ## Límites no cerrados
 
 - No extrae directamente PDF, EPUB, DOCX ni imágenes.
 - No genera entidades o relaciones mediante Llama.
 - No enlaza todavía páginas documentales con prefijos/KV de ColdStore.
-- Ensambla el prompt final y ejecuta una fase focal, pero no planifica todavía
-  una segunda búsqueda automática cuando Llama devuelve evidencia insuficiente.
+- Ensambla el prompt final y continúa por el ranking cuando Llama devuelve
+  exactamente evidencia insuficiente. Todavía no cambia automáticamente de
+  alcance focal a exhaustivo ni usa una síntesis acumulativa entre fases.
 - No certifica exhaustividad semántica.
 - La medición anterior demuestra menos posiciones QK/PV para una consulta; no
   constituye todavía una equivalencia general entre esa contabilidad y tiempo
