@@ -413,3 +413,14 @@ así que tampoco es una optimización de latencia en esta geometría.
 exclusivamente métricas de materialización/lectura de V; no equivalen a ahorro
 de atención ni a equivalencia del modelo. La autoridad HTTP continúa
 rechazando la opción y este informe permanece diagnóstico y fail-closed.
+
+Desde esta medición, el código de `llama_regional_attention` ya no calcula los
+scores exactos regionales en vectores Rust/CPU: convierte cada bloque K al
+dispositivo de la consulta y usa `matmul` de LibTorch para la evaluación
+32Q/8KV, copiando únicamente los scores pequeños necesarios para actualizar la
+prueba. `cargo check --all-targets --features torch-backend` y los cinco tests
+Llama pasan. La repetición real posterior conserva
+`attention_selected_qk_elements=0` y `attention_selected_pv_elements=0`;
+esto demuestra que el branch-and-bound está preparado para ejecutar el cálculo
+regional en el dispositivo del modelo, pero que las cotas del checkpoint real
+no cierran todavía una poda regional positiva.

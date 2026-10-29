@@ -1895,14 +1895,29 @@ impl TerrsvusionKvCache {
                     self.exact_tensor_from_bytes(&bytes, positions.len())?
                 }
             };
-            let key_float = key.to_kind(Kind::Float).contiguous();
-            let mut key_values = vec![0.0_f32; 8 * positions.len() * 128];
-            let key_count = key_values.len();
-            key_float.copy_data(&mut key_values, key_count);
-            let scores =
-                exact_scores_generic::<32, 8>(&query_values, &key_values, positions.len(), scale);
+            // Keep the regional exact-score evaluation on the same device as
+            // the model. The previous implementation copied every regional K
+            // block to Rust vectors and evaluated the 32Q/8KV dot products on
+            // CPU, so this path was not a GPU branch-and-bound implementation
+            // even when the canonical Transformer ran on CUDA.
+            let queries = query.to_kind(Kind::Float);
+            let key_device = key.to_device(query.device());
+            let repeated_key = key_device
+                .repeat_interleave_self_int(4, 1, None)
+                .to_kind(Kind::Float);
+            let score_tensor = (queries.matmul(&repeated_key.transpose(-2, -1))
+                / (self.head_dim as f64).sqrt())
+            .to_kind(Kind::Float)
+            .contiguous();
+            let mut score_values = vec![0.0_f32; 32 * positions.len()];
+            let score_count = score_values.len();
+            score_tensor.copy_data(&mut score_values, score_count);
+            let scores = score_values
+                .chunks_exact(positions.len())
+                .map(|head| head.iter().map(|value| f64::from(*value)).collect())
+                .collect::<Vec<Vec<f64>>>();
             certificate.materialize(block_id, &scores, &state_uppers, &state_value_max)?;
-            loaded.insert(block_id, (page_index, key, scores));
+            loaded.insert(block_id, (page_index, key_device, scores));
             if certified(&certificate.bounds(), allowed) {
                 break;
             }
@@ -1942,6 +1957,7 @@ impl TerrsvusionKvCache {
                     self.exact_tensor_from_bytes(&bytes, positions.len())?
                 }
             };
+            let value = value.to_device(query.device());
             loaded_tokens += positions.len();
             keys.push(key);
             values.push(value);
