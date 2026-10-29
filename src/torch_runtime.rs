@@ -564,6 +564,10 @@ struct KeyRegionCertificate {
     key_minimum_bits: Vec<u16>,
     key_maximum_bits: Vec<u16>,
     value_abs_max: [f32; 2],
+    /// Exact per-KV-head regional V maxima. Legacy prefixes omit this field
+    /// and therefore cannot authorize a Llama 8-KV-head regional omission.
+    #[serde(default)]
+    value_abs_max_by_kv_head: Vec<f32>,
 }
 
 struct ParallelAxisMetrics {
@@ -1463,10 +1467,11 @@ impl TerrsvusionKvCache {
                     .amax([2_i64], false)
                     .to_kind(Kind::Float)
                     .contiguous();
-                let mut minimum_values = vec![0.0_f32; 2 * 128];
-                let mut maximum_values = vec![0.0_f32; 2 * 128];
-                minimum.copy_data(&mut minimum_values, 2 * 128);
-                maximum.copy_data(&mut maximum_values, 2 * 128);
+                let key_elements = self.kv_heads as usize * self.head_dim as usize;
+                let mut minimum_values = vec![0.0_f32; key_elements];
+                let mut maximum_values = vec![0.0_f32; key_elements];
+                minimum.copy_data(&mut minimum_values, key_elements);
+                maximum.copy_data(&mut maximum_values, key_elements);
                 let value_region =
                     value.narrow(2, local_start as i64, (local_end - local_start) as i64);
                 let value_max = value_region
@@ -1474,11 +1479,17 @@ impl TerrsvusionKvCache {
                     .amax([2_i64, 3_i64], false)
                     .to_kind(Kind::Float)
                     .contiguous();
-                let mut value_abs_max = [0.0_f32; 2];
-                value_max.copy_data(&mut value_abs_max, 2);
+                let mut value_abs_max_by_kv_head = vec![0.0_f32; self.kv_heads as usize];
+                value_max.copy_data(&mut value_abs_max_by_kv_head, self.kv_heads as usize);
                 ensure!(
-                    value_abs_max.iter().all(|value| value.is_finite()),
+                    value_abs_max_by_kv_head
+                        .iter()
+                        .all(|value| value.is_finite() && *value >= 0.0),
                     "certificado V regional no finito"
+                );
+                let mut value_abs_max = [0.0_f32; 2];
+                value_abs_max[..2.min(value_abs_max_by_kv_head.len())].copy_from_slice(
+                    &value_abs_max_by_kv_head[..2.min(value_abs_max_by_kv_head.len())],
                 );
                 Ok(KeyRegionCertificate {
                     block_id: token_start + local_start,
@@ -1488,6 +1499,7 @@ impl TerrsvusionKvCache {
                     key_minimum_bits: Self::outward_bf16_bounds(&minimum_values, true),
                     key_maximum_bits: Self::outward_bf16_bounds(&maximum_values, false),
                     value_abs_max,
+                    value_abs_max_by_kv_head,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
