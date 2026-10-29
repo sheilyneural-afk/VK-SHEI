@@ -381,3 +381,35 @@ se mantiene como métrica de almacenamiento/lectura V. Estas cifras son
 contabilidad de operaciones lógicas del runtime; no son una prueba de los
 kernels internos ni de RSS/VRAM de LibTorch. La API no expone el planificador
 mientras la comparación final de logits siga fallando.
+
+La repetición del mismo diagnóstico con tolerancia `1e-2` confirmó el límite
+sin cambiar la autoridad del servidor:
+
+```text
+omission_accepted=false
+exact_token_parity=true
+max_abs_logit_difference=0.15625
+certified_v_tokens_omitted=330
+attention_selected_qk_elements=0
+attention_selected_pv_elements=0
+attention_dense_qk_elements=8454144
+attention_dense_pv_elements=1082130432
+exact_k_tokens_scanned=17351
+exact_v_tokens_materialized=17021
+kv_exact_partial_value_bytes_avoided=659456
+kv_exact_partial_value_reads=195
+prefill_seconds_applied=71.616677712
+prefill_seconds_canonical=2.380605201
+token_ids_applied=token_ids_canonical=[31976]
+```
+
+Esta ejecución prueba omisión física de V en la ruta Llama antigua, pero no
+prueba paridad de logits ni una reducción del coste de atención del
+Transformer. Los contadores `attention_selected_*` en cero indican que no se
+activó reducción regional de QK/PV. La variante aplicada tardó aproximadamente
+treinta veces más en el prefill por el coste de certificar y leer parcialmente,
+así que tampoco es una optimización de latencia en esta geometría.
+`certified_v_tokens_omitted` y `kv_exact_partial_value_bytes_avoided` son aquí
+exclusivamente métricas de materialización/lectura de V; no equivalen a ahorro
+de atención ni a equivalencia del modelo. La autoridad HTTP continúa
+rechazando la opción y este informe permanece diagnóstico y fail-closed.
