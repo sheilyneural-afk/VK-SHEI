@@ -63,6 +63,24 @@ memoria y las aceleraciones son específicos de la máquina, modelo, prompt y
 configuración indicados en cada informe. El backend HIP es experimental y no
 es la ruta predeterminada.
 
+### No demostrado todavía
+
+- `hierarchy_k_tokens_avoided > 0` en una inferencia real del modelo.
+- Menor latencia general que BF16 denso en todas las geometrías.
+- Reducción del coste cuadrático del *primer* prefill. El *hit* sí evita ese
+  Transformer y ya no copia el backing, pero eso no demuestra una reducción
+  general del primer prefill.
+- Paridad universal o norma `L∞` de logits igual a cero cuando hay omisiones a
+  `1e-3`. La medición disponible fue `0,171875`, con IDs idénticos, en la
+  prueba `256/128/2`.
+- Seguridad de promover `1e-3` al servidor. La autoridad de servicio sigue en
+  `1e-6`.
+- Certificación de 30.000, 100.000 o 131.072 tokens.
+- Métricas completas de RSS, workspace interno de LibTorch o VRAM.
+- Varias inferencias sobre la misma autoridad LibTorch. El paralelismo medido
+  corresponde a N copias del modelo, no a varias inferencias concurrentes
+  compartiendo una única autoridad LibTorch.
+
 ## Compilación
 
 La funcionalidad nativa Rust no requiere PyTorch:
