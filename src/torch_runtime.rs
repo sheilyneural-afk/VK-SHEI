@@ -710,6 +710,17 @@ pub struct TerrsvusionKvCache {
     attention_selected_qk_elements: u128,
     attention_selected_pv_elements: u128,
     attention_v_tokens_avoided: usize,
+    /// Work submitted by the canonical dense path to LibTorch SDPA.  The
+    /// scheduled counters describe the rectangular tensors handed to the
+    /// opaque kernel; the causal counters describe the non-masked prefix
+    /// pairs.  They are deliberately separate from the omission baseline
+    /// above, which is also populated by diagnostic/selective paths.
+    dense_sdpa_calls: usize,
+    dense_sdpa_scheduled_qk_elements: u128,
+    dense_sdpa_scheduled_pv_elements: u128,
+    dense_sdpa_causal_qk_elements: u128,
+    dense_sdpa_causal_pv_elements: u128,
+    dense_sdpa_nanos: u64,
     /// Maximum known temporary allocation footprint of one autoregressive
     /// attention call. This is an accounting lower bound, not process RSS:
     /// opaque libtorch/SDPA workspace is reported separately as unknown.
@@ -851,6 +862,12 @@ impl TerrsvusionKvCache {
             attention_selected_qk_elements: 0,
             attention_selected_pv_elements: 0,
             attention_v_tokens_avoided: 0,
+            dense_sdpa_calls: 0,
+            dense_sdpa_scheduled_qk_elements: 0,
+            dense_sdpa_scheduled_pv_elements: 0,
+            dense_sdpa_causal_qk_elements: 0,
+            dense_sdpa_causal_pv_elements: 0,
+            dense_sdpa_nanos: 0,
             known_attention_scratch_peak_bytes: 0,
             prefill_working_peak_bytes: 0,
             prefill_axis_nanos: 0,
@@ -1154,31 +1171,97 @@ impl TerrsvusionKvCache {
         fs::create_dir_all(cache_root)
             .with_context(|| format!("crear caché de prefijos {}", cache_root.display()))?;
         let destination = cache_root.join(cache_key);
-        if destination.is_dir() {
-            return Ok(());
-        }
-        let staging = tempfile::Builder::new()
-            .prefix(".terrsvusion-prefix-")
-            .tempdir_in(cache_root)
-            .context("staging de prefijo persistente")?;
-        fs::copy(
-            self.exact_cold.path(),
-            staging.path().join("pages-exact.kv"),
-        )
-        .context("copiar KV de prefijo persistente")?;
         let manifest = self.persistent_manifest(model_identity, cache_key)?;
         let manifest_bytes = serde_json::to_vec(&manifest).context("serializar prefijo")?;
-        fs::write(staging.path().join("manifest.json"), manifest_bytes)
-            .context("escribir manifiesto de prefijo")?;
-        let staging_path = staging.keep();
-        match fs::rename(&staging_path, &destination) {
-            Ok(()) => Ok(()),
-            Err(_error) if destination.is_dir() => {
-                fs::remove_dir_all(&staging_path).ok();
-                Ok(())
+        let mut copied_bytes = 0_u64;
+        if !destination.is_dir() {
+            let staging = tempfile::Builder::new()
+                .prefix(".terrsvusion-prefix-")
+                .tempdir_in(cache_root)
+                .context("staging de prefijo persistente")?;
+            let published_pages = staging.path().join("pages-exact.kv");
+            // The inference worker owns this mutable store exclusively and no
+            // suffix is processed until publication returns.  A hard link is
+            // therefore an O(1) snapshot on the same filesystem.  Immediately
+            // after atomic publication `adopt_published_prefix` unlinks the
+            // mutable name, reopens the published inode read-only and creates
+            // a fresh suffix store, so later appends cannot mutate the prefix.
+            if fs::hard_link(self.exact_cold.path(), &published_pages).is_err() {
+                copied_bytes = fs::copy(self.exact_cold.path(), &published_pages)
+                    .context("copiar KV de prefijo entre sistemas de archivos")?;
             }
-            Err(error) => Err(error).context("publicar prefijo persistente"),
+            fs::write(staging.path().join("manifest.json"), &manifest_bytes)
+                .context("escribir manifiesto de prefijo")?;
+            let staging_path = staging.keep();
+            match fs::rename(&staging_path, &destination) {
+                Ok(()) => {}
+                Err(_error) if destination.is_dir() => {
+                    fs::remove_dir_all(&staging_path).ok();
+                }
+                Err(error) => {
+                    fs::remove_dir_all(&staging_path).ok();
+                    return Err(error).context("publicar prefijo persistente");
+                }
+            }
         }
+        self.adopt_published_prefix(&destination, &manifest_bytes, copied_bytes)
+    }
+
+    fn adopt_published_prefix(
+        &mut self,
+        destination: &Path,
+        expected_manifest: &[u8],
+        copied_bytes: u64,
+    ) -> Result<()> {
+        let published_manifest = fs::read(destination.join("manifest.json"))
+            .context("leer manifiesto recién publicado")?;
+        ensure!(
+            published_manifest == expected_manifest,
+            "colisión de publicación con manifiesto de prefijo distinto"
+        );
+        let mut prefix_cold = ColdStore::open_read_only(destination.join("pages-exact.kv"), 0)
+            .context("abrir prefijo recién publicado")?;
+        prefix_cold
+            .audit_mapped()
+            .context("auditar prefijo recién publicado")?;
+        let expected_pages = self
+            .layers
+            .iter()
+            .map(|layer| layer.pages.len())
+            .sum::<usize>();
+        ensure!(
+            prefix_cold.metadata().len() == expected_pages,
+            "prefijo publicado no contiene todas las páginas"
+        );
+        ensure!(
+            self.layers.iter().all(|layer| layer.prefill_hot.is_none()),
+            "publicación antes de liberar el working set de prefill"
+        );
+        let mutable_path = self.exact_cold.path().to_path_buf();
+        fs::remove_file(&mutable_path).with_context(|| {
+            format!(
+                "desvincular backing mutable promovido {}",
+                mutable_path.display()
+            )
+        })?;
+        let new_suffix = ColdStore::create(&mutable_path, 0)
+            .context("crear ColdStore independiente para el sufijo")?;
+        self.exact_cold = new_suffix;
+        self.prefix_cold = Some(prefix_cold);
+        for layer in &mut self.layers {
+            for page in &mut layer.pages {
+                match &mut page.storage {
+                    PageStorage::Cold { immutable, .. } => *immutable = true,
+                    PageStorage::Pending { .. } => {
+                        bail!("página pendiente después de publicar el prefijo")
+                    }
+                }
+            }
+        }
+        self.prefix_copied_bytes = copied_bytes;
+        self.conversion = Self::conversion_worker(0)?;
+        self.suffix_against_committed = true;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1200,6 +1283,9 @@ impl TerrsvusionKvCache {
         )
     }
 
+    // Keeping the cache identity and complete tensor geometry explicit makes
+    // a mismatched persistent prefix fail closed at this authority boundary.
+    #[allow(clippy::too_many_arguments)]
     fn restore_prefix_geometry(
         cache_root: &Path,
         cache_key: &str,
@@ -1250,6 +1336,7 @@ impl TerrsvusionKvCache {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn restore_prefix_from_manifest(
         cache_root: &Path,
         cache_key: &str,
@@ -1610,6 +1697,42 @@ impl TerrsvusionKvCache {
         } else {
             1
         }
+    }
+
+    fn record_dense_sdpa(
+        &mut self,
+        query_tokens: usize,
+        attended_tokens: usize,
+        sequence_tokens: usize,
+        elapsed_nanos: u64,
+    ) {
+        let heads = self.query_heads as u128;
+        let head_dim = self.head_dim as u128;
+        let scheduled_pairs = (query_tokens as u128).saturating_mul(attended_tokens as u128);
+        let causal_pairs = (0..query_tokens).fold(0_u128, |sum, query_index| {
+            sum.saturating_add(
+                sequence_tokens
+                    .saturating_add(query_index)
+                    .saturating_add(1) as u128,
+            )
+        });
+        self.dense_sdpa_calls = self.dense_sdpa_calls.saturating_add(1);
+        self.dense_sdpa_scheduled_qk_elements = self
+            .dense_sdpa_scheduled_qk_elements
+            .saturating_add(scheduled_pairs.saturating_mul(heads));
+        self.dense_sdpa_scheduled_pv_elements =
+            self.dense_sdpa_scheduled_pv_elements.saturating_add(
+                scheduled_pairs
+                    .saturating_mul(heads)
+                    .saturating_mul(head_dim),
+            );
+        self.dense_sdpa_causal_qk_elements = self
+            .dense_sdpa_causal_qk_elements
+            .saturating_add(causal_pairs.saturating_mul(heads));
+        self.dense_sdpa_causal_pv_elements = self
+            .dense_sdpa_causal_pv_elements
+            .saturating_add(causal_pairs.saturating_mul(heads).saturating_mul(head_dim));
+        self.dense_sdpa_nanos = self.dense_sdpa_nanos.saturating_add(elapsed_nanos);
     }
 
     fn seal_and_release_prefill(&mut self) -> Result<()> {
@@ -2187,6 +2310,10 @@ impl TerrsvusionKvCache {
     /// The error bound is a per-head mathematical softmax-mass bound
     /// computed from actual BF16 Q/K operands in FP32 and conservative
     /// per-KV-head |V| maxima; it does NOT prove token/logit identity.
+    // The optional preassembled score/probability tensors identify which
+    // physical work already happened; bundling them would obscure ownership
+    // and make accidental recomputation harder to audit.
+    #[allow(clippy::too_many_arguments)]
     fn llama_certified_value_attention(
         &mut self,
         layer_index: usize,
@@ -2751,12 +2878,22 @@ impl TerrsvusionKvCache {
             preassembled_key.size()[2] as usize == self.sequence_tokens + query.size()[2] as usize,
             "bloque Llama K preensamblado incompatible"
         );
-        Ok(Self::scaled_attention(
+        let query_tokens = query.size()[2] as usize;
+        let attended_tokens = preassembled_key.size()[2] as usize;
+        let started = std::time::Instant::now();
+        let output = Self::scaled_attention(
             query,
             &[preassembled_key.shallow_clone()],
             &values,
             self.sequence_tokens,
-        ))
+        );
+        self.record_dense_sdpa(
+            query_tokens,
+            attended_tokens,
+            self.sequence_tokens,
+            elapsed_nanos(started),
+        );
+        Ok(output)
     }
 
     fn llama_dense_tile_key(
@@ -2844,12 +2981,15 @@ impl TerrsvusionKvCache {
             covered == sequence_tokens + 1 && !keys.is_empty(),
             "histórico Llama denso incompleto"
         );
-        Ok(Self::scaled_attention(
-            query,
-            &keys,
-            &values,
+        let started = std::time::Instant::now();
+        let output = Self::scaled_attention(query, &keys, &values, sequence_tokens);
+        self.record_dense_sdpa(
+            query.size()[2] as usize,
+            covered,
             sequence_tokens,
-        ))
+            elapsed_nanos(started),
+        );
+        Ok(output)
     }
 
     fn exact_mass_attention(
@@ -3435,7 +3575,8 @@ impl TerrsvusionKvCache {
                 [1, 1, 1, attended_tokens as i64],
                 (query.kind(), query.device()),
             );
-            outputs.push(Tensor::scaled_dot_product_attention(
+            let started = std::time::Instant::now();
+            let output = Tensor::scaled_dot_product_attention(
                 &query_token,
                 &key,
                 &value,
@@ -3444,7 +3585,14 @@ impl TerrsvusionKvCache {
                 false,
                 None,
                 false,
-            ));
+            );
+            self.record_dense_sdpa(
+                1,
+                attended_tokens,
+                attended_tokens.saturating_sub(1),
+                elapsed_nanos(started),
+            );
+            outputs.push(output);
         }
         let output_refs = outputs.iter().collect::<Vec<_>>();
         Ok(Tensor::cat(&output_refs, 2))
@@ -4411,12 +4559,16 @@ impl AttentionCache for TerrsvusionKvCache {
                 return Ok(output);
             }
             let (key, value) = prefill_hot.context("prefill BF16 sin estado de trabajo")?;
-            return Ok(Self::scaled_attention(
-                query,
-                &[key],
-                &[value],
+            let attended_tokens = key.size()[2] as usize;
+            let started = std::time::Instant::now();
+            let output = Self::scaled_attention(query, &[key], &[value], self.sequence_tokens);
+            self.record_dense_sdpa(
+                query_tokens,
+                attended_tokens,
                 self.sequence_tokens,
-            ));
+                elapsed_nanos(started),
+            );
+            return Ok(output);
         }
         if self.query_heads != 16 || self.kv_heads != 2 {
             if let Some(epsilon) = self.applied_mass_tolerance
@@ -4446,12 +4598,16 @@ impl AttentionCache for TerrsvusionKvCache {
                 values.push(tail_value.shallow_clone());
             }
             ensure!(!keys.is_empty(), "KV Llama sin páginas ni cola");
-            return Ok(Self::scaled_attention(
-                query,
-                &keys,
-                &values,
+            let attended_tokens = keys.iter().map(|key| key.size()[2] as usize).sum();
+            let started = std::time::Instant::now();
+            let output = Self::scaled_attention(query, &keys, &values, self.sequence_tokens);
+            self.record_dense_sdpa(
+                query_tokens,
+                attended_tokens,
                 self.sequence_tokens,
-            ));
+                elapsed_nanos(started),
+            );
+            return Ok(output);
         }
         self.exact_mass_attention(
             layer_index,
@@ -4530,7 +4686,7 @@ impl MiniCpmModel {
     }
 
     fn is_eos(&self, token: i64) -> bool {
-        self.eos.iter().any(|&id| id == token)
+        self.eos.contains(&token)
     }
 
     fn terrsvusion_cache(&self, storage_frame_tokens: usize) -> Result<TerrsvusionKvCache> {
@@ -4658,6 +4814,12 @@ pub struct TorchGeneration {
     pub attention_selected_qk_elements: u128,
     pub attention_selected_pv_elements: u128,
     pub attention_v_tokens_avoided: usize,
+    pub dense_sdpa_calls: usize,
+    pub dense_sdpa_scheduled_qk_elements: u128,
+    pub dense_sdpa_scheduled_pv_elements: u128,
+    pub dense_sdpa_causal_qk_elements: u128,
+    pub dense_sdpa_causal_pv_elements: u128,
+    pub dense_sdpa_nanos: u64,
     pub hierarchy_events: usize,
     pub hierarchy_states_total: usize,
     pub hierarchy_states_initial: usize,
@@ -5049,7 +5211,7 @@ impl TorchModelRuntime {
             };
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("abrir identidad runtime {}", path.display()))?;
-            digest.update(&(bytes.len() as u64).to_le_bytes());
+            digest.update((bytes.len() as u64).to_le_bytes());
             digest.update(&bytes);
         }
         for shard in &spec.weight_shards {
@@ -6277,6 +6439,12 @@ impl TorchModelRuntime {
                 attention_selected_qk_elements: cache.attention_selected_qk_elements,
                 attention_selected_pv_elements: cache.attention_selected_pv_elements,
                 attention_v_tokens_avoided: cache.attention_v_tokens_avoided,
+                dense_sdpa_calls: cache.dense_sdpa_calls,
+                dense_sdpa_scheduled_qk_elements: cache.dense_sdpa_scheduled_qk_elements,
+                dense_sdpa_scheduled_pv_elements: cache.dense_sdpa_scheduled_pv_elements,
+                dense_sdpa_causal_qk_elements: cache.dense_sdpa_causal_qk_elements,
+                dense_sdpa_causal_pv_elements: cache.dense_sdpa_causal_pv_elements,
+                dense_sdpa_nanos: cache.dense_sdpa_nanos,
                 hierarchy_events: cache.hierarchy_events,
                 hierarchy_states_total: cache.hierarchy_states_total,
                 hierarchy_states_initial: cache.hierarchy_states_initial,
@@ -7158,6 +7326,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dense_sdpa_accounting_covers_remainder_chunks_and_all_llama_layers() {
+        let mut cache = TerrsvusionKvCache::try_new_with_geometry(512, 32, 8, 32, 128).unwrap();
+        let mut sequence_tokens = 0usize;
+        for query_tokens in [512usize, 512, 512, 512, 512, 512, 512, 416] {
+            let attended_tokens = sequence_tokens + query_tokens;
+            for _ in 0..32 {
+                cache.record_dense_sdpa(query_tokens, attended_tokens, sequence_tokens, 1);
+            }
+            sequence_tokens = attended_tokens;
+        }
+        assert_eq!(sequence_tokens, 4000);
+        assert_eq!(cache.dense_sdpa_calls, 8 * 32);
+        assert_eq!(cache.dense_sdpa_scheduled_qk_elements, 9_220_128_768);
+        assert_eq!(cache.dense_sdpa_scheduled_pv_elements, 1_180_176_482_304);
+        assert_eq!(cache.dense_sdpa_causal_qk_elements, 8_194_048_000);
+        assert_eq!(cache.dense_sdpa_causal_pv_elements, 1_048_838_144_000);
+        assert_eq!(cache.dense_sdpa_nanos, 8 * 32);
+    }
+
+    #[test]
     fn prefill_working_set_is_released_after_exact_cold_barrier() {
         let mut cache = TerrsvusionKvCache::try_new_with_storage_frame_tokens(16).unwrap();
         let query = Tensor::zeros([1, 16, 2, 128], (Kind::BFloat16, Device::Cpu));
@@ -7166,6 +7354,12 @@ mod tests {
 
         let _ = cache.attend(0, &query, &key, &value).unwrap();
         cache.finish_step(2);
+        assert_eq!(cache.dense_sdpa_calls, 1);
+        assert_eq!(cache.dense_sdpa_scheduled_qk_elements, 2 * 2 * 16);
+        assert_eq!(cache.dense_sdpa_scheduled_pv_elements, 2 * 2 * 16 * 128);
+        assert_eq!(cache.dense_sdpa_causal_qk_elements, (1 + 2) * 16);
+        assert_eq!(cache.dense_sdpa_causal_pv_elements, (1 + 2) * 16 * 128);
+        assert!(cache.dense_sdpa_nanos > 0);
         assert!(cache.layers[0].prefill_hot.is_some());
         assert_eq!(cache.prefill_working_peak_bytes, 2 * 2 * 2 * 128 * 2);
 
@@ -7195,6 +7389,53 @@ mod tests {
         cache
             .persist_prefix(root.path(), "prefix-digest", "model-digest")
             .unwrap();
+        assert_eq!(cache.prefix_copied_bytes, 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let suffix_inode = fs::metadata(cache.exact_cold.path()).unwrap().ino();
+            let prefix_inode =
+                fs::metadata(root.path().join("prefix-digest").join("pages-exact.kv"))
+                    .unwrap()
+                    .ino();
+            assert_ne!(suffix_inode, prefix_inode);
+        }
+        assert!(
+            cache
+                .prefix_cold
+                .as_ref()
+                .is_some_and(|store| store.is_read_only() && store.metadata().len() == 24)
+        );
+        assert!(cache.exact_cold.metadata().is_empty());
+        assert!(cache.layers.iter().all(|layer| {
+            layer.pages.iter().all(|page| {
+                matches!(
+                    page.storage,
+                    PageStorage::Cold {
+                        immutable: true,
+                        ..
+                    }
+                )
+            })
+        }));
+        let suffix_query = Tensor::ones([1, 16, 2, 128], (Kind::BFloat16, Device::Cpu));
+        let suffix_key = Tensor::ones([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
+        let suffix_value = Tensor::ones([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
+        for layer in 0..24 {
+            let _ = cache
+                .attend(layer, &suffix_query, &suffix_key, &suffix_value)
+                .unwrap();
+        }
+        cache.finish_step(2);
+        cache.seal_partial_storage_frames().unwrap();
+        assert_eq!(cache.exact_cold.metadata().len(), 24);
+        assert_eq!(
+            cache
+                .prefix_cold
+                .as_ref()
+                .map(|store| store.metadata().len()),
+            Some(24)
+        );
 
         let mut restored =
             TerrsvusionKvCache::restore_prefix(root.path(), "prefix-digest", "model-digest", 16)
@@ -7719,8 +7960,8 @@ mod tests {
                     head_dim: 128,
                     tile: 16,
                 },
-                &bf16_k,
-                &bf16_v,
+                bf16_k,
+                bf16_v,
                 false,
             )
             .unwrap();
@@ -7763,7 +8004,7 @@ mod tests {
             .llama_certified_value_attention(
                 0,
                 &q,
-                &[page.clone()],
+                std::slice::from_ref(&page),
                 Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
                 None,
                 None,
@@ -7830,7 +8071,7 @@ mod tests {
                 .llama_certified_value_attention(
                     0,
                     &q,
-                    &[page.clone()],
+                    std::slice::from_ref(&page),
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
                     None,
                     None,

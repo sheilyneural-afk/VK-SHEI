@@ -650,6 +650,17 @@ async fn chat(
                 "v_tokens_materialized": result.exact_v_tokens_materialized,
                 "max_bound": result.exact_mass_max_bound
             },
+            "transformer_attention_work": {
+                "dense_sdpa_calls": result.dense_sdpa_calls,
+                "scheduled_qk_elements": result.dense_sdpa_scheduled_qk_elements,
+                "scheduled_pv_elements": result.dense_sdpa_scheduled_pv_elements,
+                "causal_qk_elements": result.dense_sdpa_causal_qk_elements,
+                "causal_pv_elements": result.dense_sdpa_causal_pv_elements,
+                "dense_sdpa_nanos": result.dense_sdpa_nanos,
+                "scheduled_scope": "rectangular_qk_and_pv_tensors_submitted_to_libtorch_sdpa",
+                "causal_scope": "non_masked_prefix_pairs",
+                "kernel_scope": "elapsed_wrapper_time_only_opaque_libtorch_internal_flops_not_observable"
+            },
             "decode_internal_nanos": {
                 "metadata": result.decode_metadata_nanos,
                 "key_materialization": result.decode_key_materialization_nanos,

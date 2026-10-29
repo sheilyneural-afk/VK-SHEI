@@ -657,9 +657,10 @@ menos dos mensajes, todos salvo el último forman el prefijo cacheable; el
 identidad criptográfica de pesos y tokenizer, los ids exactos del prefijo y la
 geometría de almacenamiento. El manifiesto conserva certificados, páginas y
 eje dimensional. La publicación usa staging y rename atómico. En un hit se
-copia el backing inmutable a una caché de trabajo, se reconstruye el catálogo,
-se verifica criptográficamente y se rehidrata K/V BF16 antes de procesar solo
-el sufijo. El decode de una petición nunca modifica el prefijo persistido.
+abre directamente el backing publicado como autoridad inmutable, se reconstruye
+el catálogo y se verifican criptográficamente las páginas recuperadas antes de
+procesar solo el sufijo. No se copia el archivo (`prefix_cache_copied_bytes=0`)
+y el decode de una petición nunca modifica el prefijo persistido.
 
 Esto elimina el cómputo Transformer repetido del prefijo, no toda su I/O ni la
 rehidratación BF16. Tampoco acelera una petición de un solo mensaje, porque no
@@ -673,6 +674,38 @@ en un worker acotado; el hilo propietario solo hace el append ordenado. Se usa
 un único worker para evitar competir con los hilos de LibTorch durante el
 prefill. Las métricas `prefill_*_nanos` separan eje dimensional, concatenación
 caliente, certificados, handoff y commits.
+
+La ruta canónica densa expone además dos contabilidades distintas, porque una
+reducción de lecturas del `ColdStore` no prueba una reducción del Transformer:
+
+- `dense_sdpa_scheduled_{qk,pv}_elements`: geometría rectangular entregada a
+  LibTorch SDPA, incluida la zona tapada por la máscara causal explícita;
+- `dense_sdpa_causal_{qk,pv}_elements`: pares de prefijo no enmascarados;
+- `dense_sdpa_calls` y `dense_sdpa_nanos`: llamadas y tiempo medido alrededor
+  de SDPA. Este tiempo no es un contador hardware y no revela los FLOP internos
+  del kernel opaco.
+
+Una prueba física Llama 3.1 8B BF16 de 128 tokens en dos bloques de 64 produjo
+64 llamadas (2 bloques × 32 capas), 12.582.912 elementos QK programados y
+8.454.144 causales, exactamente las fórmulas tensoriales. En 4.000 tokens, un
+bloque único fue peor que ocho bloques de hasta 512: 111,458 s frente a
+92,514 s de prefill y 500 MiB frente a 78 MiB de working set K/V conocido. La
+causa es que el bloque único entrega un rectángulo causal 4.000×4.000 por capa;
+menos llamadas no significa menos trabajo programado. La evidencia completa
+está en `docs/EVIDENCIA_PREFILL_DENSO_4K_20261030.json`. Ninguna de estas
+mediciones demuestra todavía un primer prefill subcuadrático.
+
+La publicación del primer prefijo tampoco copia ya el backing cuando el
+directorio temporal y la caché están en el mismo sistema de archivos: se crea
+un enlace de staging, se publica el directorio por `rename`, se reabre el
+backing como solo lectura y se crea un ColdStore distinto para el sufijo. Si el
+enlace no está disponible, la copia entre sistemas de archivos es explícita y
+sus bytes se publican en `prefix_cache_copied_bytes`; no se presenta como cero
+copia. Una ejecución física Llama 3.1 8B con 807 tokens produjo
+`copied_bytes=0` e `immutable=true` tanto en el miss como en el hit. El prefill
+bajó de 17,574 s a 0,621 s en la segunda pregunta (28,31×). Esto elimina I/O de
+publicación del primer documento, no el Transformer denso inicial. Evidencia:
+`docs/EVIDENCIA_PUBLICACION_PREFIJO_SIN_COPIA_20261030.json`.
 
 ## Almacenamiento e integridad
 
@@ -1047,10 +1080,11 @@ cargo build --release --all-features --all-targets
 
 Estado actual verificado:
 
-- 52 tests correctos;
+- 100 tests de biblioteca, 2 del ejecutable documental y 13 del servidor
+  correctos (115 en total);
 - 0 fallos;
 - Clippy limpio con advertencias tratadas como error;
-- biblioteca y tres ejecutables compilados en release.
+- biblioteca y todos los targets/features compilados en release.
 
 Prueba real de prefijo persistente del 28 de octubre de 2026, con
 MiniCPM5-1B BF16, un fragmento coherente en español de *La isla del tesoro* y

@@ -14,6 +14,9 @@ use std::{
     path::Path,
 };
 
+type RankedDocumentCandidate = (u32, u64, usize);
+type RankedDocumentCandidates = (Vec<RankedDocumentCandidate>, usize);
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DocumentPage {
     pub page_number: u32,
@@ -479,7 +482,7 @@ impl DocumentGraph {
         query: &str,
         graph_hops: usize,
         scope: RetrievalScope,
-    ) -> Result<(Vec<(u32, u64, usize)>, usize)> {
+    ) -> Result<RankedDocumentCandidates> {
         ensure!(!query.trim().is_empty(), "retrieval query cannot be empty");
         self.verify_original_authority()?;
         let query_micro = micro_metadata(1, query);
