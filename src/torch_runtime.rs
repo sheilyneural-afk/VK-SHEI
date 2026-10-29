@@ -780,23 +780,6 @@ impl TerrsvusionKvCache {
         let conversion = Self::conversion_worker(0)?;
         let axis_dim = usize::try_from(kv_heads * head_dim).context("dimensión de eje")?;
         let axis_heads = usize::try_from(kv_heads).context("cabezas KV")?;
-        // Llama 3.1's 32Q/8KV geometry needs tighter interval bounds than the
-        // general semantic axis normally produces. This fuse limits only the
-        // maximum open extent; it does not drop or retokenize positions. The
-        // resulting certificate is larger, but its score upper bounds are
-        // tighter and can therefore close regional branch-and-bound proofs.
-        let axis_policy = if storage_frame_tokens >= 32
-            && query_heads == 32
-            && kv_heads == 8
-            && head_dim == 128
-        {
-            AxisPolicy {
-                open_extent_safety_limit: Some(8),
-                ..AxisPolicy::default()
-            }
-        } else {
-            AxisPolicy::default()
-        };
         Ok(Self {
             layers: (0..n_layers)
                 .map(|_| TerrsvusionLayer {
@@ -813,7 +796,11 @@ impl TerrsvusionKvCache {
             exact_cold,
             conversion,
             storage_frame_tokens,
-            parallel_axis: ParallelContextAxis::new_partitioned(axis_dim, axis_heads, axis_policy)?,
+            parallel_axis: ParallelContextAxis::new_partitioned(
+                axis_dim,
+                axis_heads,
+                AxisPolicy::default(),
+            )?,
             parallel_query_events: 0,
             parallel_dimensional_views: 0,
             parallel_view_tokens: 0,
@@ -2924,18 +2911,32 @@ fn state_score_uppers_generic<const Q: usize, const KV: usize>(
                 let kv_head = head / (Q / KV);
                 let query = &query_values[head * 128..(head + 1) * 128];
                 let mut upper = 0.0_f64;
+                let mut absolute_product_sum = 0.0_f64;
                 for (dimension, query_value) in query.iter().copied().enumerate() {
                     let index = kv_head * 128 + dimension;
-                    let bound = if query_value >= 0.0 {
-                        region.key_maximum_bits[index]
-                    } else {
-                        region.key_minimum_bits[index]
-                    };
-                    upper +=
-                        f64::from(query_value) * f64::from(half::bf16::from_bits(bound).to_f32());
+                    let minimum =
+                        f64::from(half::bf16::from_bits(region.key_minimum_bits[index]).to_f32());
+                    let maximum =
+                        f64::from(half::bf16::from_bits(region.key_maximum_bits[index]).to_f32());
+                    let bound = if query_value >= 0.0 { maximum } else { minimum };
+                    upper += f64::from(query_value) * bound;
+                    absolute_product_sum +=
+                        f64::from(query_value).abs() * minimum.abs().max(maximum.abs());
                 }
-                state[head]
-                    .push(upper * scale + ((region.local_end - region.local_start) as f64).ln());
+                // The interval dot product above is evaluated in f64, while
+                // the authoritative regional score is a LibTorch FP32
+                // matmul followed by FP32 scaling. Bound both rounding stages
+                // using Higham's standard gamma_n model instead of an
+                // empirical epsilon. This keeps the interval conservative
+                // for any accumulation order of 128 finite FP32 products.
+                let unit_roundoff = 2_f64.powi(-24);
+                let gamma_128 = (128.0 * unit_roundoff) / (1.0 - 128.0 * unit_roundoff);
+                let dot_upper = upper + gamma_128 * absolute_product_sum;
+                let scaled = dot_upper * scale;
+                let scale_rounding = unit_roundoff / (1.0 - unit_roundoff) * scaled.abs();
+                state[head].push(
+                    scaled + scale_rounding + ((region.local_end - region.local_start) as f64).ln(),
+                );
             }
         }
     }
@@ -3570,9 +3571,12 @@ impl AttentionCache for TerrsvusionKvCache {
                     .map(|region| {
                         (region.key_minimum_bits.len() + region.key_maximum_bits.len())
                             * std::mem::size_of::<u16>()
+                            + region.value_abs_max.len() * std::mem::size_of::<f32>()
+                            + region.value_abs_max_by_kv_head.len() * std::mem::size_of::<f32>()
                     })
                     .sum::<usize>()
                     + page.certificate.value_abs_max.len() * std::mem::size_of::<f32>()
+                    + page.certificate.value_abs_max_by_kv_head.len() * std::mem::size_of::<f32>()
             })
             .sum();
         pages + tails + pending + certificates + self.parallel_axis.fingerprint_payload_bytes()
@@ -5150,6 +5154,19 @@ impl TorchModelRuntime {
         cache.exact_oracle_enabled = exact_oracle_enabled || shadow_metrics_enabled;
         cache.shadow_metrics = shadow_metrics_enabled.then(ShadowMetrics::default);
         cache.applied_mass_tolerance = applied_mass_tolerance;
+        if applied_mass_tolerance.is_some()
+            && cache.query_heads == 32
+            && cache.kv_heads == 8
+            && cache.head_dim == 128
+        {
+            // Per-token regions are intentionally diagnostic-only: they make
+            // the regional Llama proof tight enough to measure real QK/PV
+            // pruning, but their metadata and launch cost are not acceptable
+            // as the canonical 131K representation.
+            cache
+                .parallel_axis
+                .set_open_extent_safety_limit_before_observation(Some(1))?;
+        }
         cache.record_step_logits = record_step_logits;
         let mut generated = Vec::with_capacity(max_tokens);
         let mut prefill_seconds = 0.0_f64;
@@ -6607,6 +6624,61 @@ mod tests {
             .unwrap();
         assert_eq!(certificate.bounds().len(), 32);
         assert!(certificate.bounds().iter().all(|bound| bound.is_finite()));
+    }
+
+    #[test]
+    fn llama_regional_upper_bounds_cover_libtorch_fp32_matmul() {
+        let mut cache = TerrsvusionKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let key_values = (0..8 * 128)
+            .map(|index| {
+                let signed = (index % 29) as f32 - 14.0;
+                signed * 0.03125
+            })
+            .collect::<Vec<_>>();
+        let query_values = (0..32 * 128)
+            .map(|index| {
+                let signed = (index % 31) as f32 - 15.0;
+                signed * 0.046875
+            })
+            .collect::<Vec<_>>();
+        let key = Tensor::from_slice(&key_values)
+            .view([1, 8, 1, 128])
+            .to_kind(Kind::BFloat16);
+        let value = Tensor::ones([1, 8, 1, 128], (Kind::BFloat16, Device::Cpu));
+        cache.observe_parallel_axis(&key).unwrap();
+        let page = TerrsvusionPage {
+            token_start: 0,
+            tokens: 1,
+            certificate: cache.page_attention_certificate(&key, &value, 0).unwrap(),
+            storage: PageStorage::Pending {
+                sequence: 0,
+                key: key.shallow_clone(),
+                value,
+            },
+        };
+        let query = Tensor::from_slice(&query_values)
+            .view([1, 32, 1, 128])
+            .to_kind(Kind::BFloat16)
+            .to_kind(Kind::Float);
+        let mut query_float = vec![0.0_f32; 32 * 128];
+        query.copy_data(&mut query_float, 32 * 128);
+        let scale = 1.0 / 128.0_f64.sqrt();
+        let uppers = state_score_uppers_generic::<32, 8>(&[page], &query_float, scale);
+        let repeated = key
+            .repeat_interleave_self_int(4, 1, None)
+            .to_kind(Kind::Float);
+        let scores = (query.matmul(&repeated.transpose(-2, -1)) / 128.0_f64.sqrt()).contiguous();
+        let mut exact = vec![0.0_f32; 32];
+        scores.copy_data(&mut exact, 32);
+        let upper = uppers.get(&0).unwrap();
+        for head in 0..32 {
+            assert!(
+                f64::from(exact[head]) <= upper[head],
+                "score LibTorch fuera de cota en cabeza {head}: {} > {}",
+                exact[head],
+                upper[head]
+            );
+        }
     }
 
     #[test]

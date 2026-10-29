@@ -487,6 +487,22 @@ impl ParallelContextAxis {
         Ok(closed)
     }
 
+    /// Configure the operational open-extent fuse before the first token is
+    /// observed. Explicit diagnostics can request tighter certificates
+    /// without changing the canonical semantic axis.
+    pub fn set_open_extent_safety_limit_before_observation(
+        &mut self,
+        limit: Option<usize>,
+    ) -> Result<()> {
+        ensure!(
+            self.next_token == 0 && self.open.is_none() && self.extents.is_empty(),
+            "no se puede cambiar el fusible tras observar tokens"
+        );
+        ensure!(limit.is_none_or(|value| value > 0), "fusible vacío");
+        self.policy.open_extent_safety_limit = limit;
+        Ok(())
+    }
+
     /// Close the current semantic extent at a lifecycle boundary such as the
     /// end of prefill. This does not pad or retokenize it.
     pub fn flush(&mut self) -> Option<SemanticExtent> {

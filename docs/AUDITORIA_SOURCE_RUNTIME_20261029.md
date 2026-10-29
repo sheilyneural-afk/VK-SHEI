@@ -430,5 +430,44 @@ que una diferencia numérica entre la suma escalar usada para construir la cota
 y la acumulación de `matmul` puede producir un score ligeramente superior a la
 cota almacenada. La ruta se corrigió para tratar cualquier inconsistencia como
 certificado inválido y volver a la atención densa; nunca se propaga como error
-de servicio ni autoriza una omisión. El fusible publicado permanece en 8
-tokens, porque el experimento de un token no queda certificado por sí mismo.
+de servicio ni autoriza una omisión. La inferencia canónica no fuerza ese
+fusible; la fragmentación de un token queda aislada al diagnóstico explícito.
+
+## Cota FP32 formal y primera poda QK/PV real en Llama completo
+
+La cota regional incorpora ahora el error de redondeo del producto escalar
+FP32 y del escalado mediante el modelo `gamma_n = n*u/(1-n*u)`, con `n=128` y
+`u=2^-24`. Un test de regresión compara directamente la cota 32Q/8KV con el
+`matmul` de LibTorch y exige que todas las cabezas queden cubiertas. La
+fragmentación por token se activa únicamente en el diagnóstico explícito de
+omisión; la inferencia canónica conserva el eje semántico para no multiplicar
+los metadatos de 131K.
+
+La ejecución real de Llama 3.1 8B, 128 tokens, tolerancia `1e-2`, produjo:
+
+```text
+parallel_extents=128
+attention_dense_qk_elements=8454144
+attention_selected_qk_elements=5745376
+attention_dense_pv_elements=1082130432
+attention_selected_pv_elements=735408128
+certified_v_tokens_omitted=2
+exact_token_parity=true
+max_abs_logit_difference=0.140625
+omission_accepted=false
+prefill_seconds_applied=126.273506095
+prefill_seconds_canonical=2.686171143
+```
+
+Esto demuestra por primera vez en el checkpoint completo una reducción lógica
+positiva de QK y PV del `32,04%` en eventos certificados. No demuestra una
+optimización utilizable: el prefill fue aproximadamente `47x` más lento, solo
+se omitieron dos tokens V en el agregado publicado y la divergencia final de
+logits rechaza el resultado. La API continúa deshabilitada. La evidencia separa
+así poda real del Transformer, paridad final y rendimiento: solo la primera se
+ha cerrado en este experimento.
+
+También se corrigió `physical_bytes()` para incluir los máximos V por región y
+por cabeza que antes no entraban en la cuenta. Las cifras anteriores de memoria
+del certificado subestimaban ese componente y no deben usarse para certificar
+30K/100K/131K.
