@@ -198,6 +198,13 @@ densas no atribuyen ningún ahorro QK/PV y el prefill aplicado fue 18,4 veces
 más lento en esta geometría. La instrumentación es contabilidad lógica del
 runtime, no una prueba de kernels LibTorch fusionados.
 
+Como corrección posterior, `generate_token_ids_with_applied_omission` ahora
+rechaza el resultado cuando el `L∞` observado supera la tolerancia solicitada.
+Por tanto, una omisión positiva que diverja como esta ya no se entrega como
+resultado válido: queda como diagnóstico fallido y el contrato de aplicación
+es fail-closed. Esto no crea paridad; impide que una falta de paridad se
+publique como si la tuviera.
+
 ## Corrección aplicada
 
 `TerrsvusionKvCache::restore_prefix` era una envoltura usada solo por tests,

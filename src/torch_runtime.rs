@@ -4758,6 +4758,12 @@ impl TorchModelRuntime {
                     max_abs_logit_difference.max((*left as f64 - *right as f64).abs());
             }
         }
+        ensure!(
+            max_abs_logit_difference <= tolerance,
+            "omisión aplicada rechazada: L∞ de logits {:.9} supera la tolerancia {:.9}",
+            max_abs_logit_difference,
+            tolerance
+        );
         Ok(AppliedOmissionReport {
             tolerance,
             exact_token_parity: canonical.token_ids == applied.token_ids,
