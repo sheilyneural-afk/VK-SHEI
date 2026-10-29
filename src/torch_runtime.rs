@@ -1125,6 +1125,7 @@ impl TerrsvusionKvCache {
         }
     }
 
+    #[cfg(test)]
     fn restore_prefix(
         cache_root: &Path,
         cache_key: &str,

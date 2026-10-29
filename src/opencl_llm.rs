@@ -4536,7 +4536,7 @@ mod tests {
             }
         }
         eprintln!(
-            "MICRO_HOT_LLM_GPU375_PASS | input_tokens={} | decoded_tokens={} | logits_identical=true | BF16_KV_bytes_verified={} | GPU_micro_hot_sparse={} | GPU_micro_exact_fallback={} | ColdStore_V_reads_during_generation={} | original_index_bytes={} | coldstore_pages={} | result_preview={:?}",
+            "MICRO_HOT_LLM_GPU375_PASS | input_tokens={} | decoded_tokens={} | logits_identical=true | BF16_KV_bytes_verified={} | GPU_micro_hot_sparse={} | GPU_micro_exact_fallback={} | ColdStore_V_reads_during_decode={} | original_index_bytes={} | coldstore_pages={} | result_preview={:?}",
             ids.len(),
             actual.tokens.len(),
             verified_bytes,
