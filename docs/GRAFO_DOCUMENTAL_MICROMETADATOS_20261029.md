@@ -185,8 +185,42 @@ Se arrancó el servidor real con Llama 3.1 8B, el grafo de 95 páginas,
 - parada limpia del servidor tras la medición.
 
 Esto demuestra la conexión grafo -> endpoint -> pool -> LibTorch compartido.
-No demuestra paralelismo de dos consultas documentales ni exhaustividad
-semántica.
+No demuestra exhaustividad semántica.
+
+## Concurrencia documental multiworker
+
+La primera prueba con dos peticiones simultáneas descubrió un defecto real de
+reparto: Axum clona el estado de aplicación para cada handler y
+`InferencePool::clone` copiaba el valor de su cursor atómico. Dos handlers
+podían empezar ambos en el worker 0 y serializarse aunque el servidor anunciara
+dos workers. El cursor es ahora un `Arc<AtomicUsize>` compartido; la regresión
+`cloned_pools_share_one_round_robin_cursor` verifica el reparto 0 -> 1 -> 0 a
+través de clones del pool.
+
+Con el arreglo, dos preguntas distintas se ejecutaron simultáneamente sobre el
+servidor real de dos workers, 291 tensores LibTorch compartidos y cero cargas de
+modelo por petición:
+
+- tiempo total concurrente: 50,2334 s;
+- tiempo total de las mismas peticiones en secuencia y sobre el mismo binario:
+  61,8076 s;
+- reducción del tiempo agregado: 18,73 %;
+- throughput: de 0,03236 a 0,03981 peticiones/s, una mejora del 23,04 %;
+- RSS máximo concurrente: 16.760.692 KiB;
+- RSS máximo secuencial: 16.782.648 KiB;
+- latencia de la consulta A: de 28,1696 a 44,7298 s (+58,79 %);
+- latencia de la consulta B: de 33,6380 a 50,2334 s (+49,34 %).
+
+Las latencias internas de cada inferencia concurrente, 44,7112 y 50,216 s,
+coinciden aproximadamente con sus terminaciones de pared: las consultas se
+solaparon de verdad y el tiempo total no es su suma. La mejora es de throughput
+agregado, no de latencia individual. La contención de CPU y memoria hace cada
+inferencia aproximadamente un 49-59 % más lenta. La diferencia de RSS de
+21.956 KiB está dentro del ruido de esta medición y no se presenta como ahorro.
+
+Esta prueba cierra el caso acotado de dos consultas documentales activas. No es
+una certificación de carga sostenida, de más de dos consultas simultáneas ni de
+escalado universal.
 
 Esta medición sí demuestra que la ruta selectiva reduce el número efectivo de
 posiciones procesadas por el Transformer en esta consulta. No demuestra que

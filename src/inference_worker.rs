@@ -278,18 +278,18 @@ where
     }
 }
 
-/// Round-robin pool of independent model owners. Each worker loads its own
-/// authority; requests never share a LibTorch module.
+/// Round-robin pool of independent executor owners. The factory decides
+/// whether their immutable model storage is independent or shared.
 pub struct InferencePool<Q, R, E> {
     workers: Vec<InferenceWorker<Q, R, E>>,
-    cursor: AtomicUsize,
+    cursor: Arc<AtomicUsize>,
 }
 
 impl<Q, R, E> Clone for InferencePool<Q, R, E> {
     fn clone(&self) -> Self {
         Self {
             workers: self.workers.clone(),
-            cursor: AtomicUsize::new(self.cursor.load(Ordering::Relaxed)),
+            cursor: Arc::clone(&self.cursor),
         }
     }
 }
@@ -321,7 +321,7 @@ where
         }
         Ok(Self {
             workers,
-            cursor: AtomicUsize::new(0),
+            cursor: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -553,6 +553,26 @@ mod tests {
         release_tx.send(()).unwrap();
         assert_eq!(first.wait(), Ok(1));
         assert_eq!(pool.worker_count(), 2);
+    }
+
+    #[test]
+    fn cloned_pools_share_one_round_robin_cursor() {
+        struct IndexedExecutor(usize);
+        impl InferenceExecutor for IndexedExecutor {
+            type Request = ();
+            type Response = usize;
+            type Error = ();
+
+            fn execute(&mut self, _request: (), _cancel: &AtomicBool) -> Result<usize, ()> {
+                Ok(self.0)
+            }
+        }
+
+        let pool = InferencePool::spawn_many(2, 2, |index| Ok(IndexedExecutor(index))).unwrap();
+        let request_state_clone = pool.clone();
+        assert_eq!(pool.try_submit(()).unwrap().wait(), Ok(0));
+        assert_eq!(request_state_clone.try_submit(()).unwrap().wait(), Ok(1));
+        assert_eq!(pool.try_submit(()).unwrap().wait(), Ok(0));
     }
 
     #[test]

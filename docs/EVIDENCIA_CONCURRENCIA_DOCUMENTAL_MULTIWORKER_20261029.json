@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-29",
+  "operation": "two_concurrent_document_queries_shared_libtorch_authority",
+  "runtime": {
+    "workers": 2,
+    "authority_mode": "shared_libtorch_weight_storage",
+    "shared_weight_tensors_verified_by_data_ptr": 291,
+    "document_pages": 95,
+    "document_graph_micro_spans": 4091,
+    "model_loads_per_request": 0
+  },
+  "root_cause_repaired": {
+    "symptom": "Axum request-state clones copied the round-robin cursor, so simultaneous handlers could both select worker 0 and serialize.",
+    "repair": "InferencePool clones now share one Arc<AtomicUsize> cursor.",
+    "regression_test": "inference_worker::tests::cloned_pools_share_one_round_robin_cursor",
+    "observed_broken_concurrent_wall_seconds": 57.3736
+  },
+  "queries": [
+    {
+      "question": "¿Cuántos habitantes tenía Puerto Gris?",
+      "answer": "La respuesta es: 2.000 habitantes. [Página 1]",
+      "prompt_tokens": 1350,
+      "concurrent_wall_seconds": 44.729791488,
+      "concurrent_model_seconds": 44.71118551,
+      "concurrent_prefill_seconds": 30.924241005,
+      "concurrent_decode_seconds": 13.694021481,
+      "sequential_wall_seconds": 28.169604608,
+      "sequential_model_seconds": 28.152016339,
+      "sequential_prefill_seconds": 19.568152624,
+      "sequential_decode_seconds": 8.495733533,
+      "latency_increase_under_contention_percent": 58.78743102875148
+    },
+    {
+      "question": "¿Cuál era el sello vivo del lote de la linterna?",
+      "answer": "La respuesta es: El sello vivo del lote de la linterna es VERDE-8841-Ω. [1]",
+      "prompt_tokens": 1360,
+      "concurrent_wall_seconds": 50.233430784,
+      "concurrent_model_seconds": 50.216076008,
+      "concurrent_prefill_seconds": 30.556830722,
+      "concurrent_decode_seconds": 19.564290927,
+      "sequential_wall_seconds": 33.637987584,
+      "sequential_model_seconds": 33.619425052,
+      "sequential_prefill_seconds": 20.126726056,
+      "sequential_decode_seconds": 13.406450017,
+      "latency_increase_under_contention_percent": 49.33542221739111
+    }
+  ],
+  "aggregate": {
+    "concurrent": {
+      "wall_seconds": 50.233430784,
+      "throughput_requests_per_second": 0.039814123160328244,
+      "peak_server_rss_kib": 16760692
+    },
+    "sequential_same_build": {
+      "wall_seconds": 61.807592192,
+      "throughput_requests_per_second": 0.03235848427466922,
+      "peak_server_rss_kib": 16782648
+    },
+    "concurrent_wall_reduction_percent": 18.726115995662575,
+    "concurrent_throughput_gain_percent": 23.040754388781526,
+    "peak_rss_delta_kib": -21956
+  },
+  "proof": {
+    "real_overlap": "Each concurrent request's model latency approximately equals its own wall completion time; total wall is the maximum, not the sum.",
+    "answers_correct": true,
+    "server_stopped_cleanly": true
+  },
+  "claim_boundary": {
+    "two_simultaneous_requests_verified": true,
+    "sustained_load_certified": false,
+    "more_than_two_simultaneous_requests_certified": false,
+    "per_request_latency_improved": false,
+    "rss_reduction_claimed": false,
+    "universal_scaling_claimed": false
+  }
+}
