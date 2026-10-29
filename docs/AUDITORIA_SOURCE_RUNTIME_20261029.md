@@ -311,3 +311,34 @@ sí existen en el certificado, pero el branch-and-bound que las consume está
 dimensionado para la ruta 16Q/2KV; no es todavía un planificador Llama 32Q/8KV
 equivalente. Activarlo por simple reutilización sería incorrecto porque no
 probaría la misma selección ni el mismo error por cabeza.
+
+## Primer planificador regional Llama 32Q/8KV
+
+La ruta experimental ahora carga regiones K/V completas en orden best-first y
+usa `IncrementalRegionCertificate<32, 8>` para decidir si la masa omitida está
+certificada. Si no se cierra la cota, devuelve `None` y conserva la atención
+densa. La prueba física controlada quedó con:
+
+```text
+K_scored=1
+V_materialized=1
+cold_partial_value_reads=1
+cold_partial_bytes_avoided=30720
+BF16_SDPA_Linf=0
+bound=0
+old_prefix_fail_closed=true
+exact_mode_fail_closed=true
+```
+
+Esto demuestra poda regional y paridad en la geometría controlada del
+certificado, no en todo el checkpoint Llama. Al repetir el binario real con
+Llama 3.1 8B, `book_tokens=128` y `applied_mass_tolerance=1e-3`, la barrera de
+paridad siguió rechazando la petición:
+
+```text
+Error: omisión aplicada rechazada: L∞ de logits 0.125000000 supera la tolerancia 0.001000000
+```
+
+El planificador queda integrado como candidato fail-closed; la API sigue
+deshabilitada y la paridad de logits del checkpoint real continúa sin
+demostrarse.
