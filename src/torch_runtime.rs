@@ -1946,15 +1946,17 @@ impl TerrsvusionKvCache {
             keys.push(tail_key.shallow_clone());
             values.push(tail_value.shallow_clone());
         }
+        let tail_tokens = tail.map_or(0, |(key, _)| key.size()[2] as usize);
         let total_tokens = self.sequence_tokens + 1;
-        let omitted = total_tokens.saturating_sub(loaded_tokens);
+        let scanned_tokens = loaded_tokens.saturating_add(tail_tokens);
+        let omitted = total_tokens.saturating_sub(scanned_tokens);
         if omitted == 0 {
             return Ok(None);
         }
-        self.exact_k_tokens_scanned = self.exact_k_tokens_scanned.saturating_add(loaded_tokens);
+        self.exact_k_tokens_scanned = self.exact_k_tokens_scanned.saturating_add(scanned_tokens);
         self.exact_v_tokens_materialized = self
             .exact_v_tokens_materialized
-            .saturating_add(loaded_tokens);
+            .saturating_add(scanned_tokens);
         self.attention_v_tokens_avoided = self.attention_v_tokens_avoided.saturating_add(omitted);
         self.exact_mass_max_bound = self
             .exact_mass_max_bound
@@ -6775,7 +6777,7 @@ mod tests {
             "LLAMA_32Q8KV_CERTIFIED_PHYSICAL_V_PASS K_scored={} V_materialized={} V_omitted={} cold_partial_value_reads={} cold_partial_bytes_avoided={} BF16_SDPA_Linf={} bound={} epsilon=0.001 old_prefix_fail_closed=true exact_mode_fail_closed=true",
             count,
             selected,
-            count - selected,
+            cache.attention_v_tokens_avoided,
             stats.partial_value_reads,
             stats.partial_value_bytes_avoided,
             linf,
