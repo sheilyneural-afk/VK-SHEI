@@ -1,4 +1,191 @@
-# Terrsvusion v3
+# VK-SHEI / Terrsvusion V3
+
+Runtime experimental completo en Rust para memoria KV persistente, análisis de
+contexto largo, almacenamiento frío verificable y ejecución CPU/iGPU AMD. Este
+README describe el proyecto que está en este repositorio; no es un resumen de
+una sola prueba ni una promesa de soporte universal para cualquier LLM.
+
+## Qué contiene el proyecto
+
+```text
+.
+├── Cargo.toml                         configuración, features y binarios
+├── src/                               runtime Rust y backends
+│   ├── cold_store.rs                  KV append-only, mmap, hashes y auditoría
+│   ├── adaptive_extent.rs             índice dimensional, LSH y metadatos
+│   ├── attention_certificate.rs       cotas y selección certificada
+│   ├── conversion_worker.rs           conversión acotada y backpressure
+│   ├── inference_worker.rs            ejecución serializada y aislamiento
+│   ├── torch_runtime.rs               ruta MiniCPM/LibTorch y runtime largo
+│   ├── prefill_tch.rs                 prefill con tch
+│   ├── portable.rs                    primitivas nativas sin LibTorch
+│   ├── portable_store.rs              almacenamiento portátil
+│   ├── opencl_backend.rs              backend OpenCL
+│   ├── opencl_llm.rs                  ejecución LLM completa experimental
+│   ├── gpu_canonical_lod.rs           LOD canónico en GPU
+│   ├── gpu_micro_regions.rs            microrregiones GPU
+│   ├── native_hip.rs                  puente HIP/hipBLASLt experimental
+│   └── bin/                            servidores, chats, inspectores y benches
+├── native/                            código nativo auxiliar
+├── assets/                            corpus, interfaces web y kernels OpenCL
+├── docs/                              auditorías, comparativas y evidencias
+└── scripts/                           herramientas reproducibles de auditoría
+```
+
+## Capacidades actuales
+
+- Almacén KV frío append-only con reapertura, lectura selectiva, mmap,
+  comprobación de integridad, detección de corrupción y recuperación tras
+  reinicio.
+- Índice dimensional compacto de cuatro bits y LSH por cabeza KV para routing;
+  el índice no sustituye a los K/V BF16 autoritativos.
+- Prefijos persistentes, sellado de regiones, rollback de colas no selladas y
+  workers con backpressure.
+- Ruta CPU BF16 con MiniCPM5-1B mediante `tch`/LibTorch.
+- Ruta GPU OpenCL experimental para iGPU AMD Phoenix, con atención BF16,
+  prefill por lotes, LOD compartido y servidores HTTP separados.
+- Selector HTTP unificado CPU/iGPU/Auto.
+- Auditorías físicas de paridad de logits, KV, hashes, memoria y tiempos en
+  los informes de `docs/`.
+- Herramientas para inspeccionar modelos, comparar backends y reproducir
+  benchmarks.
+
+## Estado y límites importantes
+
+Terrsvusion resuelve principalmente el problema de residencia y persistencia
+del KV. No convierte por sí solo una secuencia de millones de tokens en una
+ventana nativa equivalente para Llama 3.1, ni elimina automáticamente los
+límites de RoPE, posiciones o atención del modelo.
+
+La selección certificada es conservadora: en varias pruebas reales el
+certificador recupera todos los estados. Los resultados de GPU, los ahorros de
+memoria y las aceleraciones son específicos de la máquina, modelo, prompt y
+configuración indicados en cada informe. El backend HIP es experimental y no
+es la ruta predeterminada.
+
+## Compilación
+
+La funcionalidad nativa Rust no requiere PyTorch:
+
+```bash
+cargo check
+cargo test --lib
+```
+
+Para la ruta OpenCL:
+
+```bash
+cargo check --features opencl-backend
+cargo build --release --features opencl-backend
+```
+
+Para la ruta MiniCPM/LibTorch:
+
+```bash
+LIBTORCH_USE_PYTORCH=1 cargo test --all-targets --features torch-backend
+```
+
+En una instalación Python de PyTorch puede ser necesario añadir su directorio
+`torch/lib` a `LD_LIBRARY_PATH` al ejecutar los binarios.
+
+## Binarios principales
+
+```text
+terrsvusion-inspect          inspección de modelos y formatos
+terrsvusion-server           servidor MiniCPM/LibTorch
+terrsvusion-long-context     benchmark y flujo de contexto largo
+terrsvusion-torch-chat       chat de la ruta tch
+terrsvusion-opencl-llm       LLM completo experimental en OpenCL
+terrsvusion-opencl-server    servidor OpenCL
+terrsvusion-unified-server   multiplexor CPU/iGPU/Auto
+terrsvusion-igpu-bench       benchmarks de iGPU
+terrsvusion-compare-opencl   comparación OpenCL/LibTorch
+terrsvusion-native-parity    comprobaciones de paridad nativa
+```
+
+Ejemplos:
+
+```bash
+cargo run --release --bin terrsvusion-inspect -- modelo.safetensors
+cargo run --release --features opencl-backend --bin terrsvusion-igpu-bench
+cargo run --release --features torch-backend --bin terrsvusion-long-context -- --help
+cargo run --release --features unified-router --bin terrsvusion-unified-server
+```
+
+## Cómo leer la evidencia
+
+Los resultados no están agregados como una cifra única de “rendimiento”. Cada
+afirmación se debe leer junto con su informe en `docs/`:
+
+- `VERIFICACION_20261029.md`: estado general y comandos.
+- `ARQUITECTURA_PORTABLE_RUST.md`: ruta sin LibTorch.
+- `LOD_CPU_COMPARTIDO_GPU_20261029.md`: relación entre CPU, iGPU, LOD y
+  selector.
+- `PREFILL_GPU_OPTIMIZADO_20261029.md`: prefill OpenCL por lotes.
+- `GPU_ATENCION_FUSIONADA_EXACTA_20261029.md`: atención GPU exacta.
+- `MICROMETADATOS_REGIONALES_GPU_20261029.md`: micrometadatos y cotas.
+- `AUDITORIA_APROVECHAMIENTO_IGPU_20261029.md`: telemetría y límites de la
+  iGPU.
+- `CORRECCION_LLAMA_V_CERTIFICADA_IDENTIFICADORES_FARO_20261029.md`: límites
+  de la evidencia Llama/Faro.
+
+Los logs y JSON de `docs/` son artefactos de medición, no afirmaciones
+independientes de producción. La ruta CPU, la ruta GPU densa, la ruta GPU LOD,
+el backend OpenCL completo y la integración opcional HIP deben mantenerse
+separados al interpretar los resultados.
+
+## Interfaces locales
+
+Cuando se ejecutan los servidores correspondientes, las interfaces históricas
+son:
+
+```text
+CPU original:       http://127.0.0.1:8099/
+iGPU OpenCL:        http://127.0.0.1:8188/
+selector unificado: http://127.0.0.1:8288/
+```
+
+Los puertos, modelos, rutas de pesos y opciones exactas se consultan con `--help`
+en cada binario. No se deben exponer estos servidores directamente a Internet
+sin autenticación, límites y aislamiento adicionales.
+
+## Modelo de memoria
+
+```text
+entrada / prefill
+        ↓
+KV reciente y temporales acotados
+        ↓
+sellado por regiones
+        ↓
+ColdStore append-only + hash
+        ↓
+índice 4-bit/LSH y metadatos
+        ↓
+recuperación exacta o selección certificada conservadora
+```
+
+El índice sirve para localizar candidatos. La autoridad numérica continúa en
+los K/V almacenados y verificados. Los resúmenes o micrometadatos no sustituyen
+la evidencia original.
+
+## Desarrollo y contribuciones
+
+Antes de cambiar una ruta, identificar si afecta a CPU, GPU, OpenCL, LibTorch,
+almacenamiento o al router. Ejecutar las pruebas de la feature correspondiente,
+registrar el hardware, el modelo, el prompt, los flags y los hashes, y añadir la
+evidencia a `docs/` sin mezclar resultados de backends diferentes.
+
+La versión publicada debe conservar la distinción entre:
+
+- almacenamiento de millones de tokens;
+- ventana de posiciones del modelo;
+- recuperación selectiva;
+- atención densa;
+- atención aproximada certificada;
+- paridad numérica;
+- rendimiento medido en una máquina concreta.
+
 
 ## Corrección de evidencia Llama 8B: KV residente, V certificada y Faro
 
