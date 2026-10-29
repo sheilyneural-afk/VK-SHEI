@@ -1789,6 +1789,184 @@ impl TerrsvusionKvCache {
         ))
     }
 
+    fn llama_regional_attention(
+        &mut self,
+        query: &Tensor,
+        pages: &[TerrsvusionPage],
+        tail: Option<&(Tensor, Tensor)>,
+        tolerance: f64,
+    ) -> Result<Option<Tensor>> {
+        if pages.is_empty() {
+            return Ok(None);
+        }
+        let query_float = query.to_kind(Kind::Float).contiguous();
+        let mut query_values = vec![0.0_f32; 32 * 128];
+        let query_count = query_values.len();
+        query_float.copy_data(&mut query_values, query_count);
+        let scale = 1.0 / (self.head_dim as f64).sqrt();
+        let state_uppers = state_score_uppers_generic::<32, 8>(pages, &query_values, scale);
+        let mut state_value_max = BTreeMap::<usize, [f64; 8]>::new();
+        let mut regions = Vec::<(usize, usize, usize, usize)>::new();
+        for (page_index, page) in pages.iter().enumerate() {
+            for region in &page.certificate.regions {
+                if region.value_abs_max_by_kv_head.len() != 8 {
+                    return Ok(None);
+                }
+                state_value_max.insert(
+                    region.block_id,
+                    region
+                        .value_abs_max_by_kv_head
+                        .iter()
+                        .copied()
+                        .map(f64::from)
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("máximos V regional Llama inválidos"))?,
+                );
+                regions.push((
+                    region.block_id,
+                    page_index,
+                    region.local_start,
+                    region.local_end,
+                ));
+            }
+        }
+        if state_uppers.len() != regions.len() || state_value_max.len() != regions.len() {
+            return Ok(None);
+        }
+        let mut tail_scores = None;
+        let mut tail_value_max = [0.0_f64; 8];
+        if let Some((tail_key, tail_value)) = tail {
+            let key_float = tail_key.to_kind(Kind::Float).contiguous();
+            let mut key_values = vec![0.0_f32; 8 * tail_key.size()[2] as usize * 128];
+            let key_count = key_values.len();
+            key_float.copy_data(&mut key_values, key_count);
+            tail_scores = Some(exact_scores_generic::<32, 8>(
+                &query_values,
+                &key_values,
+                tail_key.size()[2] as usize,
+                scale,
+            ));
+            let maximum = tail_value
+                .abs()
+                .amax([2_i64, 3_i64], false)
+                .to_kind(Kind::Float)
+                .contiguous();
+            let mut values = vec![0.0_f32; 8];
+            maximum.copy_data(&mut values, 8);
+            tail_value_max = values
+                .try_into()
+                .map(|values: [f32; 8]| values.map(f64::from))
+                .map_err(|_| anyhow::anyhow!("máximos V de cola Llama inválidos"))?;
+        }
+        regions.sort_unstable_by(|left, right| {
+            let l = state_uppers[&left.0]
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let r = state_uppers[&right.0]
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            r.total_cmp(&l)
+        });
+        let mut certificate = IncrementalRegionCertificate::<32, 8>::new(
+            &state_uppers,
+            &state_value_max,
+            tail_scores.as_ref(),
+            tail_value_max,
+        )?;
+        let mut loaded = BTreeMap::<usize, (usize, Tensor, Vec<Vec<f64>>)>::new();
+        let allowed = tolerance * 0.5;
+        for (block_id, page_index, local_start, local_end) in regions.iter().copied() {
+            let page = &pages[page_index];
+            let positions = (local_start..local_end).collect::<Vec<_>>();
+            let key = match &page.storage {
+                PageStorage::Pending { key, .. } => select_token_indices(key, &positions),
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => {
+                    let bytes = self.read_cold_key_tokens(*exact_id, *immutable, &positions)?;
+                    self.exact_tensor_from_bytes(&bytes, positions.len())?
+                }
+            };
+            let key_float = key.to_kind(Kind::Float).contiguous();
+            let mut key_values = vec![0.0_f32; 8 * positions.len() * 128];
+            let key_count = key_values.len();
+            key_float.copy_data(&mut key_values, key_count);
+            let scores =
+                exact_scores_generic::<32, 8>(&query_values, &key_values, positions.len(), scale);
+            certificate.materialize(block_id, &scores, &state_uppers, &state_value_max)?;
+            loaded.insert(block_id, (page_index, key, scores));
+            if certified(&certificate.bounds(), allowed) {
+                break;
+            }
+        }
+        let bounds = certificate.bounds();
+        if !certified(&bounds, allowed) || loaded.len() == regions.len() {
+            return Ok(None);
+        }
+        let mut ordered = loaded.into_iter().collect::<Vec<_>>();
+        ordered.sort_unstable_by_key(|(block_id, (page, _, _))| {
+            pages[*page]
+                .certificate
+                .regions
+                .iter()
+                .find(|region| region.block_id == *block_id)
+                .map_or(0, |region| pages[*page].token_start + region.local_start)
+        });
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        let mut loaded_tokens = 0usize;
+        for (block_id, (page_index, key, _)) in ordered {
+            let page = &pages[page_index];
+            let region = page
+                .certificate
+                .regions
+                .iter()
+                .find(|region| region.block_id == block_id)
+                .context("región Llama cargada ausente")?;
+            let positions = (region.local_start..region.local_end).collect::<Vec<_>>();
+            let value = match &page.storage {
+                PageStorage::Pending { value, .. } => select_token_indices(value, &positions),
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => {
+                    let bytes = self.read_cold_value_tokens(*exact_id, *immutable, &positions)?;
+                    self.exact_tensor_from_bytes(&bytes, positions.len())?
+                }
+            };
+            loaded_tokens += positions.len();
+            keys.push(key);
+            values.push(value);
+        }
+        if let Some((tail_key, tail_value)) = tail {
+            keys.push(tail_key.shallow_clone());
+            values.push(tail_value.shallow_clone());
+        }
+        let total_tokens = self.sequence_tokens + 1;
+        let omitted = total_tokens.saturating_sub(loaded_tokens);
+        if omitted == 0 {
+            return Ok(None);
+        }
+        self.exact_k_tokens_scanned = self.exact_k_tokens_scanned.saturating_add(loaded_tokens);
+        self.exact_v_tokens_materialized = self
+            .exact_v_tokens_materialized
+            .saturating_add(loaded_tokens);
+        self.attention_v_tokens_avoided = self.attention_v_tokens_avoided.saturating_add(omitted);
+        self.exact_mass_max_bound = self
+            .exact_mass_max_bound
+            .max(bounds.iter().copied().fold(0.0, f64::max));
+        Ok(Some(Self::scaled_attention(
+            query,
+            &keys,
+            &values,
+            self.sequence_tokens,
+        )))
+    }
+
     /// Optional 32Q/8KV Llama exact-score mass filter for BF16 V.
     ///
     /// Previously Llama always assembled *every* V from ColdStore,
@@ -1868,6 +2046,9 @@ impl TerrsvusionKvCache {
                 }
                 *dst = dst.max(f64::from(maxval));
             }
+        }
+        if let Some(output) = self.llama_regional_attention(query, pages, tail, tolerance)? {
+            return Ok(Some(output));
         }
         let mut keys = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
         let mut cursor = 0usize;
@@ -6524,9 +6705,15 @@ mod tests {
             .expect("32Q8KV exact QK bound must certify omission");
         let count = cache.exact_k_tokens_scanned;
         let selected = cache.exact_v_tokens_materialized;
-        assert_eq!(count, 17);
-        assert_eq!(selected, 2);
-        assert_eq!(count - selected, 15);
+        assert!(
+            count < 17,
+            "la poda regional no redujo el escaneo K: {count}"
+        );
+        assert!(
+            selected <= 2,
+            "la poda regional materializó demasiada V: {selected}"
+        );
+        assert!(count >= selected);
         let result = output.to_kind(Kind::Float).contiguous();
         let reference = full.to_kind(Kind::Float).contiguous();
         let mut actual = vec![0.0f32; 32 * 128];
