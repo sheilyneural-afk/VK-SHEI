@@ -676,6 +676,11 @@ pub struct TerrsvusionKvCache {
     decode_key_assembly_nanos: u64,
     decode_value_materialization_nanos: u64,
     decode_sdpa_nanos: u64,
+    /// Operation-count accounting for the attention authority. These are
+    /// logical BF16 element counts, not claims about opaque LibTorch kernels.
+    attention_dense_qk_elements: u128,
+    attention_dense_pv_elements: u128,
+    attention_v_tokens_avoided: usize,
     /// Maximum known temporary allocation footprint of one autoregressive
     /// attention call. This is an accounting lower bound, not process RSS:
     /// opaque libtorch/SDPA workspace is reported separately as unknown.
@@ -804,6 +809,9 @@ impl TerrsvusionKvCache {
             decode_key_assembly_nanos: 0,
             decode_value_materialization_nanos: 0,
             decode_sdpa_nanos: 0,
+            attention_dense_qk_elements: 0,
+            attention_dense_pv_elements: 0,
+            attention_v_tokens_avoided: 0,
             known_attention_scratch_peak_bytes: 0,
             prefill_working_peak_bytes: 0,
             prefill_axis_nanos: 0,
@@ -1954,6 +1962,9 @@ impl TerrsvusionKvCache {
         let output = Self::scaled_attention(query, &[selected_key], &values, self.sequence_tokens);
         self.exact_k_tokens_scanned += cursor;
         self.exact_v_tokens_materialized += chosen.len();
+        self.attention_v_tokens_avoided = self
+            .attention_v_tokens_avoided
+            .saturating_add(cursor.saturating_sub(chosen.len()));
         self.exact_mass_max_bound = self
             .exact_mass_max_bound
             .max(bounds.into_iter().fold(0.0f64, f64::max));
@@ -2475,6 +2486,17 @@ impl TerrsvusionKvCache {
         new_value: &Tensor,
     ) -> Result<Tensor> {
         let query_tokens = query.size()[2] as usize;
+        let causal_pairs = (0..query_tokens)
+            .map(|index| self.sequence_tokens + index + 1)
+            .sum::<usize>();
+        self.attention_dense_qk_elements = self
+            .attention_dense_qk_elements
+            .saturating_add(u128::from(causal_pairs as u64) * u128::from(self.query_heads as u64));
+        self.attention_dense_pv_elements = self.attention_dense_pv_elements.saturating_add(
+            u128::from(causal_pairs as u64)
+                * u128::from(self.query_heads as u64)
+                * u128::from(self.head_dim as u64),
+        );
         ensure!(query_tokens > 1, "verificación querywise sin bloque");
         let mut key_parts = Vec::new();
         let mut value_parts = Vec::new();
@@ -3662,6 +3684,9 @@ pub struct TorchGeneration {
     pub decode_key_assembly_nanos: u64,
     pub decode_value_materialization_nanos: u64,
     pub decode_sdpa_nanos: u64,
+    pub attention_dense_qk_elements: u128,
+    pub attention_dense_pv_elements: u128,
+    pub attention_v_tokens_avoided: usize,
     pub hierarchy_events: usize,
     pub hierarchy_states_total: usize,
     pub hierarchy_states_initial: usize,
@@ -5121,6 +5146,9 @@ impl TorchModelRuntime {
                 decode_key_assembly_nanos: cache.decode_key_assembly_nanos,
                 decode_value_materialization_nanos: cache.decode_value_materialization_nanos,
                 decode_sdpa_nanos: cache.decode_sdpa_nanos,
+                attention_dense_qk_elements: cache.attention_dense_qk_elements,
+                attention_dense_pv_elements: cache.attention_dense_pv_elements,
+                attention_v_tokens_avoided: cache.attention_v_tokens_avoided,
                 hierarchy_events: cache.hierarchy_events,
                 hierarchy_states_total: cache.hierarchy_states_total,
                 hierarchy_states_initial: cache.hierarchy_states_initial,
