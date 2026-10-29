@@ -21,7 +21,8 @@ use crate::adaptive_extent::{AxisPolicy, ParallelContextAxis};
 #[cfg(test)]
 use crate::attention_certificate::omitted_error_bound;
 use crate::attention_certificate::{
-    certified, select_by_exact_mass, select_v_by_exact_contribution,
+    bf16_rounding_cells_contain_components, certified, select_by_exact_mass,
+    select_v_by_exact_contribution,
 };
 use crate::cold_store::{ColdStore, ColdStoreStats, PageGeometry, PreparedPage};
 use crate::conversion_worker::{Bf16PageJob, ConversionStats, ConversionWorker, PageShape};
@@ -571,6 +572,10 @@ struct PageAttentionCertificate {
     /// to full dense BF16 V reads; it never authorizes an omission.
     #[serde(default)]
     value_abs_max_by_kv_head: Vec<f32>,
+    /// Per-KV-head, per-dimension maxima in head-major order. Legacy
+    /// manifests lack this field and cannot certify component-wise omission.
+    #[serde(default)]
+    value_abs_max_by_kv_head_dim: Vec<f32>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -749,6 +754,8 @@ pub struct TerrsvusionKvCache {
     exact_attention_equal_events: usize,
     exact_attention_candidate_v_tokens: usize,
     exact_attention_rejected_v_tokens: usize,
+    rounding_cell_checked_events: usize,
+    rounding_cell_certified_events: usize,
     suffix_against_committed: bool,
 }
 
@@ -883,6 +890,8 @@ impl TerrsvusionKvCache {
             exact_attention_equal_events: 0,
             exact_attention_candidate_v_tokens: 0,
             exact_attention_rejected_v_tokens: 0,
+            rounding_cell_checked_events: 0,
+            rounding_cell_certified_events: 0,
             suffix_against_committed: false,
         })
     }
@@ -1482,6 +1491,20 @@ impl TerrsvusionKvCache {
                 .all(|v| v.is_finite() && *v >= 0.0),
             "original BF16 V per-KV-head maxima nonfinite"
         );
+        let value_component_maximum = value
+            .abs()
+            .amax([2_i64], false)
+            .to_kind(Kind::Float)
+            .contiguous();
+        let component_count = self.kv_heads as usize * self.head_dim as usize;
+        let mut value_abs_max_by_kv_head_dim = vec![0.0f32; component_count];
+        value_component_maximum.copy_data(&mut value_abs_max_by_kv_head_dim, component_count);
+        ensure!(
+            value_abs_max_by_kv_head_dim
+                .iter()
+                .all(|v| v.is_finite() && *v >= 0.0),
+            "original BF16 V per-component maxima nonfinite"
+        );
         let regions = self
             .parallel_axis
             .partition_regions(token_start, token_start + tokens)?
@@ -1547,6 +1570,7 @@ impl TerrsvusionKvCache {
             regions,
             value_abs_max,
             value_abs_max_by_kv_head,
+            value_abs_max_by_kv_head_dim,
         })
     }
 
@@ -2169,6 +2193,8 @@ impl TerrsvusionKvCache {
         query: &Tensor,
         pages: &[TerrsvusionPage],
         tail: Option<&(Tensor, Tensor)>,
+        preassembled_key: Option<&Tensor>,
+        precomputed_scores: Option<&Tensor>,
         sequence_tokens: usize,
         tolerance: f64,
     ) -> Result<Option<Tensor>> {
@@ -2197,11 +2223,14 @@ impl TerrsvusionKvCache {
             .attention_dense_pv_elements
             .saturating_add(u128::from(dense_pairs as u64) * 32 * 128);
         let mut max_per_kv = [0.0f64; 8];
+        let mut max_per_kv_component = vec![0.0f64; 8 * 128];
         for page in pages {
             // A legacy v1 prefix lacked complete 8-KV-head bounds:
             // its first-two-head certificate is NEVER sufficient
             // authority for Llama omission. Restore old full attention.
-            if page.certificate.value_abs_max_by_kv_head.len() != 8 {
+            if page.certificate.value_abs_max_by_kv_head.len() != 8
+                || page.certificate.value_abs_max_by_kv_head_dim.len() != 8 * 128
+            {
                 return Ok(None);
             }
             if page.certificate.regions.iter().any(|region| {
@@ -2216,6 +2245,15 @@ impl TerrsvusionKvCache {
             for (dst, &maxval) in max_per_kv
                 .iter_mut()
                 .zip(&page.certificate.value_abs_max_by_kv_head)
+            {
+                if !(maxval.is_finite() && maxval >= 0.0) {
+                    return Ok(None);
+                }
+                *dst = dst.max(f64::from(maxval));
+            }
+            for (dst, &maxval) in max_per_kv_component
+                .iter_mut()
+                .zip(&page.certificate.value_abs_max_by_kv_head_dim)
             {
                 if !(maxval.is_finite() && maxval >= 0.0) {
                     return Ok(None);
@@ -2240,53 +2278,84 @@ impl TerrsvusionKvCache {
                 }
                 *dst = dst.max(f64::from(maxval));
             }
+            let component_maxima = value
+                .abs()
+                .amax([2_i64], false)
+                .to_kind(Kind::Float)
+                .contiguous();
+            let mut bf16_component_max = vec![0.0f32; 8 * 128];
+            component_maxima.copy_data(&mut bf16_component_max, 8 * 128);
+            for (dst, &maxval) in max_per_kv_component.iter_mut().zip(&bf16_component_max) {
+                if !(maxval.is_finite() && maxval >= 0.0) {
+                    return Ok(None);
+                }
+                *dst = dst.max(f64::from(maxval));
+            }
         }
         // Parity-first Llama path: score the complete K history so omitted V
         // terms can be removed without deleting their probability mass from
         // the softmax denominator. The regional QK-pruning experiment remains
         // available to focused tests, but cannot authorize this path because
         // sparse SDPA renormalizes retained tokens and perturbs every term.
-        let mut keys = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
-        let mut cursor = 0usize;
-        for page in pages {
+        let cursor = sequence_tokens + 1;
+        let full_key = if let Some(key) = preassembled_key {
             ensure!(
-                page.token_start == cursor && page.tokens > 0,
-                "Llama canonical ColdStore K page ordering invalid"
+                key.size()[2] as usize >= cursor,
+                "Llama preassembled K does not cover causal query"
             );
-            let key = match &page.storage {
-                PageStorage::Pending { key, .. } => key.shallow_clone(),
-                PageStorage::Cold {
-                    exact_id,
-                    immutable,
-                } => {
-                    let bf16 = self.read_cold_key(*exact_id, *immutable)?;
-                    self.exact_tensor_from_bytes(&bf16, page.tokens)?
-                }
-            };
-            keys.push(key);
-            cursor += page.tokens;
-        }
-        if let Some((k, _)) = tail {
-            keys.push(k.shallow_clone());
-            cursor += k.size()[2] as usize;
-        }
-        if keys.is_empty() {
-            return Ok(None);
-        }
+            key.narrow(2, 0, cursor as i64)
+        } else {
+            let mut keys = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
+            let mut covered = 0usize;
+            for page in pages {
+                ensure!(
+                    page.token_start == covered && page.tokens > 0,
+                    "Llama canonical ColdStore K page ordering invalid"
+                );
+                let key = match &page.storage {
+                    PageStorage::Pending { key, .. } => key.shallow_clone(),
+                    PageStorage::Cold {
+                        exact_id,
+                        immutable,
+                    } => {
+                        let bf16 = self.read_cold_key(*exact_id, *immutable)?;
+                        self.exact_tensor_from_bytes(&bf16, page.tokens)?
+                    }
+                };
+                keys.push(key);
+                covered += page.tokens;
+            }
+            if let Some((k, _)) = tail {
+                keys.push(k.shallow_clone());
+                covered += k.size()[2] as usize;
+            }
+            if keys.is_empty() {
+                return Ok(None);
+            }
+            ensure!(covered == cursor, "Llama exact K history incomplete");
+            let refs = keys.iter().collect::<Vec<_>>();
+            Tensor::cat(&refs, 2)
+        };
         ensure!(
-            cursor == sequence_tokens + 1,
+            full_key.size()[2] as usize == cursor,
             "Llama exact-score audit does not cover complete BF16 K history"
         );
-        let key_refs = keys.iter().collect::<Vec<_>>();
-        let full_key = Tensor::cat(&key_refs, 2);
         let gqa = self.query_heads / self.kv_heads;
         let queries = query.to_kind(Kind::Float);
-        let repeated = full_key
-            .repeat_interleave_self_int(gqa, 1, None)
-            .to_kind(Kind::Float);
-        let scores = (queries.matmul(&repeated.transpose(-2, -1)) / (self.head_dim as f64).sqrt())
-            .to_kind(Kind::Float)
-            .contiguous();
+        let scores = if let Some(scores) = precomputed_scores {
+            ensure!(
+                scores.size() == [1, 32, 1, cursor as i64],
+                "scores Llama precomputados incompatibles"
+            );
+            scores.shallow_clone()
+        } else {
+            let repeated = full_key
+                .repeat_interleave_self_int(gqa, 1, None)
+                .to_kind(Kind::Float);
+            (queries.matmul(&repeated.transpose(-2, -1)) / (self.head_dim as f64).sqrt())
+                .to_kind(Kind::Float)
+                .contiguous()
+        };
         let mut scores_flat = vec![0.0f32; 32 * cursor];
         scores.copy_data(&mut scores_flat, 32 * cursor);
         if scores_flat.iter().any(|value| !value.is_finite()) {
@@ -2392,9 +2461,53 @@ impl TerrsvusionKvCache {
         let selected_values = Tensor::cat(&value_refs, 2)
             .repeat_interleave_self_int(gqa, 1, None)
             .to_kind(Kind::Float);
-        let output = selected_probabilities
-            .matmul(&selected_values)
-            .to_kind(query.kind());
+        let output_float = selected_probabilities.matmul(&selected_values).contiguous();
+        let mut output_components = vec![0.0f32; 32 * 128];
+        output_float.copy_data(&mut output_components, 32 * 128);
+        // Bound FP32 PV accumulation conservatively in addition to the
+        // omitted-contribution box. This does not yet cover every possible
+        // fused-SDPA score/softmax implementation, so the canonical tile
+        // oracle remains mandatory before server promotion.
+        let unit_roundoff = 2_f64.powi(-24);
+        let operations = (chosen.len().saturating_mul(2).saturating_add(64)) as f64;
+        let gamma = operations * unit_roundoff / (1.0 - operations * unit_roundoff);
+        let selected_set = chosen.iter().copied().collect::<BTreeSet<_>>();
+        let omitted_fraction = scores_by_head
+            .iter()
+            .map(|head_scores| {
+                let maximum = head_scores
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let mut total = 0.0;
+                let mut omitted = 0.0;
+                for (token, score) in head_scores.iter().enumerate() {
+                    let weight = (*score - maximum).exp();
+                    total += weight;
+                    if !selected_set.contains(&token) {
+                        omitted += weight;
+                    }
+                }
+                omitted / total
+            })
+            .collect::<Vec<_>>();
+        let rounding_bounds = (0..32)
+            .flat_map(|head| {
+                let kv_head = head / 4;
+                let fraction = omitted_fraction[head];
+                let maxima = &max_per_kv_component[kv_head * 128..(kv_head + 1) * 128];
+                maxima
+                    .iter()
+                    .map(move |maximum| (fraction + gamma) * *maximum)
+            })
+            .collect::<Vec<_>>();
+        self.rounding_cell_checked_events += 1;
+        let rounding_cell_certified =
+            bf16_rounding_cells_contain_components(&output_components, &rounding_bounds);
+        if rounding_cell_certified {
+            self.rounding_cell_certified_events += 1;
+        }
+        let output = output_float.to_kind(query.kind());
         let omitted = cursor.saturating_sub(chosen.len());
         self.exact_k_tokens_scanned += cursor;
         self.exact_v_tokens_materialized += chosen.len();
@@ -2448,6 +2561,17 @@ impl TerrsvusionKvCache {
             self.attention_v_tokens_avoided,
             self.exact_mass_max_bound,
         );
+        let preassembled_key =
+            self.llama_dense_tile_key(&pages, existing_tail.as_ref(), new_key)?;
+        let repeated_key = preassembled_key
+            .repeat_interleave_self_int(4, 1, None)
+            .to_kind(Kind::Float);
+        let precomputed_scores = (query
+            .to_kind(Kind::Float)
+            .matmul(&repeated_key.transpose(-2, -1))
+            / (self.head_dim as f64).sqrt())
+        .to_kind(Kind::Float)
+        .contiguous();
         // Exact diagnostic authority must have the same batched geometry and
         // causal mask as the canonical prefill. A sequence of one-query SDPA
         // calls is mathematically equivalent, but not necessarily bit-exact
@@ -2457,7 +2581,7 @@ impl TerrsvusionKvCache {
                 query,
                 &pages,
                 existing_tail.as_ref(),
-                new_key,
+                &preassembled_key,
                 new_value,
             )?)
         } else {
@@ -2478,12 +2602,19 @@ impl TerrsvusionKvCache {
             };
             let query_token = query.narrow(2, query_index as i64, 1);
             let logical_history = self.sequence_tokens + query_index;
+            let causal_tokens = logical_history + 1;
+            let query_scores = precomputed_scores
+                .narrow(2, query_index as i64, 1)
+                .narrow(3, 0, causal_tokens as i64)
+                .contiguous();
             let avoided_before = self.attention_v_tokens_avoided;
             let candidate = self.llama_certified_value_attention(
                 layer_index,
                 &query_token,
                 &pages,
                 Some(&tail),
+                Some(&preassembled_key),
+                Some(&query_scores),
                 logical_history,
                 tolerance,
             )?;
@@ -2558,10 +2689,9 @@ impl TerrsvusionKvCache {
         query: &Tensor,
         pages: &[TerrsvusionPage],
         existing_tail: Option<&(Tensor, Tensor)>,
-        new_key: &Tensor,
+        preassembled_key: &Tensor,
         new_value: &Tensor,
     ) -> Result<Tensor> {
-        let mut keys = Vec::with_capacity(pages.len() + 2);
         let mut values = Vec::with_capacity(pages.len() + 2);
         let mut covered = 0usize;
         for page in pages {
@@ -2569,48 +2699,79 @@ impl TerrsvusionKvCache {
                 page.token_start == covered && page.tokens > 0,
                 "páginas Llama densas fuera de orden"
             );
-            let (key, value) = match &page.storage {
-                PageStorage::Pending { key, value, .. } => {
-                    (key.shallow_clone(), value.shallow_clone())
-                }
+            let value = match &page.storage {
+                PageStorage::Pending { value, .. } => value.shallow_clone(),
                 PageStorage::Cold {
                     exact_id,
                     immutable,
                 } => {
-                    let key = self.read_cold_key(*exact_id, *immutable)?;
                     let value = self.read_cold_value(*exact_id, *immutable)?;
-                    (
-                        self.exact_tensor_from_bytes(&key, page.tokens)?,
-                        self.exact_tensor_from_bytes(&value, page.tokens)?,
-                    )
+                    self.exact_tensor_from_bytes(&value, page.tokens)?
                 }
             };
-            keys.push(key);
             values.push(value);
             covered += page.tokens;
         }
         if let Some((key, value)) = existing_tail {
             ensure!(key.size() == value.size(), "cola Llama K/V incompatible");
             covered += key.size()[2] as usize;
-            keys.push(key.shallow_clone());
             values.push(value.shallow_clone());
         }
-        ensure!(
-            new_key.size() == new_value.size(),
-            "bloque Llama K/V incompatible"
-        );
         ensure!(
             covered == self.sequence_tokens,
             "histórico Llama denso incompleto antes del bloque"
         );
-        keys.push(new_key.shallow_clone());
         values.push(new_value.shallow_clone());
+        ensure!(
+            preassembled_key.size()[2] as usize == self.sequence_tokens + query.size()[2] as usize,
+            "bloque Llama K preensamblado incompatible"
+        );
         Ok(Self::scaled_attention(
             query,
-            &keys,
+            &[preassembled_key.shallow_clone()],
             &values,
             self.sequence_tokens,
         ))
+    }
+
+    fn llama_dense_tile_key(
+        &mut self,
+        pages: &[TerrsvusionPage],
+        existing_tail: Option<&(Tensor, Tensor)>,
+        new_key: &Tensor,
+    ) -> Result<Tensor> {
+        let mut keys = Vec::with_capacity(pages.len() + 2);
+        let mut covered = 0usize;
+        for page in pages {
+            ensure!(
+                page.token_start == covered && page.tokens > 0,
+                "páginas Llama K fuera de orden"
+            );
+            let key = match &page.storage {
+                PageStorage::Pending { key, .. } => key.shallow_clone(),
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => {
+                    let bytes = self.read_cold_key(*exact_id, *immutable)?;
+                    self.exact_tensor_from_bytes(&bytes, page.tokens)?
+                }
+            };
+            keys.push(key);
+            covered += page.tokens;
+        }
+        if let Some((key, value)) = existing_tail {
+            ensure!(key.size() == value.size(), "cola Llama K/V incompatible");
+            covered += key.size()[2] as usize;
+            keys.push(key.shallow_clone());
+        }
+        ensure!(
+            covered == self.sequence_tokens,
+            "histórico Llama K incompleto antes del bloque"
+        );
+        keys.push(new_key.shallow_clone());
+        let refs = keys.iter().collect::<Vec<_>>();
+        Ok(Tensor::cat(&refs, 2))
     }
 
     fn llama_dense_single_query_attention(
@@ -3994,6 +4155,8 @@ impl AttentionCache for TerrsvusionKvCache {
                     .sum::<usize>()
                     + page.certificate.value_abs_max.len() * std::mem::size_of::<f32>()
                     + page.certificate.value_abs_max_by_kv_head.len() * std::mem::size_of::<f32>()
+                    + page.certificate.value_abs_max_by_kv_head_dim.len()
+                        * std::mem::size_of::<f32>()
             })
             .sum();
         pages + tails + pending + certificates + self.parallel_axis.fingerprint_payload_bytes()
@@ -4237,6 +4400,8 @@ impl AttentionCache for TerrsvusionKvCache {
                     query,
                     &pages,
                     tail.as_ref(),
+                    None,
+                    None,
                     self.sequence_tokens,
                     epsilon,
                 )?
@@ -4497,6 +4662,8 @@ pub struct TorchGeneration {
     pub exact_attention_equal_events: usize,
     pub exact_attention_candidate_v_tokens: usize,
     pub exact_attention_rejected_v_tokens: usize,
+    pub rounding_cell_checked_events: usize,
+    pub rounding_cell_certified_events: usize,
     pub applied_mass_tolerance: Option<f64>,
     #[serde(skip_serializing)]
     pub step_logits: Vec<Vec<f32>>,
@@ -6119,6 +6286,8 @@ impl TorchModelRuntime {
                 exact_attention_equal_events: cache.exact_attention_equal_events,
                 exact_attention_candidate_v_tokens: cache.exact_attention_candidate_v_tokens,
                 exact_attention_rejected_v_tokens: cache.exact_attention_rejected_v_tokens,
+                rounding_cell_checked_events: cache.rounding_cell_checked_events,
+                rounding_cell_certified_events: cache.rounding_cell_certified_events,
                 applied_mass_tolerance: cache.applied_mass_tolerance,
                 step_logits: std::mem::take(&mut cache.step_logits),
                 layer_output_traces: std::mem::take(&mut cache.layer_output_traces),
@@ -7570,6 +7739,8 @@ mod tests {
                 &q,
                 &[page.clone()],
                 Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                None,
+                None,
                 16,
                 1e-3,
             )
@@ -7618,6 +7789,8 @@ mod tests {
                     &q,
                     &[legacy],
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                    None,
+                    None,
                     16,
                     1e-3
                 )
@@ -7631,6 +7804,8 @@ mod tests {
                     &q,
                     &[page.clone()],
                     Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                    None,
+                    None,
                     16,
                     0.0
                 )
@@ -7645,6 +7820,8 @@ mod tests {
                     &zero,
                     &[page],
                     Some(&(tailk, tailv)),
+                    None,
+                    None,
                     16,
                     1e-3,
                 )

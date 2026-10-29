@@ -1,6 +1,7 @@
 //! Exact omitted-mass certificate for query-adaptive attention views.
 
 use anyhow::{Result, ensure};
+use half::bf16;
 use std::collections::BTreeSet;
 
 pub fn certified(bounds: &[f64], tolerance: f64) -> bool {
@@ -207,6 +208,85 @@ pub fn select_v_by_exact_contribution(
     Ok((positions, bounds))
 }
 
+/// Proves that every real value in `center ± per_head_error` rounds to the
+/// same finite BF16 value as `center`. The interval must stay strictly inside
+/// the two round-to-nearest midpoints; strictness deliberately rejects exact
+/// tie cases instead of depending on the retained BF16 mantissa parity.
+///
+/// This is a sufficient output-quantization certificate, not by itself a
+/// proof that a fused attention kernel computed `center`: callers must also
+/// include conservative score/softmax/PV arithmetic error in each bound or
+/// retain a canonical-kernel oracle.
+pub fn bf16_rounding_cells_contain(
+    center: &[f32],
+    head_dim: usize,
+    per_head_error: &[f64],
+) -> bool {
+    if head_dim == 0
+        || per_head_error.is_empty()
+        || center.len() != head_dim.saturating_mul(per_head_error.len())
+        || per_head_error
+            .iter()
+            .any(|bound| !bound.is_finite() || *bound < 0.0)
+    {
+        return false;
+    }
+    let component_error = per_head_error
+        .iter()
+        .flat_map(|bound| std::iter::repeat_n(*bound, head_dim))
+        .collect::<Vec<_>>();
+    bf16_rounding_cells_contain_components(center, &component_error)
+}
+
+/// Component-wise form of [`bf16_rounding_cells_contain`].
+pub fn bf16_rounding_cells_contain_components(center: &[f32], error: &[f64]) -> bool {
+    if center.is_empty()
+        || center.len() != error.len()
+        || error.iter().any(|bound| !bound.is_finite() || *bound < 0.0)
+    {
+        return false;
+    }
+    center.iter().zip(error).all(|(&value, &error)| {
+        if !value.is_finite() {
+            return false;
+        }
+        let rounded = bf16::from_f32(value);
+        let bits = rounded.to_bits();
+        let rounded_value = f64::from(rounded.to_f32());
+        let (previous, next) = if bits == 0 {
+            (
+                -f64::from(bf16::from_bits(1).to_f32()),
+                f64::from(bf16::from_bits(1).to_f32()),
+            )
+        } else if bits == 0x8000 {
+            (
+                f64::from(bf16::from_bits(0x8001).to_f32()),
+                f64::from(bf16::from_bits(1).to_f32()),
+            )
+        } else if bits & 0x8000 == 0 {
+            if bits >= 0x7f7f {
+                return false;
+            }
+            (
+                f64::from(bf16::from_bits(bits - 1).to_f32()),
+                f64::from(bf16::from_bits(bits + 1).to_f32()),
+            )
+        } else {
+            if bits >= 0xff7f {
+                return false;
+            }
+            (
+                f64::from(bf16::from_bits(bits + 1).to_f32()),
+                f64::from(bf16::from_bits(bits - 1).to_f32()),
+            )
+        };
+        let lower_midpoint = (previous + rounded_value) * 0.5;
+        let upper_midpoint = (rounded_value + next) * 0.5;
+        let value = f64::from(value);
+        value - error > lower_midpoint && value + error < upper_midpoint
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +330,18 @@ mod tests {
         assert!(certified(&full_denominator_bounds, 1e-3));
         assert!(certified(&renormalized_bounds, 1e-3));
         assert!(full_denominator_bounds[0] <= renormalized_bounds[0]);
+    }
+
+    #[test]
+    fn bf16_rounding_cell_certificate_accepts_interior_and_rejects_boundary() {
+        let one = bf16::from_f32(1.0).to_f32();
+        let bits = bf16::from_f32(1.0).to_bits();
+        let previous = bf16::from_bits(bits - 1).to_f32();
+        let next = bf16::from_bits(bits + 1).to_f32();
+        let radius = f64::from((one - previous).min(next - one)) * 0.5;
+        assert!(bf16_rounding_cells_contain(&[1.0], 1, &[radius * 0.99]));
+        assert!(bf16_rounding_cells_contain(&[-1.0], 1, &[0.001]));
+        assert!(!bf16_rounding_cells_contain(&[1.0], 1, &[radius]));
+        assert!(!bf16_rounding_cells_contain(&[f32::NAN], 1, &[0.0]));
     }
 }
