@@ -118,7 +118,8 @@ fn main() -> Result<()> {
             runtime.context_limit_tokens()
         );
         let generation = runtime.generate_messages_dense(&messages, max_new_tokens, false)?;
-        let insufficient = is_insufficient_evidence(&generation.content);
+        let insufficient = is_insufficient_evidence(&generation.content)
+            || !has_substantive_answer(&generation.content);
         total_prompt_tokens = total_prompt_tokens
             .checked_add(prompt_tokens.len())
             .context("cumulative prompt token count overflow")?;
@@ -200,9 +201,23 @@ fn is_insufficient_evidence(content: &str) -> bool {
     normalized == "EVIDENCIAINSUFICIENTE"
 }
 
+fn has_substantive_answer(content: &str) -> bool {
+    content
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_lowercase)
+        .any(|token| {
+            token.len() >= 2
+                && !matches!(
+                    token.as_str(),
+                    "pagina" | "page" | "página" | "sha" | "sha256"
+                )
+                && !token.chars().all(|character| character.is_ascii_digit())
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_insufficient_evidence;
+    use super::{has_substantive_answer, is_insufficient_evidence};
 
     #[test]
     fn recognizes_only_the_explicit_insufficient_evidence_answer() {
@@ -212,5 +227,13 @@ mod tests {
             "La evidencia es insuficiente para una parte, pero el dato es 38."
         ));
         assert!(!is_insufficient_evidence(""));
+    }
+
+    #[test]
+    fn rejects_citation_only_as_a_substantive_answer() {
+        assert!(!has_substantive_answer("[PÁGINA 1]"));
+        assert!(!has_substantive_answer("page 27"));
+        assert!(has_substantive_answer("Dos mil habitantes. [página 1]"));
+        assert!(has_substantive_answer("COBALTO-73. [página 2]"));
     }
 }

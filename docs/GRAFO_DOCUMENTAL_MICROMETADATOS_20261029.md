@@ -20,6 +20,29 @@ original y su digest. Antes de consultar se verifican todos los hashes.
 Al reabrir un archivo persistido, los índices y aristas se reconstruyen desde
 las páginas verificadas: un índice alterado no puede ocultar una página.
 
+## Micrometadata grafal
+
+Cada frase o línea no vacía se representa como una hiperarista compacta
+`GraphMicroSpan`. No copia el texto ni crea todas las parejas de palabras:
+conecta implícitamente los términos y números que coexisten en ese tramo y
+guarda únicamente:
+
+- índice del tramo;
+- offsets UTF-8 inicial y final;
+- términos y números normalizados;
+- SHA-256 del fragmento original.
+
+El ranking focal usa la mayor coincidencia conjunta dentro de una hiperarista.
+Por tanto, dos términos presentes en lugares inconexos de una misma página ya
+no reciben la misma autoridad relacional que dos términos presentes en una
+misma frase. Antes de recuperar se comprueban límites UTF-8 y SHA-256 de cada
+ancla contra la página original.
+
+Esta es micrometadata grafal textual, no una afirmación de comprensión causal:
+todavía no extrae de forma certificada entidades, hechos, situaciones,
+temporalidad o causalidad. Esas capas deberán añadir aristas tipadas que apunten
+a estas mismas anclas, marcando por separado relaciones explícitas e inferidas.
+
 ## Recuperación por fases
 
 Una fase tiene límites separados de páginas, caracteres y saltos de grafo.
@@ -106,6 +129,26 @@ LibTorch real:
 - respuesta: `[Página 1] Puerto Gris era una población de dos mil habitantes.`;
 - RSS máximo del proceso: 31.472.752 KiB;
 - `semantic_exhaustiveness_certified=false`.
+
+La reconstrucción con micrometadata grafal produjo además:
+
+- 4.091 hiperaristas sobre 95 páginas;
+- máximo de 81 hiperaristas por página;
+- índice anterior sin hiperaristas: 638.504 bytes;
+- índice grafal: 1.622.246 bytes;
+- incremento: 983.742 bytes;
+- construcción: 0,60 s y 10.560 KiB de RSS máximo;
+- consulta poblacional: 94 coincidencias amplias, pero solo la página 1 como
+  candidata final. La página 7 también relaciona `habitantes` y `Puerto Gris`,
+  pero la pregunta cuantitativa prioriza la hiperarista de la página 1 que
+  contiene `dos mil`. Los artículos ambiguos `un/una/uno` no se clasifican
+  como cantidades sin una regla contextual.
+
+La inferencia física posterior procesó 1.413 tokens frente a 116.999 del
+documento completo, evitó 115.586 posiciones y respondió
+`Dos mil habitantes. [Página 1]`. El controlador también fue probado contra
+una salida de solo cita (`[Página 1]`) y ya no la acepta como respuesta
+sustantiva.
 
 Esta medición sí demuestra que la ruta selectiva reduce el número efectivo de
 posiciones procesadas por el Transformer en esta consulta. No demuestra que

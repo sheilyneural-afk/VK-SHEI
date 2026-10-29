@@ -30,6 +30,21 @@ pub struct PageMicroMetadata {
     pub terms: BTreeSet<String>,
     pub numbers: BTreeSet<String>,
     pub explicit_page_references: BTreeSet<u32>,
+    /// Sentence/line hyperedges: every span connects all terms and numbers
+    /// that coexist in one exact original-text region without materializing
+    /// the quadratic term-to-term edge set.
+    #[serde(default)]
+    pub graph_spans: Vec<GraphMicroSpan>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphMicroSpan {
+    pub span_index: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub sha256: String,
+    pub terms: BTreeSet<String>,
+    pub numbers: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,7 +145,8 @@ impl RetrievalPhase {
         ensure!(!self.evidence.is_empty(), "cannot assemble empty evidence");
         let mut prompt = String::from(
             "Responde la pregunta usando exclusivamente las evidencias originales citadas.\n\
-             Distingue hechos textuales de inferencias. Cita cada afirmación únicamente como [página N]; no copies el SHA256.\n\
+             Distingue hechos textuales de inferencias. Escribe primero la respuesta y añade después [página N].\n\
+             La cita no sustituye la respuesta y no debes copiar el SHA256.\n\
              Si las evidencias no bastan, responde exactamente EVIDENCIA_INSUFICIENTE.\n\n",
         );
         prompt.push_str("PREGUNTA:\n");
@@ -245,6 +261,13 @@ impl DocumentGraph {
         self.pages.len()
     }
 
+    pub fn graph_micro_span_count(&self) -> usize {
+        self.metadata
+            .values()
+            .map(|metadata| metadata.graph_spans.len())
+            .sum()
+    }
+
     pub fn page(&self, page_number: u32) -> Option<&DocumentPage> {
         self.pages.get(&page_number)
     }
@@ -297,6 +320,27 @@ impl DocumentGraph {
                 "document page {} digest mismatch",
                 page.page_number
             );
+            let metadata = self
+                .metadata
+                .get(&page.page_number)
+                .context("page micro-metadata missing from document graph")?;
+            for span in &metadata.graph_spans {
+                let original = page
+                    .original_text
+                    .get(span.byte_start..span.byte_end)
+                    .with_context(|| {
+                        format!(
+                            "page {} graph span {} has invalid UTF-8 byte boundaries",
+                            page.page_number, span.span_index
+                        )
+                    })?;
+                ensure!(
+                    sha256_hex(original.as_bytes()) == span.sha256,
+                    "page {} graph span {} digest mismatch",
+                    page.page_number,
+                    span.span_index
+                );
+            }
         }
         Ok(())
     }
@@ -406,6 +450,13 @@ impl DocumentGraph {
         ensure!(!query.trim().is_empty(), "retrieval query cannot be empty");
         self.verify_original_authority()?;
         let query_micro = micro_metadata(1, query);
+        let query_tokens = tokenize(query);
+        let asks_for_quantity = query_tokens.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "cuanto" | "cuantos" | "cuánta" | "cuántas" | "cuánto" | "cuántos"
+            )
+        });
         let normalized_query = normalize_text(query);
         let mut broad_scores = BTreeMap::<u32, u64>::new();
         let mut matched_terms = BTreeMap::<u32, usize>::new();
@@ -414,8 +465,31 @@ impl DocumentGraph {
                 let inverse_frequency = 10_000_u64 / pages.len() as u64;
                 for page in pages {
                     *broad_scores.entry(*page).or_default() += inverse_frequency.max(1);
-                    *matched_terms.entry(*page).or_default() += 1;
                 }
+            }
+        }
+        // A sentence/line span acts as a compact graph hyperedge. Focused
+        // ranking uses the strongest co-located query evidence, not merely
+        // terms that happen to occur somewhere on the same coarse page.
+        for metadata in self.metadata.values() {
+            let strongest_span_match = metadata
+                .graph_spans
+                .iter()
+                .map(|span| {
+                    let term_matches = span.terms.intersection(&query_micro.terms).count();
+                    term_matches
+                        + usize::from(
+                            asks_for_quantity && term_matches > 0 && !span.numbers.is_empty(),
+                        )
+                })
+                .max()
+                .unwrap_or_else(|| metadata.terms.intersection(&query_micro.terms).count());
+            if strongest_span_match > 0 {
+                matched_terms.insert(metadata.page_number, strongest_span_match);
+                *broad_scores.entry(metadata.page_number).or_default() +=
+                    u64::try_from(strongest_span_match)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(1_000);
             }
         }
         let mut exact_number_pages = BTreeSet::new();
@@ -627,7 +701,7 @@ fn micro_metadata(page_number: u32, text: &str) -> PageMicroMetadata {
     let mut numbers = BTreeSet::new();
     let mut references = BTreeSet::new();
     for (index, token) in tokens.iter().enumerate() {
-        if token.chars().any(|c| c.is_ascii_digit()) {
+        if is_number_token(token) {
             numbers.insert(token.clone());
         }
         if token.len() >= 3 && !is_stopword(token) {
@@ -648,7 +722,54 @@ fn micro_metadata(page_number: u32, text: &str) -> PageMicroMetadata {
         terms,
         numbers,
         explicit_page_references: references,
+        graph_spans: graph_micro_spans(text),
     }
+}
+
+fn graph_micro_spans(text: &str) -> Vec<GraphMicroSpan> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for (index, character) in text.char_indices() {
+        let end = index + character.len_utf8();
+        if matches!(character, '.' | '?' | '!' | '\n') {
+            if !text[start..end].trim().is_empty() {
+                ranges.push((start, end));
+            }
+            start = end;
+        }
+    }
+    if start < text.len() && !text[start..].trim().is_empty() {
+        ranges.push((start, text.len()));
+    }
+    ranges
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (byte_start, byte_end))| {
+            let original = &text[byte_start..byte_end];
+            let tokens = tokenize(original);
+            let terms = tokens
+                .iter()
+                .filter(|token| token.len() >= 3 && !is_stopword(token))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let numbers = tokens
+                .iter()
+                .filter(|token| is_number_token(token))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if terms.is_empty() && numbers.is_empty() {
+                return None;
+            }
+            Some(GraphMicroSpan {
+                span_index: u32::try_from(index).unwrap_or(u32::MAX),
+                byte_start,
+                byte_end,
+                sha256: sha256_hex(original.as_bytes()),
+                terms,
+                numbers,
+            })
+        })
+        .collect()
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -685,6 +806,38 @@ fn is_stopword(term: &str) -> bool {
             | "unos"
             | "y"
     )
+}
+
+fn is_number_token(token: &str) -> bool {
+    token.chars().any(|character| character.is_ascii_digit())
+        || matches!(
+            token,
+            "cero"
+                | "dos"
+                | "tres"
+                | "cuatro"
+                | "cinco"
+                | "seis"
+                | "siete"
+                | "ocho"
+                | "nueve"
+                | "diez"
+                | "once"
+                | "doce"
+                | "trece"
+                | "catorce"
+                | "quince"
+                | "veinte"
+                | "treinta"
+                | "cuarenta"
+                | "cincuenta"
+                | "cien"
+                | "ciento"
+                | "mil"
+                | "millon"
+                | "millón"
+                | "millones"
+        )
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -985,5 +1138,96 @@ mod tests {
         assert!(phases[3].complete_for_candidate_set);
         assert_eq!(phases[0].deferred_candidate_pages, vec![2, 3, 4]);
         assert!(phases[3].deferred_candidate_pages.is_empty());
+    }
+
+    #[test]
+    fn graph_micro_spans_resolve_to_exact_original_utf8_and_digest() {
+        let graph = DocumentGraph::build(
+            "utf8",
+            "v1",
+            vec![(
+                1,
+                None,
+                "Clara llegó al faro. ¿Cuántos años tenía? 38 años.".to_owned(),
+            )],
+        )
+        .unwrap();
+        let page = graph.page(1).unwrap();
+        let metadata = graph.page_metadata(1).unwrap();
+        assert_eq!(metadata.graph_spans.len(), 3);
+        for span in &metadata.graph_spans {
+            let original = &page.original_text[span.byte_start..span.byte_end];
+            assert_eq!(span.sha256, sha256_hex(original.as_bytes()));
+        }
+        graph.verify_original_authority().unwrap();
+    }
+
+    #[test]
+    fn focused_ranking_prefers_terms_connected_by_one_graph_span() {
+        let graph = DocumentGraph::build(
+            "relations",
+            "v1",
+            vec![
+                (
+                    1,
+                    None,
+                    "Puerto Gris aparece aquí. Los habitantes aparecen en otra situación."
+                        .to_owned(),
+                ),
+                (
+                    2,
+                    None,
+                    "Los habitantes de Puerto Gris eran dos mil.".to_owned(),
+                ),
+            ],
+        )
+        .unwrap();
+        let phase = graph
+            .retrieve_phase(
+                "habitantes Puerto Gris",
+                RetrievalBudget {
+                    max_pages: 1,
+                    max_characters: 500,
+                    graph_hops: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(phase.candidate_pages, 1);
+        assert_eq!(phase.evidence[0].page_number, 2);
+        assert!(phase.complete_for_candidate_set);
+        assert_eq!(phase.broad_match_pages, 2);
+    }
+
+    #[test]
+    fn quantity_question_prefers_related_span_with_number_words() {
+        let graph = DocumentGraph::build(
+            "quantity",
+            "v1",
+            vec![
+                (1, None, "Puerto Gris tenía dos mil habitantes.".to_owned()),
+                (
+                    2,
+                    None,
+                    "Los habitantes de Puerto Gris cambiaron su historia.".to_owned(),
+                ),
+            ],
+        )
+        .unwrap();
+        let phase = graph
+            .retrieve_phase(
+                "¿Cuántos habitantes tenía Puerto Gris?",
+                RetrievalBudget {
+                    max_pages: 2,
+                    max_characters: 500,
+                    graph_hops: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(phase.broad_match_pages, 2);
+        assert_eq!(phase.candidate_pages, 1);
+        assert_eq!(phase.evidence[0].page_number, 1);
+        let metadata = graph.page_metadata(1).unwrap();
+        assert!(metadata.graph_spans[0].numbers.contains("dos"));
+        assert!(metadata.graph_spans[0].numbers.contains("mil"));
     }
 }

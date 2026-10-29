@@ -17,6 +17,7 @@ struct BuildReceipt {
     document_id: String,
     version_hash: String,
     page_count: usize,
+    graph_micro_spans: usize,
     output: PathBuf,
     original_text_authority_verified: bool,
 }
@@ -103,6 +104,7 @@ fn build_text(arguments: Vec<String>) -> Result<()> {
             document_id,
             version_hash,
             page_count: graph.page_count(),
+            graph_micro_spans: graph.graph_micro_span_count(),
             output,
             original_text_authority_verified: true,
         })?
@@ -149,6 +151,7 @@ fn build(arguments: Vec<String>) -> Result<()> {
             document_id,
             version_hash,
             page_count: graph.page_count(),
+            graph_micro_spans: graph.graph_micro_span_count(),
             output,
             original_text_authority_verified: true,
         })?
