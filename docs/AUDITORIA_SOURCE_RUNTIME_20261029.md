@@ -424,3 +424,11 @@ Llama pasan. La repetición real posterior conserva
 esto demuestra que el branch-and-bound está preparado para ejecutar el cálculo
 regional en el dispositivo del modelo, pero que las cotas del checkpoint real
 no cierran todavía una poda regional positiva.
+
+El intento experimental de limitar las extensiones a un token reveló además
+que una diferencia numérica entre la suma escalar usada para construir la cota
+y la acumulación de `matmul` puede producir un score ligeramente superior a la
+cota almacenada. La ruta se corrigió para tratar cualquier inconsistencia como
+certificado inválido y volver a la atención densa; nunca se propaga como error
+de servicio ni autoriza una omisión. El fusible publicado permanece en 8
+tokens, porque el experimento de un token no queda certificado por sí mismo.

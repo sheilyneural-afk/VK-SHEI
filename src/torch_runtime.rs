@@ -780,6 +780,23 @@ impl TerrsvusionKvCache {
         let conversion = Self::conversion_worker(0)?;
         let axis_dim = usize::try_from(kv_heads * head_dim).context("dimensión de eje")?;
         let axis_heads = usize::try_from(kv_heads).context("cabezas KV")?;
+        // Llama 3.1's 32Q/8KV geometry needs tighter interval bounds than the
+        // general semantic axis normally produces. This fuse limits only the
+        // maximum open extent; it does not drop or retokenize positions. The
+        // resulting certificate is larger, but its score upper bounds are
+        // tighter and can therefore close regional branch-and-bound proofs.
+        let axis_policy = if storage_frame_tokens >= 32
+            && query_heads == 32
+            && kv_heads == 8
+            && head_dim == 128
+        {
+            AxisPolicy {
+                open_extent_safety_limit: Some(8),
+                ..AxisPolicy::default()
+            }
+        } else {
+            AxisPolicy::default()
+        };
         Ok(Self {
             layers: (0..n_layers)
                 .map(|_| TerrsvusionLayer {
@@ -796,11 +813,7 @@ impl TerrsvusionKvCache {
             exact_cold,
             conversion,
             storage_frame_tokens,
-            parallel_axis: ParallelContextAxis::new_partitioned(
-                axis_dim,
-                axis_heads,
-                AxisPolicy::default(),
-            )?,
+            parallel_axis: ParallelContextAxis::new_partitioned(axis_dim, axis_heads, axis_policy)?,
             parallel_query_events: 0,
             parallel_dimensional_views: 0,
             parallel_view_tokens: 0,
@@ -1916,7 +1929,17 @@ impl TerrsvusionKvCache {
                 .chunks_exact(positions.len())
                 .map(|head| head.iter().map(|value| f64::from(*value)).collect())
                 .collect::<Vec<Vec<f64>>>();
-            certificate.materialize(block_id, &scores, &state_uppers, &state_value_max)?;
+            // A score that exceeds its stored interval invalidates the
+            // certificate (for example because of a numerical accumulation
+            // difference between the metadata pass and LibTorch matmul). It
+            // must never abort serving or authorize an unsafe omission: fall
+            // back to the dense/legacy path instead.
+            if certificate
+                .materialize(block_id, &scores, &state_uppers, &state_value_max)
+                .is_err()
+            {
+                return Ok(None);
+            }
             loaded.insert(block_id, (page_index, key_device, scores));
             if certified(&certificate.bounds(), allowed) {
                 break;
