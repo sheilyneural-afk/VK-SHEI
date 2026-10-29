@@ -17,7 +17,7 @@ Se ha añadido una ruta en src/torch_runtime.rs que calcula scores QK de BF16 re
 
 En caso de omisión certificada, recupera solo las posiciones V seleccionadas mediante ColdStore::read_value_tokens, con valores BF16 y verificaciones originales. Sin certificado, con scores no finitos, con prefijo antiguo o con epsilon=0, utiliza la atención densa BF16 original. El certificado local de error de atención NO demuestra igualdad de logits finales ni exactitud universal.
 
-El nuevo parámetro de API es applied_mass_tolerance entre 0 (exclusivo) y 0,01 (inclusive), SOLO con model=terrsvusion-rust. Por defecto sigue siendo None; la ruta llama-dense-bf16 nunca omite V. Toda petición experimental desactiva lectura y escritura de la caché persistente de prefijos para evitar contaminaciones entre políticas de inferencia.
+El parámetro interno de diagnóstico `applied_mass_tolerance` acepta valores entre 0 (exclusivo) y 0,01 (inclusive), pero la API HTTP lo rechaza actualmente hasta demostrar paridad final de logits y fallback exacto. Por defecto sigue siendo None; la ruta llama-dense-bf16 nunca omite V. Toda ejecución experimental desactiva lectura y escritura de la caché persistente de prefijos para evitar contaminaciones entre políticas de inferencia.
 
 Prueba física CONTROLADA en CPU con geometría Llama 32Q/8KV/128 dimensiones, K/Q/V sintéticos, LibTorch BF16 y ColdStore auténtico:
 
@@ -66,4 +66,3 @@ Se verificaron 76 tests torch CPU, 9 tests API y 55 tests Rust core. Las pruebas
 El nuevo ejecutable fue recompilado en modo release después de las modificaciones del código. El proceso 8099 no fue reiniciado para no interrumpir trabajos simultáneos: el API experimental nuevo no está ACTIVO en el servidor anterior hasta un reinicio controlado. Los procesos GPU y router no se editaron.
 
 No se ha probado: omisión distinta de cero usando el checkpoint real Llama 8B; igualdad de tokens/logits con epsilon positivo en inferencia real; paridad 111k sobre el Faro completo; ni equivalencia automática entre chats con document=/system y el nativo virgen. Los SHA de representaciones KV diferentes tampoco deben compararse como hashes binarios iguales sin una canonización lógica definida.
-

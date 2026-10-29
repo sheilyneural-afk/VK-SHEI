@@ -211,9 +211,10 @@ El aproximadamente 99,4 % de ahorro de KV residente (~5,2–5,4 MiB frente
 a ~894–902 MiB en Llama 8B) procede de la arquitectura ColdStore:
 NO significa omisión certificada de V. El antiguo Llama 32Q/8KV ni
 siquiera ejecutaba el certificado exact_mass, exclusivo de MiniCPM
-16Q/2KV. La ruta 32Q/8KV nueva es experimental, desactivada por defecto
-y requiere applied_mass_tolerance positivo; falla a atención BF16
-completa cuando no hay prueba. La prueba física de datos controlados
+16Q/2KV. La ruta 32Q/8KV nueva es experimental y no está expuesta actualmente
+por la API HTTP: `applied_mass_tolerance` se rechaza hasta demostrar paridad
+final de logits y fallback exacto. El diagnóstico interno requiere un valor
+positivo y falla a atención BF16 completa cuando no hay prueba. La prueba física de datos controlados
 evitó 15 V de 17 (30.720 bytes de V fría) sin error observado,
 pero NO prueba omisiones reales del checkpoint Llama 8B.
 
