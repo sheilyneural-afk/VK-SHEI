@@ -135,6 +135,78 @@ pub fn select_by_exact_mass(
     Ok((positions, bounds))
 }
 
+/// Select V tokens while preserving the complete softmax denominator. Unlike
+/// [`select_by_exact_mass`], the retained probabilities are not renormalized:
+/// only omitted `p_i * V_i` numerator terms disappear. The component-wise
+/// output error is therefore bounded by `omitted_mass * max|V|`, without the
+/// factor two required by renormalized sparse attention.
+pub fn select_v_by_exact_contribution(
+    scores_by_head: &[Vec<f64>],
+    value_abs_max: &[f64],
+    tolerance: f64,
+) -> Result<(Vec<usize>, Vec<f64>)> {
+    ensure!(
+        !scores_by_head.is_empty() && scores_by_head.len() == value_abs_max.len(),
+        "geometría de contribución V incompatible"
+    );
+    ensure!(
+        tolerance.is_finite() && tolerance >= 0.0,
+        "tolerancia V inválida"
+    );
+    let tokens = scores_by_head[0].len();
+    ensure!(tokens > 0, "contribución V sin tokens");
+    ensure!(
+        scores_by_head
+            .iter()
+            .all(|scores| scores.len() == tokens && scores.iter().all(|score| score.is_finite()))
+            && value_abs_max
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
+        "contribución V no finita"
+    );
+    let mut selected = BTreeSet::new();
+    for (scores, value_max) in scores_by_head.iter().zip(value_abs_max) {
+        let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let weights = scores
+            .iter()
+            .map(|score| (*score - maximum).exp())
+            .collect::<Vec<_>>();
+        let total = weights.iter().sum::<f64>();
+        let allowed_fraction = if *value_max == 0.0 {
+            1.0
+        } else {
+            (tolerance / *value_max).clamp(0.0, 1.0)
+        };
+        let mut ranked = weights.iter().copied().enumerate().collect::<Vec<_>>();
+        ranked.sort_unstable_by(|left, right| right.1.total_cmp(&left.1));
+        let mut retained = 0.0_f64;
+        for (token, weight) in ranked {
+            selected.insert(token);
+            retained += weight;
+            if (total - retained).max(0.0) / total <= allowed_fraction {
+                break;
+            }
+        }
+    }
+    let positions = selected.into_iter().collect::<Vec<_>>();
+    let selected_set = positions.iter().copied().collect::<BTreeSet<_>>();
+    let mut bounds = Vec::with_capacity(scores_by_head.len());
+    for (scores, value_max) in scores_by_head.iter().zip(value_abs_max) {
+        let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mut total = 0.0_f64;
+        let mut omitted = 0.0_f64;
+        for (token, score) in scores.iter().enumerate() {
+            let weight = (*score - maximum).exp();
+            total += weight;
+            if !selected_set.contains(&token) {
+                omitted += weight;
+            }
+        }
+        bounds.push(omitted / total * *value_max);
+    }
+    Ok((positions, bounds))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +236,19 @@ mod tests {
         let expected = (1.0 / (1.0 + 4.0_f64.exp())) * 5.0;
         assert!((error - expected).abs() < 1e-12);
         assert_eq!(omitted_error_bound(&[4.0], &[], 3.0, 2.0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn full_denominator_v_selection_uses_single_omitted_mass_bound() {
+        let scores = [vec![12.0, 1.0, 0.0, -1.0, -2.0]];
+        let values = [3.0];
+        let (renormalized, renormalized_bounds) =
+            select_by_exact_mass(&scores, &values, 1e-3).unwrap();
+        let (full_denominator, full_denominator_bounds) =
+            select_v_by_exact_contribution(&scores, &values, 1e-3).unwrap();
+        assert!(full_denominator.len() <= renormalized.len());
+        assert!(certified(&full_denominator_bounds, 1e-3));
+        assert!(certified(&renormalized_bounds, 1e-3));
+        assert!(full_denominator_bounds[0] <= renormalized_bounds[0]);
     }
 }

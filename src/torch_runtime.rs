@@ -20,7 +20,9 @@ use tokenizers::Tokenizer;
 use crate::adaptive_extent::{AxisPolicy, ParallelContextAxis};
 #[cfg(test)]
 use crate::attention_certificate::omitted_error_bound;
-use crate::attention_certificate::{certified, select_by_exact_mass};
+use crate::attention_certificate::{
+    certified, select_by_exact_mass, select_v_by_exact_contribution,
+};
 use crate::cold_store::{ColdStore, ColdStoreStats, PageGeometry, PreparedPage};
 use crate::conversion_worker::{Bf16PageJob, ConversionStats, ConversionWorker, PageShape};
 use crate::model_config::ModelSpec;
@@ -742,6 +744,11 @@ pub struct TerrsvusionKvCache {
     record_step_logits: bool,
     step_logits: Vec<Vec<f32>>,
     layer_output_traces: Vec<LayerOutputTrace>,
+    verify_exact_attention_outputs: bool,
+    exact_attention_verified_events: usize,
+    exact_attention_equal_events: usize,
+    exact_attention_candidate_v_tokens: usize,
+    exact_attention_rejected_v_tokens: usize,
     suffix_against_committed: bool,
 }
 
@@ -871,6 +878,11 @@ impl TerrsvusionKvCache {
             record_step_logits: false,
             step_logits: Vec::new(),
             layer_output_traces: Vec::new(),
+            verify_exact_attention_outputs: false,
+            exact_attention_verified_events: 0,
+            exact_attention_equal_events: 0,
+            exact_attention_candidate_v_tokens: 0,
+            exact_attention_rejected_v_tokens: 0,
             suffix_against_committed: false,
         })
     }
@@ -1811,6 +1823,8 @@ impl TerrsvusionKvCache {
         ))
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     fn llama_regional_attention(
         &mut self,
         query: &Tensor,
@@ -2227,11 +2241,11 @@ impl TerrsvusionKvCache {
                 *dst = dst.max(f64::from(maxval));
             }
         }
-        if let Some(output) =
-            self.llama_regional_attention(query, pages, tail, sequence_tokens, tolerance)?
-        {
-            return Ok(Some(output));
-        }
+        // Parity-first Llama path: score the complete K history so omitted V
+        // terms can be removed without deleting their probability mass from
+        // the softmax denominator. The regional QK-pruning experiment remains
+        // available to focused tests, but cannot authorize this path because
+        // sparse SDPA renormalizes retained tokens and perturbs every term.
         let mut keys = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
         let mut cursor = 0usize;
         for page in pages {
@@ -2317,11 +2331,11 @@ impl TerrsvusionKvCache {
         let max_per_query = (0..32)
             .map(|head| max_per_kv[head / (32 / 8)])
             .collect::<Vec<_>>();
-        // Slack for numerical differences between FP32 score planning
-        // and LibTorch BF16 SDPA. Not a guarantee of arbitrary GPU
-        // backend parity; keep original path for epsilon=0.
+        // Reserve half the requested budget for differences between explicit
+        // FP32 score/softmax planning and LibTorch BF16 SDPA.
         let allowed = tolerance * 0.5;
-        let (chosen, bounds) = select_by_exact_mass(&scores_by_head, &max_per_query, allowed)?;
+        let (chosen, bounds) =
+            select_v_by_exact_contribution(&scores_by_head, &max_per_query, allowed)?;
         ensure!(
             certified(&bounds, allowed),
             "Llama exact-mass certificate failed under conservative threshold"
@@ -2332,8 +2346,6 @@ impl TerrsvusionKvCache {
             return Ok(None);
         }
         let selection = chosen.iter().copied().collect::<BTreeSet<_>>();
-        let key_indices = Tensor::from_slice(&chosen.iter().map(|&x| x as i64).collect::<Vec<_>>());
-        let selected_key = full_key.index_select(2, &key_indices);
         let mut values = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
         let mut offset = 0usize;
         for page in pages {
@@ -2371,12 +2383,28 @@ impl TerrsvusionKvCache {
             }
         }
         ensure!(!values.is_empty(), "Llama certified V selection empty");
-        let output = Self::scaled_attention(query, &[selected_key], &values, sequence_tokens);
+        let selected_indices =
+            Tensor::from_slice(&chosen.iter().map(|&x| x as i64).collect::<Vec<_>>());
+        let selected_probabilities = scores
+            .softmax(-1, Kind::Float)
+            .index_select(3, &selected_indices);
+        let value_refs = values.iter().collect::<Vec<_>>();
+        let selected_values = Tensor::cat(&value_refs, 2)
+            .repeat_interleave_self_int(gqa, 1, None)
+            .to_kind(Kind::Float);
+        let output = selected_probabilities
+            .matmul(&selected_values)
+            .to_kind(query.kind());
+        let omitted = cursor.saturating_sub(chosen.len());
         self.exact_k_tokens_scanned += cursor;
         self.exact_v_tokens_materialized += chosen.len();
-        self.attention_v_tokens_avoided = self
-            .attention_v_tokens_avoided
-            .saturating_add(cursor.saturating_sub(chosen.len()));
+        self.attention_selected_qk_elements = self
+            .attention_selected_qk_elements
+            .saturating_add(u128::from(cursor as u64) * 32);
+        self.attention_selected_pv_elements = self
+            .attention_selected_pv_elements
+            .saturating_add(u128::from(chosen.len() as u64) * 32 * 128);
+        self.attention_v_tokens_avoided = self.attention_v_tokens_avoided.saturating_add(omitted);
         self.exact_mass_max_bound = self
             .exact_mass_max_bound
             .max(bounds.into_iter().fold(0.0f64, f64::max));
@@ -2420,7 +2448,23 @@ impl TerrsvusionKvCache {
             self.attention_v_tokens_avoided,
             self.exact_mass_max_bound,
         );
+        // Exact diagnostic authority must have the same batched geometry and
+        // causal mask as the canonical prefill. A sequence of one-query SDPA
+        // calls is mathematically equivalent, but not necessarily bit-exact
+        // because LibTorch may select a different kernel/accumulation order.
+        let canonical_tile = if self.verify_exact_attention_outputs {
+            Some(self.llama_dense_tile_attention(
+                query,
+                &pages,
+                existing_tail.as_ref(),
+                new_key,
+                new_value,
+            )?)
+        } else {
+            None
+        };
         let mut outputs = Vec::with_capacity(query_tokens);
+        let mut selective_queries = 0usize;
         for query_index in 0..query_tokens {
             let prefix_tokens = query_index + 1;
             let prefix_key = new_key.narrow(2, 0, prefix_tokens as i64);
@@ -2434,33 +2478,192 @@ impl TerrsvusionKvCache {
             };
             let query_token = query.narrow(2, query_index as i64, 1);
             let logical_history = self.sequence_tokens + query_index;
-            let Some(output) = self.llama_certified_value_attention(
+            let avoided_before = self.attention_v_tokens_avoided;
+            let candidate = self.llama_certified_value_attention(
                 layer_index,
                 &query_token,
                 &pages,
                 Some(&tail),
                 logical_history,
                 tolerance,
-            )?
-            else {
-                // Queries already evaluated in this layer are discarded when
-                // the tile falls back to dense causal attention. Keep physical
-                // I/O metrics (the work really happened), but do not claim
-                // logical Transformer savings that did not reach the output.
-                self.exact_k_tokens_scanned = logical_snapshot.0;
-                self.exact_v_tokens_materialized = logical_snapshot.1;
-                self.attention_dense_qk_elements = logical_snapshot.2;
-                self.attention_dense_pv_elements = logical_snapshot.3;
-                self.attention_selected_qk_elements = logical_snapshot.4;
-                self.attention_selected_pv_elements = logical_snapshot.5;
-                self.attention_v_tokens_avoided = logical_snapshot.6;
-                self.exact_mass_max_bound = logical_snapshot.7;
-                return Ok(None);
+            )?;
+            let output = if let Some(candidate) = candidate {
+                selective_queries += 1;
+                if let Some(canonical) = canonical_tile.as_ref() {
+                    let omitted = self
+                        .attention_v_tokens_avoided
+                        .saturating_sub(avoided_before);
+                    self.exact_attention_verified_events += 1;
+                    self.exact_attention_candidate_v_tokens = self
+                        .exact_attention_candidate_v_tokens
+                        .saturating_add(omitted);
+                    let canonical_query = canonical.narrow(2, query_index as i64, 1);
+                    if candidate.equal(&canonical_query) {
+                        self.exact_attention_equal_events += 1;
+                    } else {
+                        self.exact_attention_rejected_v_tokens = self
+                            .exact_attention_rejected_v_tokens
+                            .saturating_add(omitted);
+                    }
+                    canonical_query
+                } else {
+                    candidate
+                }
+            } else if let Some(canonical) = canonical_tile.as_ref() {
+                canonical.narrow(2, query_index as i64, 1)
+            } else {
+                self.llama_dense_single_query_attention(
+                    &query_token,
+                    &pages,
+                    Some(&tail),
+                    logical_history,
+                )?
             };
             outputs.push(output);
         }
+        if let Some(canonical) = canonical_tile {
+            // The oracle deliberately read complete V and executed canonical
+            // dense attention once. Candidate counters describe discovered
+            // opportunities, but no physical/Transformer saving is claimed.
+            self.exact_k_tokens_scanned = logical_snapshot.0;
+            self.exact_v_tokens_materialized = logical_snapshot.1;
+            self.attention_dense_qk_elements = logical_snapshot.2;
+            self.attention_dense_pv_elements = logical_snapshot.3;
+            self.attention_selected_qk_elements = logical_snapshot.4;
+            self.attention_selected_pv_elements = logical_snapshot.5;
+            self.attention_v_tokens_avoided = logical_snapshot.6;
+            self.exact_mass_max_bound = logical_snapshot.7;
+            return Ok(Some(canonical));
+        }
+        if selective_queries == 0 {
+            // No omission survived this tile. Keep physical I/O metrics (the
+            // attempted work happened), but let the caller use the faster
+            // canonical batched SDPA and claim no logical savings.
+            self.exact_k_tokens_scanned = logical_snapshot.0;
+            self.exact_v_tokens_materialized = logical_snapshot.1;
+            self.attention_dense_qk_elements = logical_snapshot.2;
+            self.attention_dense_pv_elements = logical_snapshot.3;
+            self.attention_selected_qk_elements = logical_snapshot.4;
+            self.attention_selected_pv_elements = logical_snapshot.5;
+            self.attention_v_tokens_avoided = logical_snapshot.6;
+            self.exact_mass_max_bound = logical_snapshot.7;
+            return Ok(None);
+        }
         let refs = outputs.iter().collect::<Vec<_>>();
         Ok(Some(Tensor::cat(&refs, 2)))
+    }
+
+    fn llama_dense_tile_attention(
+        &mut self,
+        query: &Tensor,
+        pages: &[TerrsvusionPage],
+        existing_tail: Option<&(Tensor, Tensor)>,
+        new_key: &Tensor,
+        new_value: &Tensor,
+    ) -> Result<Tensor> {
+        let mut keys = Vec::with_capacity(pages.len() + 2);
+        let mut values = Vec::with_capacity(pages.len() + 2);
+        let mut covered = 0usize;
+        for page in pages {
+            ensure!(
+                page.token_start == covered && page.tokens > 0,
+                "páginas Llama densas fuera de orden"
+            );
+            let (key, value) = match &page.storage {
+                PageStorage::Pending { key, value, .. } => {
+                    (key.shallow_clone(), value.shallow_clone())
+                }
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => {
+                    let key = self.read_cold_key(*exact_id, *immutable)?;
+                    let value = self.read_cold_value(*exact_id, *immutable)?;
+                    (
+                        self.exact_tensor_from_bytes(&key, page.tokens)?,
+                        self.exact_tensor_from_bytes(&value, page.tokens)?,
+                    )
+                }
+            };
+            keys.push(key);
+            values.push(value);
+            covered += page.tokens;
+        }
+        if let Some((key, value)) = existing_tail {
+            ensure!(key.size() == value.size(), "cola Llama K/V incompatible");
+            covered += key.size()[2] as usize;
+            keys.push(key.shallow_clone());
+            values.push(value.shallow_clone());
+        }
+        ensure!(
+            new_key.size() == new_value.size(),
+            "bloque Llama K/V incompatible"
+        );
+        ensure!(
+            covered == self.sequence_tokens,
+            "histórico Llama denso incompleto antes del bloque"
+        );
+        keys.push(new_key.shallow_clone());
+        values.push(new_value.shallow_clone());
+        Ok(Self::scaled_attention(
+            query,
+            &keys,
+            &values,
+            self.sequence_tokens,
+        ))
+    }
+
+    fn llama_dense_single_query_attention(
+        &mut self,
+        query: &Tensor,
+        pages: &[TerrsvusionPage],
+        tail: Option<&(Tensor, Tensor)>,
+        sequence_tokens: usize,
+    ) -> Result<Tensor> {
+        let mut keys = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
+        let mut values = Vec::with_capacity(keys.capacity());
+        let mut covered = 0usize;
+        for page in pages {
+            ensure!(
+                page.token_start == covered && page.tokens > 0,
+                "páginas Llama densas fuera de orden"
+            );
+            let (key, value) = match &page.storage {
+                PageStorage::Pending { key, value, .. } => {
+                    (key.shallow_clone(), value.shallow_clone())
+                }
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => {
+                    let key = self.read_cold_key(*exact_id, *immutable)?;
+                    let value = self.read_cold_value(*exact_id, *immutable)?;
+                    (
+                        self.exact_tensor_from_bytes(&key, page.tokens)?,
+                        self.exact_tensor_from_bytes(&value, page.tokens)?,
+                    )
+                }
+            };
+            keys.push(key);
+            values.push(value);
+            covered += page.tokens;
+        }
+        if let Some((key, value)) = tail {
+            ensure!(key.size() == value.size(), "cola Llama K/V incompatible");
+            covered += key.size()[2] as usize;
+            keys.push(key.shallow_clone());
+            values.push(value.shallow_clone());
+        }
+        ensure!(
+            covered == sequence_tokens + 1 && !keys.is_empty(),
+            "histórico Llama denso incompleto"
+        );
+        Ok(Self::scaled_attention(
+            query,
+            &keys,
+            &values,
+            sequence_tokens,
+        ))
     }
 
     fn exact_mass_attention(
@@ -4290,6 +4493,10 @@ pub struct TorchGeneration {
     pub prefix_cache_copied_bytes: u64,
     pub prefix_immutable: bool,
     pub certified_v_tokens_omitted: usize,
+    pub exact_attention_verified_events: usize,
+    pub exact_attention_equal_events: usize,
+    pub exact_attention_candidate_v_tokens: usize,
+    pub exact_attention_rejected_v_tokens: usize,
     pub applied_mass_tolerance: Option<f64>,
     #[serde(skip_serializing)]
     pub step_logits: Vec<Vec<f32>>,
@@ -4524,6 +4731,7 @@ struct GenerationInstrumentation {
     prefix_tokens: usize,
     applied_mass_tolerance: Option<f64>,
     record_step_logits: bool,
+    verify_exact_attention_outputs: bool,
 }
 
 impl TorchModelRuntime {
@@ -5382,6 +5590,7 @@ impl TorchModelRuntime {
                 GenerationInstrumentation {
                     applied_mass_tolerance: Some(tolerance),
                     record_step_logits: true,
+                    verify_exact_attention_outputs: true,
                     ..GenerationInstrumentation::default()
                 },
                 None,
@@ -5490,6 +5699,7 @@ impl TorchModelRuntime {
             prefix_tokens,
             applied_mass_tolerance,
             record_step_logits,
+            verify_exact_attention_outputs,
         } = instrumentation;
         // SAFETY: a positive tolerance can alter BF16 attention and thus
         // *future* K/V. Never load/publish the same persistent prefix key
@@ -5550,6 +5760,7 @@ impl TorchModelRuntime {
                 .set_open_extent_safety_limit_before_observation(Some(1))?;
         }
         cache.record_step_logits = record_step_logits;
+        cache.verify_exact_attention_outputs = verify_exact_attention_outputs;
         let mut generated = Vec::with_capacity(max_tokens);
         let mut prefill_seconds = 0.0_f64;
         let mut prefill_forward_calls = 0usize;
@@ -5904,6 +6115,10 @@ impl TorchModelRuntime {
                 prefix_cache_copied_bytes: cache.prefix_copied_bytes,
                 prefix_immutable: cache.prefix_cold.is_some(),
                 certified_v_tokens_omitted: cache.attention_v_tokens_avoided,
+                exact_attention_verified_events: cache.exact_attention_verified_events,
+                exact_attention_equal_events: cache.exact_attention_equal_events,
+                exact_attention_candidate_v_tokens: cache.exact_attention_candidate_v_tokens,
+                exact_attention_rejected_v_tokens: cache.exact_attention_rejected_v_tokens,
                 applied_mass_tolerance: cache.applied_mass_tolerance,
                 step_logits: std::mem::take(&mut cache.step_logits),
                 layer_output_traces: std::mem::take(&mut cache.layer_output_traces),
@@ -7362,13 +7577,13 @@ mod tests {
             .expect("32Q8KV exact QK bound must certify omission");
         let count = cache.exact_k_tokens_scanned;
         let selected = cache.exact_v_tokens_materialized;
-        assert!(
-            count < 17,
-            "la poda regional no redujo el escaneo K: {count}"
+        assert_eq!(
+            count, 17,
+            "la ruta de paridad debe conservar el denominador QK completo"
         );
         assert!(
             selected <= 2,
-            "la poda regional materializó demasiada V: {selected}"
+            "la selección de contribución materializó demasiada V: {selected}"
         );
         assert!(count >= selected);
         let result = output.to_kind(Kind::Float).contiguous();

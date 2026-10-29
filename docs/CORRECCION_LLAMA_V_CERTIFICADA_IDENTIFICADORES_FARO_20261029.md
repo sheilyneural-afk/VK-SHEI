@@ -65,4 +65,26 @@ Se verificaron 76 tests torch CPU, 9 tests API y 55 tests Rust core. Las pruebas
 
 El nuevo ejecutable fue recompilado en modo release después de las modificaciones del código. El proceso 8099 no fue reiniciado para no interrumpir trabajos simultáneos: el API experimental nuevo no está ACTIVO en el servidor anterior hasta un reinicio controlado. Los procesos GPU y router no se editaron.
 
-No se ha probado: omisión distinta de cero usando el checkpoint real Llama 8B; igualdad de tokens/logits con epsilon positivo en inferencia real; paridad 111k sobre el Faro completo; ni equivalencia automática entre chats con document=/system y el nativo virgen. Los SHA de representaciones KV diferentes tampoco deben compararse como hashes binarios iguales sin una canonización lógica definida.
+## Verificación de paridad por bloque canónico (29/10/2026)
+
+La ruta experimental posterior conserva el denominador softmax completo: calcula QK para toda la historia y aplica PV únicamente sobre las posiciones V seleccionadas, sin renormalizar la distribución. Para evitar una falsa autoridad numérica, el oráculo no compara contra llamadas SDPA de una sola consulta. LibTorch puede escoger para esas llamadas otro kernel u otro orden de acumulación. La autoridad es ahora una sola SDPA densa del bloque completo, con la misma geometría batched y la misma máscara causal que el prefill canónico.
+
+Ejecución física con el checkpoint `/home/yo/models/Llama-3.1-8B-Instruct`, 128 tokens, bloques y páginas de 32 tokens, un token generado y tolerancia experimental `1e-3`:
+
+| Evidencia | Resultado |
+|---|---:|
+| Salidas de capa comparadas | 128 |
+| Primera divergencia | ninguna |
+| L-infinito máximo de capa | 0 |
+| L-infinito de logits finales | 0 |
+| Eventos con candidato de omisión | 11 |
+| Posiciones V candidatas | 20 |
+| Eventos de atención exactamente iguales | 0 |
+| Posiciones V rechazadas por el oráculo | 20 |
+| Posiciones V autorizadas como omitidas | 0 |
+
+El resultado corrige el fallback y demuestra paridad exacta del diagnóstico, pero refuta que la cota local `1e-3` baste para una omisión positiva exacta en esta entrada: las 20 posiciones propuestas cambiaban al menos un bit de la salida de atención. El oráculo devuelve el bloque denso canónico y restaura todos los contadores de ahorro. Por ello `omission_accepted=false`, aunque las lecturas parciales exploratorias sigan visibles como trabajo diagnóstico realmente ejecutado.
+
+El coste también queda separado: la ruta canónica necesitó 384 lecturas ColdStore y 2,29 s de prefill; el diagnóstico exhaustivo realizó 6.560 lecturas y 7,11 s. Esa diferencia no es una aceleración ni una regresión del servidor normal: corresponde a puntuar candidatos consulta por consulta y verificar una vez cada bloque contra la autoridad densa. Antes de escalarlo debe sustituirse por una garantía suficiente por capa —por ejemplo, una celda de redondeo BF16 con cotas de error aritmético— que pueda rechazar o autorizar sin leer V omitida ni ejecutar después el bloque denso.
+
+Continúa sin demostrarse: omisión positiva exacta usando el checkpoint real Llama 8B; una garantía previa sin lectura de V omitida; paridad física 30K/100K/131K; paridad 111k sobre Faro completo; ni equivalencia automática entre chats con `document=`/`system` y el nativo virgen. Los SHA de representaciones KV diferentes tampoco deben compararse como hashes binarios iguales sin una canonización lógica definida.
