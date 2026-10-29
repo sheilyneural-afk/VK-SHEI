@@ -4008,6 +4008,7 @@ pub struct TorchGeneration {
 #[derive(Debug, Serialize)]
 pub struct AppliedOmissionReport {
     pub tolerance: f64,
+    pub omission_accepted: bool,
     pub exact_token_parity: bool,
     pub max_abs_logit_difference: f64,
     pub logit_steps_compared: usize,
@@ -5034,14 +5035,9 @@ impl TorchModelRuntime {
                     max_abs_logit_difference.max((*left as f64 - *right as f64).abs());
             }
         }
-        ensure!(
-            max_abs_logit_difference <= tolerance,
-            "omisión aplicada rechazada: L∞ de logits {:.9} supera la tolerancia {:.9}",
-            max_abs_logit_difference,
-            tolerance
-        );
         Ok(AppliedOmissionReport {
             tolerance,
+            omission_accepted: max_abs_logit_difference <= tolerance,
             exact_token_parity: canonical.token_ids == applied.token_ids,
             max_abs_logit_difference,
             logit_steps_compared: steps,

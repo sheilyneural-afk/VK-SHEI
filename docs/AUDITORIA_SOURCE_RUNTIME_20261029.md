@@ -343,6 +343,29 @@ El planificador queda integrado como candidato fail-closed; la API sigue
 deshabilitada y la paridad de logits del checkpoint real continúa sin
 demostrarse.
 
+La ejecución real más reciente del binario diagnóstico, con Llama 3.1 8B,
+128 tokens y tolerancia `1e-3`, ya devuelve el informe completo aunque el
+resultado no sea aceptado:
+
+```text
+omission_accepted=false
+exact_token_parity=true
+max_abs_logit_difference=0.125
+certified_v_tokens_omitted=4
+attention_dense_qk_elements=8454144
+attention_dense_pv_elements=1082130432
+attention_selected_qk_elements=0
+attention_selected_pv_elements=0
+prefill_seconds_applied=71.527663461
+prefill_seconds_canonical=2.284191864
+```
+
+Esta medición revela que, en el prefill real de Llama, la omisión positiva
+actual sigue pasando por el selector V basado en scores completos y no por la
+poda regional QK: se omiten V, pero no se reduce QK/PV del Transformer. La
+paridad de token no compensa el `L∞=0.125`; el informe se conserva como
+diagnóstico y la API permanece bloqueada.
+
 La instrumentación de esta ruta separa ahora cuatro magnitudes lógicas:
 
 ```text
