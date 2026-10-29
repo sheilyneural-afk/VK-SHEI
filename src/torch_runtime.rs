@@ -2714,10 +2714,22 @@ fn exact_scores(
     tokens: usize,
     scale: f64,
 ) -> Vec<Vec<f64>> {
-    (0..16)
+    exact_scores_generic::<16, 2>(query_values, key_values, tokens, scale)
+}
+
+fn exact_scores_generic<const Q: usize, const KV: usize>(
+    query_values: &[f32],
+    key_values: &[f32],
+    tokens: usize,
+    scale: f64,
+) -> Vec<Vec<f64>> {
+    debug_assert_eq!(Q % KV, 0);
+    debug_assert_eq!(query_values.len(), Q * 128);
+    debug_assert_eq!(key_values.len(), KV * tokens * 128);
+    (0..Q)
         .into_par_iter()
         .map(|head| {
-            let kv_head = head / 8;
+            let kv_head = head / (Q / KV);
             let query = &query_values[head * 128..(head + 1) * 128];
             (0..tokens)
                 .map(|token| {
