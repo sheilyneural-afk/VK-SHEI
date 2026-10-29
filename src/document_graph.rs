@@ -66,6 +66,17 @@ pub struct RetrievalBudget {
     pub graph_hops: usize,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalScope {
+    /// Select the pages with the strongest joint deterministic evidence and
+    /// graph context. Completion applies only to that focused candidate set.
+    Focused,
+    /// Retain every page matching any deterministic query signal. This is
+    /// broader, but still does not certify semantic exhaustiveness.
+    Exhaustive,
+}
+
 impl RetrievalBudget {
     pub fn validate(self) -> Result<Self> {
         ensure!(self.max_pages > 0, "retrieval max_pages must be positive");
@@ -91,12 +102,70 @@ pub struct EvidencePage {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetrievalPhase {
     pub query: String,
+    pub scope: RetrievalScope,
     pub evidence: Vec<EvidencePage>,
     pub deferred_candidate_pages: Vec<u32>,
     pub candidate_pages: usize,
+    pub broad_match_pages: usize,
     pub selected_characters: usize,
     pub complete_for_candidate_set: bool,
     pub original_text_authority: bool,
+    pub semantic_exhaustiveness_certified: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CitedEvidenceContext {
+    pub question: String,
+    pub prompt: String,
+    pub evidence_pages: Vec<u32>,
+    pub evidence_characters: usize,
+    pub complete_for_candidate_set: bool,
+    pub deferred_candidate_pages: Vec<u32>,
+}
+
+impl RetrievalPhase {
+    /// Builds a model-facing context without changing or summarizing evidence.
+    /// Exact tokenizer accounting belongs to the selected model runtime.
+    pub fn assemble_cited_context(&self) -> Result<CitedEvidenceContext> {
+        ensure!(!self.evidence.is_empty(), "cannot assemble empty evidence");
+        let mut prompt = String::from(
+            "Responde la pregunta usando exclusivamente las evidencias originales citadas.\n\
+             Distingue hechos textuales de inferencias. Cita cada afirmación como [página N].\n\
+             Si las evidencias no bastan, responde exactamente EVIDENCIA_INSUFICIENTE.\n\n",
+        );
+        prompt.push_str("PREGUNTA:\n");
+        prompt.push_str(&self.query);
+        prompt.push_str("\n\nEVIDENCIAS ORIGINALES:\n");
+        let mut evidence_pages = Vec::with_capacity(self.evidence.len());
+        for evidence in &self.evidence {
+            evidence_pages.push(evidence.page_number);
+            prompt.push_str(&format!(
+                "\n[PÁGINA {} | SHA256 {} | SECCIÓN {}]\n{}\n",
+                evidence.page_number,
+                evidence.sha256,
+                evidence.section.as_deref().unwrap_or("sin sección"),
+                evidence.original_text
+            ));
+        }
+        prompt.push_str("\nPREGUNTA A RESPONDER DESPUÉS DE LEER LAS EVIDENCIAS:\n");
+        prompt.push_str(&self.query);
+        prompt.push_str(
+            "\nSi una evidencia contiene directamente la respuesta, responde de forma concisa y cítala.\n",
+        );
+        if !self.complete_for_candidate_set {
+            prompt.push_str(
+                "\nAVISO: existen páginas candidatas diferidas. No afirmes cobertura exhaustiva.\n",
+            );
+        }
+        Ok(CitedEvidenceContext {
+            question: self.query.clone(),
+            prompt,
+            evidence_pages,
+            evidence_characters: self.selected_characters,
+            complete_for_candidate_set: self.complete_for_candidate_set,
+            deferred_candidate_pages: self.deferred_candidate_pages.clone(),
+        })
+    }
 }
 
 impl DocumentGraph {
@@ -184,6 +253,39 @@ impl DocumentGraph {
         self.metadata.get(&page_number)
     }
 
+    pub fn full_evidence_phase(&self, query: &str) -> Result<RetrievalPhase> {
+        ensure!(!query.trim().is_empty(), "retrieval query cannot be empty");
+        self.verify_original_authority()?;
+        let evidence = self
+            .pages
+            .values()
+            .map(|page| EvidencePage {
+                page_number: page.page_number,
+                section: page.section.clone(),
+                original_text: page.original_text.clone(),
+                sha256: page.sha256.clone(),
+                routing_score: 0,
+                graph_distance: 0,
+            })
+            .collect::<Vec<_>>();
+        let selected_characters = evidence
+            .iter()
+            .map(|page| page.original_text.chars().count())
+            .sum();
+        Ok(RetrievalPhase {
+            query: query.to_owned(),
+            scope: RetrievalScope::Exhaustive,
+            candidate_pages: evidence.len(),
+            broad_match_pages: evidence.len(),
+            evidence,
+            deferred_candidate_pages: Vec::new(),
+            selected_characters,
+            complete_for_candidate_set: true,
+            original_text_authority: true,
+            semantic_exhaustiveness_certified: false,
+        })
+    }
+
     pub fn edges(&self) -> &[DocumentEdge] {
         &self.edges
     }
@@ -247,38 +349,72 @@ impl DocumentGraph {
     }
 
     pub fn retrieve_phase(&self, query: &str, budget: RetrievalBudget) -> Result<RetrievalPhase> {
+        self.retrieve_phase_with_scope(query, budget, RetrievalScope::Focused)
+    }
+
+    pub fn retrieve_phase_with_scope(
+        &self,
+        query: &str,
+        budget: RetrievalBudget,
+        scope: RetrievalScope,
+    ) -> Result<RetrievalPhase> {
         let budget = budget.validate()?;
         ensure!(!query.trim().is_empty(), "retrieval query cannot be empty");
         self.verify_original_authority()?;
         let query_micro = micro_metadata(1, query);
         let normalized_query = normalize_text(query);
-        let mut scores = BTreeMap::<u32, u64>::new();
+        let mut broad_scores = BTreeMap::<u32, u64>::new();
+        let mut matched_terms = BTreeMap::<u32, usize>::new();
         for term in &query_micro.terms {
             if let Some(pages) = self.inverted_terms.get(term) {
                 let inverse_frequency = 10_000_u64 / pages.len() as u64;
                 for page in pages {
-                    *scores.entry(*page).or_default() += inverse_frequency.max(1);
+                    *broad_scores.entry(*page).or_default() += inverse_frequency.max(1);
+                    *matched_terms.entry(*page).or_default() += 1;
                 }
             }
         }
+        let mut exact_number_pages = BTreeSet::new();
         for number in &query_micro.numbers {
             if let Some(pages) = self.inverted_numbers.get(number) {
                 for page in pages {
-                    *scores.entry(*page).or_default() += 20_000;
+                    *broad_scores.entry(*page).or_default() += 20_000;
+                    exact_number_pages.insert(*page);
                 }
             }
         }
+        let mut exact_phrase_pages = BTreeSet::new();
         for page in self.pages.values() {
             if normalize_text(&page.original_text).contains(&normalized_query) {
-                *scores.entry(page.page_number).or_default() += 50_000;
+                *broad_scores.entry(page.page_number).or_default() += 50_000;
+                exact_phrase_pages.insert(page.page_number);
             }
         }
 
         // If deterministic metadata found nothing, fail open to every page.
         // The bounded phase will expose the remainder as deferred evidence.
-        if scores.is_empty() {
-            scores.extend(self.pages.keys().map(|page| (*page, 1)));
+        if broad_scores.is_empty() {
+            broad_scores.extend(self.pages.keys().map(|page| (*page, 1)));
         }
+        let broad_match_pages = broad_scores.len();
+        let max_term_matches = matched_terms.values().copied().max().unwrap_or(0);
+        let focused_pages = broad_scores
+            .keys()
+            .filter(|page| {
+                exact_phrase_pages.contains(page)
+                    || exact_number_pages.contains(page)
+                    || (max_term_matches > 0
+                        && matched_terms.get(page).copied().unwrap_or(0) == max_term_matches)
+            })
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut scores = match scope {
+            RetrievalScope::Focused if !focused_pages.is_empty() => focused_pages
+                .into_iter()
+                .map(|page| (page, broad_scores[&page]))
+                .collect::<BTreeMap<_, _>>(),
+            RetrievalScope::Focused | RetrievalScope::Exhaustive => broad_scores,
+        };
         let seeds = scores.keys().copied().collect::<Vec<_>>();
         let mut distance = seeds
             .iter()
@@ -352,12 +488,15 @@ impl DocumentGraph {
         );
         Ok(RetrievalPhase {
             query: query.to_owned(),
+            scope,
             evidence,
             deferred_candidate_pages: deferred.clone(),
             candidate_pages,
+            broad_match_pages,
             selected_characters,
             complete_for_candidate_set: deferred.is_empty(),
             original_text_authority: true,
+            semantic_exhaustiveness_certified: false,
         })
     }
 
@@ -638,5 +777,114 @@ mod tests {
             )
             .unwrap();
         assert_eq!(phase.evidence[0].page_number, 1);
+    }
+
+    #[test]
+    fn cited_context_preserves_every_selected_original_byte_and_partial_warning() {
+        let graph = sample();
+        let phase = graph
+            .retrieve_phase(
+                "contenido que no existe",
+                RetrievalBudget {
+                    max_pages: 1,
+                    max_characters: 100,
+                    graph_hops: 0,
+                },
+            )
+            .unwrap();
+        let context = phase.assemble_cited_context().unwrap();
+        assert!(!context.complete_for_candidate_set);
+        assert!(context.prompt.contains("páginas candidatas diferidas"));
+        for evidence in &phase.evidence {
+            assert!(context.prompt.contains(&evidence.original_text));
+            assert!(context.prompt.contains(&evidence.sha256));
+        }
+        assert!(context.prompt.ends_with(
+            "AVISO: existen páginas candidatas diferidas. No afirmes cobertura exhaustiva.\n"
+        ));
+    }
+
+    #[test]
+    fn full_evidence_phase_contains_every_page_in_order() {
+        let graph = sample();
+        let phase = graph.full_evidence_phase("resumen global").unwrap();
+        assert_eq!(
+            phase
+                .evidence
+                .iter()
+                .map(|page| page.page_number)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(phase.complete_for_candidate_set);
+        assert!(phase.deferred_candidate_pages.is_empty());
+    }
+
+    #[test]
+    fn focused_scope_requires_the_strongest_joint_term_match() {
+        let graph = DocumentGraph::build(
+            "town",
+            "v1",
+            vec![
+                (
+                    1,
+                    None,
+                    "Puerto Gris era una población de dos mil habitantes.".to_owned(),
+                ),
+                (2, None, "El tren regresó a Puerto Gris.".to_owned()),
+                (3, None, "Otros habitantes cerraron las puertas.".to_owned()),
+            ],
+        )
+        .unwrap();
+        let phase = graph
+            .retrieve_phase(
+                "¿Cuántos habitantes tenía Puerto Gris?",
+                RetrievalBudget {
+                    max_pages: 3,
+                    max_characters: 1_000,
+                    graph_hops: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(phase.scope, RetrievalScope::Focused);
+        assert_eq!(phase.broad_match_pages, 3);
+        assert_eq!(phase.candidate_pages, 1);
+        assert_eq!(phase.evidence[0].page_number, 1);
+        assert!(phase.complete_for_candidate_set);
+        assert!(!phase.semantic_exhaustiveness_certified);
+    }
+
+    #[test]
+    fn exhaustive_scope_retains_every_broad_deterministic_match() {
+        let graph = DocumentGraph::build(
+            "town",
+            "v1",
+            vec![
+                (
+                    1,
+                    None,
+                    "Puerto Gris era una población de dos mil habitantes.".to_owned(),
+                ),
+                (2, None, "El tren regresó a Puerto Gris.".to_owned()),
+                (3, None, "Otros habitantes cerraron las puertas.".to_owned()),
+            ],
+        )
+        .unwrap();
+        let phase = graph
+            .retrieve_phase_with_scope(
+                "¿Cuántos habitantes tenía Puerto Gris?",
+                RetrievalBudget {
+                    max_pages: 3,
+                    max_characters: 1_000,
+                    graph_hops: 0,
+                },
+                RetrievalScope::Exhaustive,
+            )
+            .unwrap();
+        assert_eq!(phase.scope, RetrievalScope::Exhaustive);
+        assert_eq!(phase.broad_match_pages, 3);
+        assert_eq!(phase.candidate_pages, 3);
+        assert!(phase.complete_for_candidate_set);
+        assert!(!phase.semantic_exhaustiveness_certified);
     }
 }

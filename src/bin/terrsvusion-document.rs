@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use terrsvusion::document_graph::{DocumentGraph, RetrievalBudget};
+use terrsvusion::document_graph::{DocumentGraph, RetrievalBudget, RetrievalScope};
 
 #[derive(Debug, Deserialize)]
 struct InputPage {
@@ -25,6 +25,7 @@ fn main() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     match arguments.next().as_deref() {
         Some("build") => build(arguments.collect()),
+        Some("build-text") => build_text(arguments.collect()),
         Some("query") => query(arguments.collect()),
         Some("--help" | "-h") | None => {
             print_help();
@@ -32,6 +33,81 @@ fn main() -> Result<()> {
         }
         Some(command) => bail!("unknown terrsvusion-document command: {command}"),
     }
+}
+
+fn build_text(arguments: Vec<String>) -> Result<()> {
+    let mut document_id = None;
+    let mut version_hash = None;
+    let mut text_path = None;
+    let mut output = None;
+    let mut page_characters = 4_000usize;
+    let mut values = arguments.into_iter();
+    while let Some(argument) = values.next() {
+        match argument.as_str() {
+            "--document-id" => document_id = values.next(),
+            "--version" => version_hash = values.next(),
+            "--text" => text_path = values.next().map(PathBuf::from),
+            "--output" => output = values.next().map(PathBuf::from),
+            "--page-characters" => {
+                page_characters = values
+                    .next()
+                    .context("--page-characters requires a value")?
+                    .parse()?
+            }
+            other => bail!("unknown build-text option: {other}"),
+        }
+    }
+    let document_id = document_id.context("build-text requires --document-id")?;
+    let version_hash = version_hash.context("build-text requires --version")?;
+    let text_path = text_path.context("build-text requires --text")?;
+    let output = output.context("build-text requires --output")?;
+    anyhow::ensure!(page_characters > 0, "page-characters must be positive");
+    let text = std::fs::read_to_string(&text_path)
+        .with_context(|| format!("read UTF-8 document {}", text_path.display()))?;
+    let mut pages = Vec::new();
+    let mut current = String::new();
+    for line in text.split_inclusive('\n') {
+        if !current.is_empty() && current.chars().count() + line.chars().count() > page_characters {
+            pages.push(current);
+            current = String::new();
+        }
+        current.push_str(line);
+    }
+    if !current.is_empty() {
+        pages.push(current);
+    }
+    anyhow::ensure!(!pages.is_empty(), "input text is empty");
+    anyhow::ensure!(
+        pages.concat() == text,
+        "pagination failed to preserve the exact UTF-8 document"
+    );
+    anyhow::ensure!(
+        pages.len() <= u32::MAX as usize,
+        "document has more pages than the u32 page identifier supports"
+    );
+    let numbered_pages = pages
+        .into_iter()
+        .enumerate()
+        .map(|(index, page)| {
+            u32::try_from(index + 1)
+                .map(|number| (number, None, page))
+                .context("page number exceeds u32")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let graph = DocumentGraph::build(document_id.clone(), version_hash.clone(), numbered_pages)?;
+    graph.save_atomic(&output)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&BuildReceipt {
+            operation: "document_graph_build_text",
+            document_id,
+            version_hash,
+            page_count: graph.page_count(),
+            output,
+            original_text_authority_verified: true,
+        })?
+    );
+    Ok(())
 }
 
 fn build(arguments: Vec<String>) -> Result<()> {
@@ -86,6 +162,7 @@ fn query(arguments: Vec<String>) -> Result<()> {
     let mut max_pages = 8usize;
     let mut max_characters = 32_000usize;
     let mut graph_hops = 1usize;
+    let mut scope = RetrievalScope::Focused;
     let mut values = arguments.into_iter();
     while let Some(argument) = values.next() {
         match argument.as_str() {
@@ -109,19 +186,27 @@ fn query(arguments: Vec<String>) -> Result<()> {
                     .context("--graph-hops requires a value")?
                     .parse()?
             }
+            "--scope" => {
+                scope = match values.next().context("--scope requires a value")?.as_str() {
+                    "focused" => RetrievalScope::Focused,
+                    "exhaustive" => RetrievalScope::Exhaustive,
+                    value => bail!("unknown retrieval scope: {value}"),
+                }
+            }
             other => bail!("unknown query option: {other}"),
         }
     }
     let graph_path = graph_path.context("query requires --graph")?;
     let text = text.context("query requires --text")?;
     let graph = DocumentGraph::load_verified(&graph_path)?;
-    let phase = graph.retrieve_phase(
+    let phase = graph.retrieve_phase_with_scope(
         &text,
         RetrievalBudget {
             max_pages,
             max_characters,
             graph_hops,
         },
+        scope,
     )?;
     println!("{}", serde_json::to_string_pretty(&phase)?);
     Ok(())
@@ -133,6 +218,9 @@ fn print_help() {
         "  terrsvusion-document build --document-id ID --version HASH --pages pages.json --output graph.json"
     );
     println!(
-        "  terrsvusion-document query --graph graph.json --text QUESTION [--max-pages 8] [--max-characters 32000] [--graph-hops 1]"
+        "  terrsvusion-document build-text --document-id ID --version HASH --text document.txt --output graph.json [--page-characters 4000]"
+    );
+    println!(
+        "  terrsvusion-document query --graph graph.json --text QUESTION [--scope focused|exhaustive] [--max-pages 8] [--max-characters 32000] [--graph-hops 1]"
     );
 }
