@@ -308,3 +308,23 @@ esto localiza la primera divergencia en el orden/redondeo de proyección,
 no en el nuevo escalado de posiciones. El modo streaming tampoco es más
 rápido que LibTorch en esta geometría mínima. No se autoriza todavía el
 servidor Llama OpenCL ni se extrapola esta prueba a contexto largo.
+
+El comparador acepta ahora `--gpu-prefill-batch N` y registra el número
+físico de lotes. Con la plantilla Llama real para `Hola` (30 IDs), streaming,
+capacidad 64 y lote 64, todo el prompt atravesó las 32 capas en un solo lote:
+
+| Métrica | OpenCL iGPU batched | LibTorch CPU |
+|---|---:|---:|
+| Lotes físicos de prefill | 1 | n/a |
+| Token greedy | 69112 | 69112 |
+| Inferencia reportada | 7,496 s | 0,490 s |
+| L-infinito logits | \- | 0,1953125 frente a OpenCL |
+| Logits bit a bit iguales | 12.463 / 128.256 | \- |
+| Elementos KV BF16 distintos | 1.563.648 | \- |
+| L-infinito KV | 0,140625 | \- |
+
+Esto demuestra que el prefill Llama por lotes es funcional y evita 30
+recorridos streaming de pesos: cada capa se carga una vez para el bloque.
+No demuestra aceleración; el kernel OpenCL BF16 actual es mucho más lento
+que LibTorch CPU para estas matrices y la divergencia numérica crece a lo
+largo de las capas aunque el token greedy de este caso siga coincidiendo.

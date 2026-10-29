@@ -16,6 +16,7 @@ fn main() -> Result<()> {
     let mut max_tokens = 2usize;
     let mut max_context = 128usize;
     let mut mode = WeightMode::Resident;
+    let mut gpu_prefill_batch = None;
     let mut token_ids = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -25,6 +26,9 @@ fn main() -> Result<()> {
             "--max-tokens" => max_tokens = it.next().context("missing --max-tokens")?.parse()?,
             "--max-context" => max_context = it.next().context("missing --max-context")?.parse()?,
             "--stream-weights" => mode = WeightMode::Stream,
+            "--gpu-prefill-batch" => {
+                gpu_prefill_batch = Some(it.next().context("missing --gpu-prefill-batch")?.parse()?)
+            }
             "--ids" => {
                 token_ids = Some(
                     it.next()
@@ -36,7 +40,7 @@ fn main() -> Result<()> {
             }
             "--help" | "-h" => {
                 println!(
-                    "terrsvusion-compare-opencl [--model path] [--prompt Hola] [--ids 1,2,3] [--max-tokens 2] [--max-context 128] [--stream-weights]"
+                    "terrsvusion-compare-opencl [--model path] [--prompt Hola] [--ids 1,2,3] [--max-tokens 2] [--max-context 128] [--stream-weights] [--gpu-prefill-batch N]"
                 );
                 return Ok(());
             }
@@ -71,6 +75,7 @@ fn main() -> Result<()> {
 
     eprintln!("GPU model and BF16 KV reference comparison: {:?}", ids);
     let mut gpu = OpenClLlm::load(&model, max_context, mode)?;
+    gpu.set_batch_prefill_tokens(gpu_prefill_batch)?;
     eprintln!(
         "GPU={} weights_loaded={}",
         gpu.device_name(),
@@ -208,6 +213,8 @@ fn main() -> Result<()> {
             "kv_layer_differences":kv_mismatch_layers,
             "gpu_total_seconds":gpu_generation.total_seconds,
             "gpu_load_seconds":gpu_generation.model_load_seconds,
+            "gpu_prefill_batch_tokens":gpu_generation.gpu_prefill_batch_tokens,
+            "gpu_prefill_batches":gpu_generation.gpu_prefill_batches,
             "dense_cpu_seconds":cpu_generation.latency_seconds,
             "gpu_historical_terravision_lod_active":false,
         }))?
