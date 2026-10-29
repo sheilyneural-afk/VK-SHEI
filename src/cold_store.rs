@@ -90,6 +90,7 @@ pub struct ColdStoreStats {
 pub struct ColdStore {
     path: PathBuf,
     file: File,
+    read_only: bool,
     pages: Vec<PageMeta>,
     hot_capacity: usize,
     hot: HashMap<u64, Arc<ColdPagePayload>>,
@@ -117,21 +118,36 @@ impl ColdStore {
             .read(true)
             .append(true)
             .open(&path)?;
-        Ok(Self::empty(path, file, hot_capacity))
+        Ok(Self::empty(path, file, false, hot_capacity))
     }
 
     pub fn open(path: impl AsRef<Path>, hot_capacity: usize) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new().read(true).append(true).open(&path)?;
-        let mut store = Self::empty(path, file, hot_capacity);
+        let mut store = Self::empty(path, file, false, hot_capacity);
         store.rebuild_catalogue()?;
         Ok(store)
     }
 
-    fn empty(path: PathBuf, file: File, hot_capacity: usize) -> Self {
+    /// Open an immutable committed store. Appends are rejected so a prefix hit
+    /// can reuse the published file without copying it into a working replica.
+    pub fn open_read_only(path: impl AsRef<Path>, hot_capacity: usize) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let file = OpenOptions::new().read(true).open(&path)?;
+        let mut store = Self::empty(path, file, true, hot_capacity);
+        store.rebuild_catalogue()?;
+        Ok(store)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn empty(path: PathBuf, file: File, read_only: bool, hot_capacity: usize) -> Self {
         Self {
             path,
             file,
+            read_only,
             pages: Vec::new(),
             hot_capacity,
             hot: HashMap::new(),
@@ -191,7 +207,9 @@ impl ColdStore {
     /// the explicitly selected BF16 ranges through the canonical partial-I/O
     /// path.
     pub fn audit_mapped(&mut self) -> io::Result<()> {
-        self.file.sync_data()?;
+        if !self.read_only {
+            self.file.sync_data()?;
+        }
         if self.file.metadata()?.len() == 0 {
             return Err(invalid("almacén KV vacío no se puede mapear"));
         }
@@ -307,6 +325,9 @@ impl ColdStore {
         mut prepared: PreparedPage,
         durable: bool,
     ) -> io::Result<PageMeta> {
+        if self.read_only {
+            return Err(invalid("almacén KV inmutable no admite append"));
+        }
         if prepared.meta.page_id != self.pages.len() as u64 {
             return Err(invalid("secuencia preparada KV no monótona"));
         }
@@ -876,6 +897,24 @@ mod tests {
             head_dim: 4,
             tile: 4,
         }
+    }
+
+    #[test]
+    fn read_only_reopen_rejects_append_and_preserves_bytes() {
+        let path = temp_path("readonly");
+        let mut store = ColdStore::create(&path, 0).unwrap();
+        store
+            .append_page(geometry(0), &[7_u8; 64], &[11_u8; 64], false)
+            .unwrap();
+        drop(store);
+        let mut frozen = ColdStore::open_read_only(&path, 0).unwrap();
+        assert!(frozen.is_read_only());
+        frozen.audit_mapped().unwrap();
+        assert_eq!(frozen.read_key(0).unwrap(), vec![7_u8; 64]);
+        let prepared = ColdStore::prepare_page(1, geometry(1), &[1_u8; 64], &[2_u8; 64]).unwrap();
+        assert!(frozen.append_prepared(prepared, false).is_err());
+        drop(frozen);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -10,15 +10,65 @@ crate-type = ["rlib"]
 
 [[bin]]
 name = "terrsvusion-server"
+required-features = ["torch-backend"]
 path = "src/bin/terrsvusion-server.rs"
 
 [[bin]]
 name = "terrsvusion-long-context"
+required-features = ["torch-backend"]
 path = "src/bin/terrsvusion-long-context.rs"
 
 [[bin]]
 name = "terrsvusion-torch-chat"
+required-features = ["torch-backend"]
 path = "src/bin/terrsvusion-torch-chat.rs"
+
+[[bin]]
+name = "terrsvusion-native-parity"
+required-features = ["torch-backend"]
+path = "src/bin/terrsvusion-native-parity.rs"
+
+[features]
+# Native Rust functionality builds without PyTorch, LibTorch or a GPU.
+default = []
+# Opt-in legacy inference server: preserves the audited MiniCPM5 BF16 path.
+torch-backend = ["dep:tch"]
+# Real native Rust/OpenCL GPU attention reference (QK/softmax/PV).
+# Requires an OpenCL GPU; does NOT offload the full LLM model.
+opencl-backend = ["dep:opencl3"]
+# HTTP-only Rust multiplexer; optional and does not load model weights.
+unified-router = ["dep:reqwest"]
+# Native gfx1103 hipBLASLt BF16 matrix backend; only enabled explicitly.
+hip-backend = ["opencl-backend", "dep:libloading"]
+
+[[bin]]
+name = "terrsvusion-inspect"
+path = "src/bin/terrsvusion-inspect.rs"
+
+[[bin]]
+name = "terrsvusion-igpu-bench"
+path = "src/bin/terrsvusion-igpu-bench.rs"
+required-features = ["opencl-backend"]
+
+[[bin]]
+name = "terrsvusion-opencl-llm"
+path = "src/bin/terrsvusion-opencl-llm.rs"
+required-features = ["opencl-backend"]
+
+[[bin]]
+name = "terrsvusion-compare-opencl"
+path = "src/bin/terrsvusion-compare-opencl.rs"
+required-features = ["opencl-backend", "torch-backend"]
+
+[[bin]]
+name = "terrsvusion-opencl-server"
+path = "src/bin/terrsvusion-opencl-server.rs"
+required-features = ["opencl-backend"]
+
+[[bin]]
+name = "terrsvusion-unified-server"
+path = "src/bin/terrsvusion-unified-server.rs"
+required-features = ["unified-router"]
 
 [dependencies]
 anyhow = "1"
@@ -33,9 +83,12 @@ safetensors = "0.3.3"
 tempfile = "3"
 tokenizers = "0.22"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
-tch = "0.18"
+tch = { version = "0.18", optional = true }
+opencl3 = { version = "0.12.4", optional = true }
+libloading = {version = "0.8.9", optional = true}
+reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["json"] }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"

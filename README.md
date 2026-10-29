@@ -1,6 +1,189 @@
 # Terrsvusion v3
 
-Estado verificado del código a 28 de octubre de 2026.
+## Corrección de evidencia Llama 8B: KV residente, V certificada y Faro
+
+El aproximadamente 99,4 % de ahorro de KV residente (~5,2–5,4 MiB frente
+a ~894–902 MiB en Llama 8B) procede de la arquitectura ColdStore:
+NO significa omisión certificada de V. El antiguo Llama 32Q/8KV ni
+siquiera ejecutaba el certificado exact_mass, exclusivo de MiniCPM
+16Q/2KV. La ruta 32Q/8KV nueva es experimental, desactivada por defecto
+y requiere applied_mass_tolerance positivo; falla a atención BF16
+completa cuando no hay prueba. La prueba física de datos controlados
+evitó 15 V de 17 (30.720 bytes de V fría) sin error observado,
+pero NO prueba omisiones reales del checkpoint Llama 8B.
+
+El servidor Llama anuncia llama-dense-bf16; la petición
+minicpm-dense-bf16 devuelve HTTP 404. document= con nativo virgen
+devuelve 422 y NO constituye la misma plantilla de chat.
+
+Faro corto /tmp/faro-full.txt: 27.168 bytes y 7.065 tokens raw
+Llama. Volumen completo assets/el-faro-volumen-completo.txt:
+368.968 bytes y 111.632 tokens raw Llama (112.104 con MiniCPM).
+El volumen completo NO se ha inferido ni validado de extremo a extremo.
+La entrada previa de 7.143 tokens es un prompt diferente.
+
+Evidencia y comandos: docs/CORRECCION_LLAMA_V_CERTIFICADA_IDENTIFICADORES_FARO_20261029.md
+y scripts/audit_llama_faro_inputs.py.
+
+---
+
+
+## Primer prefill exacto: GPU batch384 verificado (29/10/2026)
+
+Se ha comprobado físicamente prefill causal BF16 de hasta 512 tokens por lote, sujeto a un límite de 64 MiB de scratch QK. Un prompt de 375 tokens usa UNA pasada con --gpu-prefill-batch 384, frente a TRES con batch128. Todos los logits del modelo y SHA lógico del KV/ColdStore originales coinciden en los tamaños 64, 96, 128, 192, 256, 375 y 512. La mejora observada de prefill fue 1,55× en una prueba con CPU fuertemente contendido; no se presenta como rendimiento universal. En HTTP real, primera petición 375+16: 3.854 s total, 2.313 s prefill; replay idéntico, SHA256 validado, 1.698 s total. Las fusiones opcionales QKV y SwiGLU para prefill fueron probadas y descartadas como configuración predeterminada por ausencia de mejora global. CPU, original BF16 y la caché fría están preservados.
+
+Informe: docs/GPU_PREFILL_UNICO_LOTE_BF16_20261029.md
+
+---
+
+## GPU BF16: atención exacta fusionada (29/10/2026)
+
+La iGPU Radeon puede calcular QK BF16, softmax FP32 y PV BF16
+en una única operación OpenCL sin omitir ninguna K/V. El núcleo
+fue validado bitwise para contextos 1–2048 y dentro del MiniCPM5-1B
+completo con el mismo SHA de KV/ColdStore. En 375+16 tokens,
+el decode bajó de ~2,13 a ~1,74 s y la inferencia total de
+~4,70 a ~4,43 s bajo carga del sistema actual. Se conserva
+la caché fría BF16 y el índice 4-bit original. Disponible con
+--gpu-exact-fused-attention; rollback --gpu-exact-original-attention.
+El servidor GPU 8188 lo utiliza, CPU y router intactos.
+
+Informe: docs/GPU_ATENCION_FUSIONADA_EXACTA_20261029.md
+
+---
+
+## V BF16 e índices GPU calientes con micrometadatos (29/10/2026)
+
+GPU original: BF16 exacta + índice/ColdStore canónicos de CPU. La nueva ruta opcional epsilon>0 mantiene una copia V BF16 y la selección certificada residente en GPU, con fallback exacto. En atención física 32 tokens: 0,340 a 0,151 ms (2,25×); frente a micro frío 0,850 a 0,151 ms (5,6×). En MiniCPM5 375+16, epsilon=0,001: 5,07 a 3,87 s, cero lecturas V frías durante decode. El certificado no pudo omitir K en ese contexto real; el modo epsilon=0 permanece por defecto.
+
+Informe: docs/GPU_MICROMETADATOS_V_HOT_OPTIMIZADOS_20261029.md
+
+---
+
+## Micrometadatos de regiones y certificados GPU (29/10/2026)
+
+Los **micrometadatos canónicos** DimensionalMicroMetadata ya no son un
+sello 4-bit y un grafo adyacente genérico: cada extensión lleva coherencia,
+calidad de enlace medida y predecesor temporal separado de los vecinos
+semánticos. El índice 4-bit/LSH va por cabeza KV. En GPU las cotas usan
+teselas de 8 tokens y el mínimo entre caja AABB y esfera alrededor de la
+media BF16. Una omisión nunca depende solo de una firma de cuatro bits.
+
+En una prueba física separable de 32 posiciones, la Radeon calculó
+32 Q·K menos y recuperó 16 V en vez de 32, con error de salida
+dentro de epsilon 0,001. En MiniCPM5-1B con 375 tokens el límite
+no pudo omitir ninguna región K, incluso ajustando la sensibilidad
+del eje a 26–28 regiones; **no se ha demostrado mejor velocidad
+en esa prueba real de modelo**. El modo exacto (epsilon=0) no
+utiliza el índice auxiliar ni descarta valores.
+
+La configuración CPU y el ejecutor original están intactos.
+Las modificaciones son propias del backend GPU y el ajuste de
+sensibilidad solo se aplica si el usuario solicita explícitamente
+--lod-epsilon positivo.
+
+**Informe y pruebas:**
+[Micrometadatos regionales GPU](docs/MICROMETADATOS_REGIONALES_GPU_20261029.md).
+
+---
+
+## Actualización: aprovechamiento GPU y ColdStore sin bloqueos (29/10/2026)
+
+El AMD Phoenix está calculando BF16 real, pero todavía está por debajo
+de la CPU densa: comparación HTTP actual 375+16, mediana GPU OpenCL
+3,15 s frente a CPU BF16 densa 1,46 s. El nuevo sello ColdStore
+diferido evita 48 lecturas bloqueantes de K/V por token de decode
+y conserva la misma estructura original de hashes, BF16 y 4-bit.
+Los kernels QKV/SwiGLU fusionados mantienen los logits exactos
+de la GPU anterior. Ambas opciones son específicas de GPU;
+los archivos CPU no han cambiado. hipBLASLt gfx1103 está
+investigado como alternativa de alto rendimiento, pero la
+integración HIP/OpenCL tuvo fallos intermitentes y NO está
+habilitada en el chat.
+
+Detalles, telemetría de actividad y siguiente arquitectura:
+docs/AUDITORIA_APROVECHAMIENTO_IGPU_20261029.md
+
+---
+
+## Prefill GPU paralelo y ColdStore agrupado (29/10/2026)
+
+Se ha incorporado un **prefill causal por lotes OpenCL** a la ruta AMD
+iGPU, sin cambiar el ejecutor ni los ajustes de CPU. La GPU realiza
+embedding, BF16 GEMV, RMSNorm, RoPE y atención causal por lotes de hasta
+256 tokens. El servidor GPU usa inicialmente lotes de 128 tokens; la
+ruta previa token a token continúa disponible como fallback.
+
+La ruta GPU LOD, que utiliza el MISMO índice de 4 bits/LSH,
+ColdStore BF16 y certificado de masa que CPU, **elimina lecturas
+frías repetidas DURANTE el prefill**: V exacta permanece temporalmente
+en GPU, se sella en páginas ColdStore de hasta 64 tokens al acabar
+y entonces se libera la caché V transitoria.
+
+**375 tokens de entrada / 16 de salida en Radeon Phoenix:**
+prefill iGPU LOD de 51,16 s a **7,18 s (7,13×)**;
+inferencia total de 54,08 a **9,68 s (5,58×)**.
+Las rutas GPU densas también mejoraron: prefill 30,83 a 7,42 s.
+
+**Paridad:** los mismos IDs y logits BF16 de la ruta GPU anterior.
+Se ha probado un prompt de 375 tokens en tres lotes y se comprobó
+la igualdad completa de logits y SHA lógico KV contra GPU densa.
+CPU LibTorch todavía difiere numéricamente de GPU, aunque puede
+generar los mismos tokens.
+
+Detalles, límites y comandos: [Prefill GPU optimizado](docs/PREFILL_GPU_OPTIMIZADO_20261029.md).
+El motor CPU original está intacto en el puerto 8099; selector
+CPU/iGPU/Auto en 8288; GPU nueva en 8188.
+
+---
+
+## Estado actualizado: LOD original de CPU reutilizado en iGPU (29/10/2026)
+
+**El proyecto ya tiene un único chat con selector CPU / iGPU / Auto**:
+
+- En el navegador del propio PC: http://127.0.0.1:8288/
+- Motor CPU original: http://127.0.0.1:8099/ (BF16, LOD completo,
+  índice 4-bit, LSH, ColdStore, branch-and-bound y prefijos persistentes).
+- Motor iGPU AMD: http://127.0.0.1:8188/ (Rust/OpenCL BF16 con
+  los MISMOS módulos originales de CPU para índice de cuatro bits,
+  LSH, ColdStore BF16 y certificado terminal select_by_exact_mass).
+
+**Precisión:** GPU LOD con epsilon=0 y GPU densa produjeron los mismos
+tokens y logits BF16 bit a bit en la prueba real de 16 pasos con «Hola».
+Esto NO significa paridad bit a bit frente a LibTorch BF16 CPU: ambas
+rutas GPU aún discrepan numéricamente de esa referencia.
+
+**Limitación concreta:** la CPU conserva además el branch-and-bound
+jerárquico de cotas por regiones y prefijos cacheables entre peticiones.
+Esas fases todavía no están portadas a GPU: el motor GPU utiliza el
+mismo filtro de masa exacta y conserva K BF16 para scoring GPU y V
+BF16 verificadas en el ColdStore original. No hay cuantización
+destructiva de pesos ni de KV.
+
+**Memoria KV:** prueba a 128 tokens con staging GPU de 8 tokens:
+3.145.728 bytes de capacidad KV densa frente a 1.585.248 bytes
+de K más staging/auxiliares en GPU (49,6 % menos en KV contabilizado);
+no implica 49,6 % menos de VRAM total y puede ser más lento por IO.
+
+Informe actual con comandos, certificación, memoria y límites:
+[CPU LOD compartido con GPU y selector](docs/LOD_CPU_COMPARTIDO_GPU_20261029.md).
+
+La copia de seguridad anterior a esta intervención sigue intacta:
+ /home/yo/Escritorio/terrsvusion-v3-rust-BACKUP-pre-unified-20261029/
+
+---
+
+Estado verificado del motor MiniCPM5-1B a 28 de octubre de 2026;
+los resultados históricos de esa fecha se conservan.
+
+**Extensión de 29 de octubre de 2026:** núcleo Rust sin LibTorch,
+almacenamiento KV exacto BF16/FP16/FP32 en RAM y SSD, inspector de modelos
+Hugging Face, API OpenAI-compatible con lista de modelos y capacidades,
+y preservación del backend MiniCPM5 BF16 detrás de la feature torch-backend.
+Consulte [arquitectura portátil](docs/ARQUITECTURA_PORTABLE_RUST.md)
+y [validación](docs/VERIFICACION_20261029.md). Guardar bytes FP16/FP32
+e inspeccionar modelos NO significa poder ejecutar cualquier LLM ni GPU.
+
 
 Terrsvusion es un runtime experimental escrito en Rust para ejecutar
 MiniCPM5-1B con pesos y cálculo BF16, un catálogo dimensional compacto de
@@ -13,30 +196,92 @@ del KV contabilizado y recuperación exacta desde backing frío. Todavía no
 demuestra aceleración general: con la tolerancia local vigente, el selector
 termina recuperando todos los estados en las pruebas realizadas.
 
+### Inferencia LLM completa en AMD iGPU — Rust/OpenCL (29/10/2026)
+
+Además de las pruebas anteriores de atención GPU aislada, se ha implementado
+un nuevo ejecutor experimental que ejecuta las 24 capas completas de
+MiniCPM5-1B BF16 en la iGPU AMD Phoenix mediante Rust y OpenCL.
+Embedding, proyecciones Q/K/V/O, RMSNorm, RoPE, atención causal,
+SwiGLU/MLP, LM-head y argmax se calculan en GPU; la CPU solo gestiona
+tokenización y lanzamiento de operaciones. Esta ruta NO usa PyTorch ni
+LibTorch y no modifica los pesos BF16 originales.
+
+**Se han recuperado de la GPU y comparado byte a byte los 219 tensores
+BF16 completos: 2.161.265.664 bytes, cero diferencias y SHA-256 idéntico.**
+
+En «Hola», la GPU y el control BF16 CPU generaron ambos los dos IDs
+[61973, 61] con el mismo prompt y pesos, pero los logits y el KV
+NO son idénticos bit a bit: diferencia máxima observada de logits 0,5
+y KV lógico distinto. Más tarde se integraron en GPU los mismos
+módulos de índice 4-bit/LSH, ColdStore BF16 y el certificado final
+que usa CPU; la selección regional branch-and-bound de CPU permanece
+pendiente en GPU. No se ha demostrado aceleración end-to-end frente a
+CPU: en una prueba de 48 tokens la CPU densa fue más rápida.
+
+Chat unificado CPU/iGPU/Auto: http://127.0.0.1:8288/
+Servidor GPU independiente, solo local: http://127.0.0.1:8188/
+Servidor CPU BF16 histórico: http://127.0.0.1:8099/
+
+Guía de implementación, prueba de pesos, precisión y límites:
+[Informe de LLM GPU](docs/IGPU_FULL_LLM_RUST_OPENCL_20261029.md).
+
+Iniciar el chat GPU sin PyTorch:
+
+~~~bash
+TERRSVUSION_OPENCL_DEVICE=AMD cargo run --release --locked \
+  --features opencl-backend --bin terrsvusion-opencl-server -- \
+  --model /home/yo/models/MiniCPM5-1B --host 127.0.0.1 --port 8188 \
+  --max-context-tokens 2048 --resident --gpu-lod --lod-epsilon 0 --lod-stage 64
+~~~
+
+Iniciar el selector Rust CPU/iGPU/Auto sin PyTorch:
+
+~~~bash
+cargo run --release --locked --features unified-router \
+  --bin terrsvusion-unified-server -- \
+  --host 127.0.0.1 --port 8288 \
+  --cpu-url http://127.0.0.1:8099 \
+  --gpu-url http://127.0.0.1:8188 --auto-prefer cpu
+~~~
+
+Auditoría previa de atención GPU en diferentes formatos:
+[Pruebas OpenCL](docs/IGPU_AMD_PHOENIX_20261029.md).
+La compatibilidad FP16/FP32 se ha comprobado en almacenamiento y
+atención de referencia; el ejecutor completo GPU sigue siendo BF16
+hasta incorporar y validar nuevos kernels.
+
 ## Estado ejecutivo
 
 | Propiedad | Estado actual |
 | --- | --- |
-| Runtime | Rust 2024 + `tch`/LibTorch CPU |
+| Runtime | Rust 2024; CPU BF16 LibTorch opcional y GPU OpenCL experimental sin LibTorch |
 | Modelo probado | MiniCPM5-1B local |
 | Pesos | Originales; no se genera un modelo Q4 |
-| Cálculo del modelo | BF16 |
+| Cálculo del modelo | CPU BF16 histórico; GPU BF16 intermedios con acumulación FP32 (experimental) |
 | Autoridad K/V recuperada | BF16 exacta |
 | Índice auxiliar | Fingerprints firmados de cuatro bits + SimHash LSH |
 | Almacenamiento | Archivo append-only por petición + prefijos persistentes verificados |
 | Integridad | Checksums rápidos, hashes por token y SHA-256 por registro |
 | Prefill | Atención causal BF16 completa |
 | Decode | Routing dimensional + branch-and-bound + certificado de masa |
-| Omisión certificada observada | 0 tokens en la prueba real descrita abajo |
+| Omisión certificada observada | 0 V a `1e-6`; 8 V a `1e-3` (256/128/2, ids iguales) |
 | Reutilización entre peticiones | Prefijo estable de mensajes anteriores; comprobada tras reinicio |
 | Servidor | Axum/Tokio; una autoridad de inferencia y cola acotada |
-| Tests actuales | 41 correctos |
+| Tests históricos del 28/10 | 52 correctos (véase nueva verificación) |
 
 ## Arquitectura canónica
 
-El crate contiene una biblioteca y tres ejecutables:
+El crate contiene una biblioteca y varios ejecutables para CPU y GPU:
 
-- `terrsvusion-server`: servidor HTTP Axum.
+- `terrsvusion-server`: servidor HTTP Axum (torch-backend).
+- `terrsvusion-inspect`: inspector y referencia CPU Rust, sin Torch.
+- `terrsvusion-native-parity`: comparación de tokens/logits/KV con BF16 denso (torch-backend).
+- terrsvusion-opencl-llm: inferencia completa MiniCPM5 BF16 en GPU mediante Rust/OpenCL.
+- terrsvusion-opencl-server: chat web GPU independiente y API local.
+- terrsvusion-compare-opencl: auditoría de GPU frente al control BF16 CPU
+  (compila las dos features solo para comparar).
+- terrsvusion-unified-server: selector CPU/iGPU/Auto mediante proxy local Rust;
+  no toca pesos ni configuraciones. Feature unified-router.
 - `terrsvusion-torch-chat`: inferencia local desde línea de comandos.
 - `terrsvusion-long-context`: benchmark, documentos largos, estrés y control
   BF16 denso opcional.
@@ -58,9 +303,10 @@ Módulos de la biblioteca:
 - `prefill_tch.rs`: proyección protegida de cada cabeza Q hacia su cabeza KV
   servidora para el routing. No implementa por sí solo la atención de prefill.
 
-No hay runtime Python, Candle, servidor alternativo ni selector heredado en el
-árbol actual. LibTorch procede de la instalación local de PyTorch, pero el
-proceso de Terrsvusion no ejecuta un intérprete Python.
+El backend CPU BF16 anterior sigue disponible y mantiene su caché LOD.
+El backend GPU experimental es un ejecutor alternativo independiente en Rust,
+sin LibTorch. La ruta CPU recurre a LibTorch del entorno local, pero el motor
+GPU nuevo no lo enlaza. Ninguno requiere un intérprete Python en ejecución.
 
 ### Flujo de servicio
 
@@ -98,13 +344,17 @@ runtime acepta potencias de dos entre 16 y 512; el valor normal es 512.
 
 ## Catálogo de cuatro bits y LSH
 
-Cada token obtiene un fingerprint compacto con dígitos firmados `[-7, 7]`, dos
-coordenadas por byte y una escala local. Este catálogo es metadata de búsqueda;
-los K/V recuperados continúan siendo BF16.
+Cada token obtiene un fingerprint compacto **por cabeza KV**, con dígitos
+firmados `[-7, 7]`, dos coordenadas por byte y una escala local por cabeza.
+No se mezclan cabezas ni se colapsa el K completo a 16 medias: cada cabeza
+mantiene hasta 32 coordenadas. Este catálogo es metadata de búsqueda; los
+K/V recuperados continúan siendo BF16.
 
-El índice LSH usa cuatro tablas, proyecciones deterministas y firmas compuestas
-por 16 bits direccionales más bandas de magnitud y dispersión. Una consulta
-prueba vecindad Hamming 2 y después 4, y exige votos de al menos dos tablas.
+El índice LSH es independiente por cabeza y usa cuatro tablas con 16 bits
+**solo direccionales**. Las bandas de magnitud ya no se XOR-ean en la clave
+del cubo, porque Q y K no comparten escala y eso convertía el índice en
+ruido. Una consulta prueba vecindad Hamming 2 y después 4, ignora cabezas
+sin energía (como las Q protegidas) y exige votos de al menos dos tablas.
 
 LSH no es una autoridad de recall. Si no devuelve candidatos se incrementa
 `parallel_lsh_misses` y se entregan cero semillas. El branch-and-bound canónico
@@ -114,14 +364,11 @@ existe un fallback que cargue el catálogo completo.
 Los fingerprints por token, las firmas por extensión y el grafo de
 micrometadatos son señales auxiliares que se solapan parcialmente. Su contrato
 actual es único: priorizan candidatos, pero no autorizan por sí mismos una
-carga u omisión. En particular, las dimensiones comunicantes ya no se añaden
-todas al conjunto inicial; solo desempatan el orden de ampliación. La versión
-anterior podía convertir relaciones densas en una carga inicial completa.
-
-La prueba actual mostró 109 misses en 112 consultas. Separar el índice por
-cabeza KV y revisar la asimetría de escala Q/K siguen pendientes; reducir esos
-misses puede mejorar el orden de exploración, pero no autoriza omisiones por sí
-solo.
+carga u omisión. El grafo comunicante solo admite vecinos con similitud
+coseno ≥ 0,80 y coherencia de extensión suficiente; un vecino temporal
+ortogonal no se registra como semántica. `link_quality` y `coherence` miden
+esa calidad. Las dimensiones comunicantes no se añaden todas al conjunto
+inicial; solo desempatan el orden de ampliación.
 
 ## Certificado de atención
 
@@ -266,7 +513,7 @@ El informe contiene:
 Ejecución:
 
 ```bash
-cargo run --release --bin terrsvusion-long-context -- \
+cargo run --release --features torch-backend --bin terrsvusion-long-context -- \
   --model /home/yo/models/MiniCPM5-1B \
   --book-tokens 512 \
   --chunk-size 128 \
@@ -518,7 +765,7 @@ workspace interno de SDPA/LibTorch.
 ## Servidor y concurrencia
 
 ```bash
-cargo run --release --bin terrsvusion-server -- \
+cargo run --release --features torch-backend --bin terrsvusion-server -- \
   --model /home/yo/models/MiniCPM5-1B \
   --prefix-cache-dir /ruta/estable/terrsvusion-prefix-cache \
   --host 127.0.0.1 \
@@ -527,8 +774,11 @@ cargo run --release --bin terrsvusion-server -- \
 
 Endpoints:
 
+- `GET /` chat web para probar el motor
 - `GET /health`
-- `POST /v1/chat/completions`
+- `GET /ready`
+- `GET /v1/models` y `GET /v1/capabilities`
+- `POST /v1/chat/completions` (greedy, sin SSE ni tools)
 
 ```bash
 curl -sS http://127.0.0.1:8088/v1/chat/completions \
@@ -536,20 +786,21 @@ curl -sS http://127.0.0.1:8088/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Hola"}],"max_tokens":32}'
 ```
 
-El servidor usa un hilo propietario de inferencia y `sync_channel` con ocho
-slots de espera. La saturación se devuelve como HTTP 429; un worker detenido se
-devuelve como 503. Las inferencias no se ejecutan en paralelo sobre una misma
-autoridad del modelo.
+El servidor usa un pool de hilos propietarios (`--workers`, 1–8). Cada worker
+carga su propia autoridad BF16; no se comparte un módulo LibTorch entre
+peticiones. La cola de cada worker tiene ocho slots. La saturación se devuelve
+como HTTP 429; un pool detenido se devuelve como 503. Dos peticiones pueden
+ejecutarse a la vez si hay al menos dos workers.
 
 Límites operativos actuales:
 
-- sin timeout HTTP por petición;
-- sin cancelación cooperativa si el cliente desconecta;
+- timeout HTTP por petición: `--request-timeout-secs` (300 s por defecto; 504);
+- cancelación cooperativa al abandonar la espera (timeout o drop del future);
 - sin deadline separado para prefill/decode;
-- sin endpoint `/ready` distinto de `/health`;
-- sin supervisor que reconstruya el modelo tras terminar el hilo;
-- `[profile.release] panic = "abort"`: en release, un pánico aborta el proceso y
-  no puede ser recuperado por `catch_unwind`.
+- `GET /ready` distinto de `GET /health`;
+- sin supervisor de proceso externo;
+- `[profile.release] panic = "unwind"`: un pánico del encoder se reporta y el
+  worker sigue sirviendo.
 
 ## Construcción y validación
 
@@ -558,14 +809,14 @@ export LIBTORCH_USE_PYTORCH=1
 export LD_LIBRARY_PATH=/home/yo/.local/lib/python3.12/site-packages/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
 cargo fmt --all -- --check
-cargo test --all-targets
+cargo test --features torch-backend --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
-cargo build --release --all-targets
+cargo build --release --all-features --all-targets
 ```
 
 Estado actual verificado:
 
-- 48 tests correctos;
+- 52 tests correctos;
 - 0 fallos;
 - Clippy limpio con advertencias tratadas como error;
 - biblioteca y tres ejecutables compilados en release.
@@ -597,8 +848,9 @@ Regresiones cubiertas explícitamente:
 - cada máscara Hamming de radio hasta 4 se visita una sola vez sin construir
   el antiguo vector temporal de 12.951 máscaras por tabla;
 - en builds con unwind, un panic del encoder produce un resultado de error
-  ordenado y el worker procesa el trabajo siguiente; el perfil release conserva
-  `panic = "abort"` y no promete recuperación dentro del proceso;
+  ordenado y el worker procesa el trabajo siguiente; el perfil release usa
+  `panic = "unwind"` para que esa recuperación exista también en binarios
+  optimizados;
 - el prefijo persistente reconstruye 24 capas, verifica el backing, conserva el
   eje dimensional y rehidrata K/V BF16 exacto;
 - los identificadores de región duplicados fallan cerrados antes de construir
@@ -615,7 +867,7 @@ omisión.
 Benchmark con control y oráculo:
 
 ```bash
-cargo run --release --bin terrsvusion-long-context -- \
+cargo run --release --features torch-backend --bin terrsvusion-long-context -- \
   --model /home/yo/models/MiniCPM5-1B \
   --book-tokens 1024 \
   --chunk-size 256 \
@@ -628,6 +880,59 @@ cargo run --release --bin terrsvusion-long-context -- \
 `--book-tokens` limita los tokens de libro incluidos; el prompt y la pregunta
 se añaden aparte. `--adversarial-retrieval` y `--stress-seed` generan entradas
 sintéticas distintas y son mutuamente excluyentes.
+
+## Evidencia real del 28 de octubre de 2026 (esta sesión)
+
+Corridas MiniCPM5-1B BF16 locales, no una distribución estadística.
+
+### Omisión certificada aplicada hasta logits
+
+```bash
+cargo run --release --features torch-backend --bin terrsvusion-long-context -- \
+  --model /home/yo/models/MiniCPM5-1B \
+  --book-tokens 256 --chunk-size 128 --storage-frame-tokens 128 \
+  --generate-tokens 2 --apply-omission-tolerance 1e-3
+```
+
+| Métrica | Resultado |
+| --- | ---: |
+| Tokens omitidos de V con certificado local `1e-3` | 8 de 6.168 puntuados |
+| `hierarchy_k_tokens_avoided` | 0 |
+| Paridad de ids vs ruta canónica `1e-6` | `true` (`[359, 23373]`) |
+| Pasos de logits comparados | 2 |
+| L∞ de logits (canónica vs aplicada) | `0,171875` |
+| SHA-256 KV | distinto (esperado: V parcial) |
+
+La cota local `1e-3` sí omitió V y conservó los ids en esta geometría. No es
+error 0 en logits: `0,171875` es real. El servidor sigue usando `1e-6` y no
+activa esta rama. A `1e-6` la ruta canónica de la misma corrida materializó
+los 6.168 V.
+
+### Hits de prefijo sin copiar el backing
+
+```bash
+cargo run --release --features torch-backend --bin terrsvusion-long-context -- \
+  --model /home/yo/models/MiniCPM5-1B \
+  --generate-tokens 2 --prefix-reuse-demo
+```
+
+| Evento | Hit | Tokens | Copiados | Inmutable | Prefill |
+| --- | --- | ---: | ---: | --- | ---: |
+| Primera pregunta | false | 888 | 0 | false | 1,551 s |
+| Segunda pregunta | true | 888 | 0 | true | 0,121 s |
+
+El hit abrió el archivo publicado en solo lectura. No hubo `fs::copy`. El
+prefill del sufijo ensambló el histórico por capa y no retuvo las 24 capas
+de prefijo en `prefill_hot`. Speedup de prefill ≈ `12,86x`. No elimina el
+coste cuadrático del primer prefill.
+
+### Producción y paralelismo
+
+- 52 tests, incluido un pool de dos ejecutores que atiende dos jobs a la vez.
+- Release con `panic = "unwind"`: el test de pánico recupera y sirve el job
+  siguiente.
+- Drop de la respuesta cancela un job aún en cola.
+- Servidor: `--workers`, `--request-timeout-secs`, `GET /ready`.
 
 ## Garantías demostradas
 
@@ -646,18 +951,17 @@ sintéticas distintas y son mutuamente excluyentes.
 ## No demostrado todavía
 
 - `hierarchy_k_tokens_avoided > 0` en una inferencia real del modelo.
-- Menor latencia general que BF16 denso.
-- Reducción del coste cuadrático del prefill.
-- Paridad universal, conservación semántica universal o garantía end-to-end de
-  logits.
-- Seguridad de tolerancias superiores a `1e-6`.
-- Error real y paridad de una rama shadow con omisiones aplicadas.
-- Eliminación de I/O/rehidratación del prefijo en hits; hoy se evita su cómputo
-  Transformer, pero el backing todavía se copia y se rehidrata por petición.
-- Concurrencia paralela de múltiples inferencias sobre el modelo.
+- Menor latencia general que BF16 denso en todas las geometrías.
+- Reducción del coste cuadrático del *primer* prefill (el hit sí evita ese
+  Transformer y ya no copia el backing).
+- Paridad universal o L∞ de logits 0 con omisiones a `1e-3` (medido `0,171875`
+  con ids idénticos en 256/128/2).
+- Seguridad de promover `1e-3` al servidor; la autoridad de servicio sigue en
+  `1e-6`.
 - Certificación de 30.000, 100.000 o 131.072 tokens.
 - Métricas completas de RSS, workspace interno de LibTorch o VRAM.
-- Preparación operacional de producción.
+- Varias inferencias sobre *la misma* autoridad LibTorch (el paralelismo real
+  es N copias del modelo).
 
 ## Próxima decisión basada en evidencia
 

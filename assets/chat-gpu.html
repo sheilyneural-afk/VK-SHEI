@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terrsvusion — chat Rust/OpenCL GPU</title>
+  <style>
+    :root { color-scheme:dark; --bg:#090d14; --panel:#131b28; --line:#29384b; --text:#eef4fd; --muted:#a0b2c9; --accent:#50dcbd; }
+    * { box-sizing:border-box; }
+    body { background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,sans-serif; margin:0; }
+    main {max-width:1000px;margin:auto;padding:24px;min-height:100vh;display:flex;flex-direction:column;gap:16px;}
+    h1 {font-size:23px;margin:0} h2 {font-size:15px;margin:0}
+    header {display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+    #status {color:var(--accent);font-size:13px}
+    .explain {font-size:13px;color:var(--muted);margin:0}
+    #conversation {padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);
+      min-height:45vh;flex:1;display:flex;flex-direction:column;gap:12px;overflow-wrap:anywhere;}
+    .bubble {max-width:85%;padding:12px 15px;border-radius:12px;white-space:pre-wrap;}
+    .user {align-self:flex-end;background:#244764;}
+    .assistant {align-self:flex-start;background:#27343f;}
+    .error {border:1px solid #c87979;color:#ffc7c7;}
+    .form {display:grid;gap:12px;padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--panel);}
+    textarea,input {font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;}
+    textarea {min-height:92px;width:100%;resize:vertical}
+    .row {display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    button {background:var(--accent);color:#09141a;font:inherit;font-weight:650;border:0;padding:9px 15px;border-radius:9px;cursor:pointer}
+    button:disabled {opacity:.5;cursor:wait}
+    button.alt {background:#344559;color:var(--text)}
+    label {color:var(--muted);font-size:13px;display:flex;gap:8px;align-items:center}
+    input[type=number] {width:87px}
+    #metrics {margin:0;white-space:pre-wrap;color:var(--muted);font-size:13px}
+    .warn {border-left:3px solid #c8a36d;padding:8px 12px;color:var(--muted);font-size:13px}
+    @media(max-width:650px){main{padding:14px}.bubble{max-width:96%}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>Terrsvusion — Rust · AMD GPU</h1>
+      <p class="explain">MiniCPM5-1B BF16 · OpenCL real · prefill GPU por lotes · sin LibTorch</p>
+    </div>
+    <div id="status">Comprobando GPU…</div>
+  </header>
+  <div class="warn">
+    Motor experimental: ejecuta el LLM completo en GPU. Si se activa
+    --gpu-lod, reutiliza los módulos originales CPU de índice 4-bit/LSH,
+    ColdStore BF16 y certificado exact-mass. El branch-and-bound regional
+    CPU y su caché de prefijos siguen pendientes en GPU. No existe paridad
+    exacta de logits GPU frente al backend CPU BF16 denso.
+  </div>
+  <div id="conversation" role="log" aria-live="polite"></div>
+  <section class="form" aria-label="Enviar consulta">
+    <textarea id="input" placeholder="Escribe una pregunta corta para probar el modelo completo en tu iGPU AMD…"></textarea>
+    <div class="row">
+      <label>Máximo tokens <input id="max_tokens" type="number" min="1" max="512" value="64"></label>
+      <label><input id="remember" type="checkbox" checked> Mantener conversación</label>
+      <button id="send">Enviar a GPU</button>
+      <button id="cancel" class="alt" hidden>Cancelar</button>
+      <button id="clear" class="alt">Vaciar</button>
+    </div>
+    <p id="metrics"></p>
+  </section>
+</main>
+<script>
+  const status = document.getElementById('status');
+  const conv = document.getElementById('conversation');
+  const input = document.getElementById('input');
+  const send = document.getElementById('send');
+  const cancel = document.getElementById('cancel');
+  const clear = document.getElementById('clear');
+  const maxTokens = document.getElementById('max_tokens');
+  const remember = document.getElementById('remember');
+  const metrics = document.getElementById('metrics');
+  const turns = [];
+  let controller = null;
+  const chatModel = 'terrsvusion-opencl-bf16';
+  const bubble = (role, text, isError) => {
+    const item = document.createElement('div');
+    item.className = 'bubble ' + role + (isError ? ' error' : '');
+    item.textContent = text;
+    conv.appendChild(item);
+    item.scrollIntoView({block:'end',behavior:'smooth'});
+  };
+  async function health() {
+    try {
+      const res = await fetch('/v1/capabilities', {cache:'no-store'});
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      status.textContent = 'GPU conectada: ' + String(data.gpu_device || 'OpenCL');
+    } catch(err) {
+      status.textContent = 'Sin conexión al servidor GPU';
+    }
+  }
+  async function submit() {
+    if (controller) return;
+    const content = input.value.trim();
+    if (!content) return;
+    const maximum = Number(maxTokens.value);
+    if (!Number.isInteger(maximum) || maximum < 1 || maximum > 512) {
+      bubble('assistant','max_tokens debe estar entre 1 y 512', true);return;
+    }
+    const messages = remember.checked ? turns.slice() : [];
+    messages.push({role:'user',content:content});
+    turns.push({role:'user',content:content});
+    bubble('user',content,false);
+    input.value = '';
+    send.disabled = true; cancel.hidden = false;
+    controller = new AbortController();
+    metrics.textContent = 'GPU procesando la consulta…';
+    try {
+      const res = await fetch('/v1/chat/completions', {
+        method:'POST',signal:controller.signal,
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({model:chatModel,messages:messages,
+          max_tokens:maximum,temperature:0,stream:false})
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error?.message || res.statusText);
+      const answer = String(data?.choices?.[0]?.message?.content || '');
+      turns.push({role:'assistant',content:answer});
+      bubble('assistant',answer || '(sin texto visible)',false);
+      const usage = data.usage || {};
+      metrics.textContent = 'Prompt: ' + usage.prompt_tokens +
+        ' tokens · Generados: ' + usage.completion_tokens +
+        ' · GPU: ' + Number(usage.latency_seconds || 0).toFixed(2) + ' s' +
+        ' · Prefill: ' + Number(usage.prefill_seconds || 0).toFixed(2) + ' s';
+    } catch(err) {
+      bubble('assistant',err.name==='AbortError'?'Petición cancelada.':
+        'Error del motor GPU: ' + (err.message || err),true);
+    } finally {
+      controller = null; send.disabled = false; cancel.hidden = true;
+    }
+  }
+  send.addEventListener('click', submit);
+  cancel.addEventListener('click', () => {if(controller)controller.abort();});
+  clear.addEventListener('click', () => {turns.length=0;conv.replaceChildren();metrics.textContent='';});
+  input.addEventListener('keydown',ev => {
+    if(ev.key==='Enter' && !ev.shiftKey){ev.preventDefault();submit();}
+  });
+  health();
+</script>
+</body>
+</html>
+

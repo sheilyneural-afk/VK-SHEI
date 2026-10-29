@@ -1,0 +1,61 @@
+{
+  "authority": "dense_bf16_vs_terrsvusion_same_prompt_ids",
+  "comparisons": [
+    {
+      "case": "raw_hola",
+      "report": {
+        "dense_kv_sha256": "c2da48340f4f7f828a63de076a1e117a8de79979a2a69f354ec75086fd1b5039",
+        "dense_prefill_seconds": 0.069290306,
+        "dense_text": "¡Hola! Parece que has estado esperando de mí. ¿Cu",
+        "dense_tokens": [
+          61973,
+          61,
+          9239,
+          22,
+          49423,
+          358,
+          1715,
+          723,
+          41644,
+          36039,
+          5800,
+          415,
+          119102,
+          35,
+          35938,
+          21409
+        ],
+        "divergence": null,
+        "exact_token_parity": true,
+        "first_logit_step_above_1e3": null,
+        "first_token_mismatch": null,
+        "kv_sha256_equal": true,
+        "logit_steps_compared": 16,
+        "max_abs_logit_difference": 0.0,
+        "prompt_tokens": 15,
+        "terrsvusion_kv_sha256": "c2da48340f4f7f828a63de076a1e117a8de79979a2a69f354ec75086fd1b5039",
+        "terrsvusion_prefill_seconds": 0.072285435,
+        "terrsvusion_text": "¡Hola! Parece que has estado esperando de mí. ¿Cu",
+        "terrsvusion_tokens": [
+          61973,
+          61,
+          9239,
+          22,
+          49423,
+          358,
+          1715,
+          723,
+          41644,
+          36039,
+          5800,
+          415,
+          119102,
+          35,
+          35938,
+          21409
+        ]
+      }
+    }
+  ],
+  "same_weights_tokenizer_greedy": true
+}

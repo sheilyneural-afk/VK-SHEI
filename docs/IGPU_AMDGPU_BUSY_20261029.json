@@ -1,0 +1,19 @@
+{
+  "source": "/sys/class/drm/card1/device/gpu_busy_percent (amdgpu)",
+  "samples": 100,
+  "time_seconds": 5.545182931935415,
+  "busy_min_percent": 1,
+  "busy_median_percent": 74.0,
+  "busy_max_percent": 86,
+  "vram_used_bytes_min": 4041961472,
+  "vram_used_bytes_max": 4053323776,
+  "gtt_used_bytes_min": 4103479296,
+  "gtt_used_bytes_max": 4145442816,
+  "test_tokens": 32768,
+  "rounds": 20,
+  "dtype": "bf16",
+  "kernel_qk_ms_last": 187.619998,
+  "gpu_wall_median_ms": 253.502004,
+  "max_abs_attention_difference": 2.514570951461792e-08,
+  "numerical_check_passed": true
+}

@@ -1,0 +1,120 @@
+{
+  "faro_short_7k": {
+    "path": "/tmp/faro-full.txt",
+    "size_bytes": 27168,
+    "sha256": "9d316c1da3d6f8dda264e0a1a8de87f12b745226f17bc816b0ae342a683ad154",
+    "line_count": 366,
+    "chars": 26250,
+    "tokenizer_counts": {
+      "llama_3_1_8b": {
+        "tokenizer": "llama_3_1_8b",
+        "raw_ids": 7065,
+        "first_ids": [
+          6719,
+          3117,
+          78,
+          409,
+          2537,
+          46180,
+          8492,
+          1325
+        ],
+        "last_ids": [
+          658,
+          84544,
+          409,
+          1239,
+          50864,
+          627,
+          17167,
+          198
+        ],
+        "elapsed_s": 0.01
+      },
+      "minicpm5_1b": {
+        "tokenizer": "minicpm5_1b",
+        "raw_ids": 6954,
+        "first_ids": [
+          7057,
+          2653,
+          100,
+          415,
+          4129,
+          50523,
+          14169,
+          35403
+        ],
+        "last_ids": [
+          1375,
+          100418,
+          415,
+          1129,
+          71816,
+          350,
+          72390,
+          220
+        ],
+        "elapsed_s": 0.01
+      }
+    }
+  },
+  "faro_volume_full": {
+    "path": "/home/yo/Escritorio/terrsvusion-v3-rust-20261028-231043./terravision-v3/assets/el-faro-volumen-completo.txt",
+    "size_bytes": 368968,
+    "sha256": "11bc81eb83080e59462fdfc5fdb3f8f78c35ae6be650cdefbca2cc188b5e6ef5",
+    "line_count": 1819,
+    "chars": 358266,
+    "tokenizer_counts": {
+      "llama_3_1_8b": {
+        "tokenizer": "llama_3_1_8b",
+        "raw_ids": 111632,
+        "first_ids": [
+          2818,
+          57415,
+          46,
+          3467,
+          53787,
+          423,
+          53320,
+          1950
+        ],
+        "last_ids": [
+          653,
+          274,
+          4896,
+          98174,
+          665,
+          10566,
+          52111,
+          627
+        ],
+        "elapsed_s": 0.12
+      },
+      "minicpm5_1b": {
+        "tokenizer": "minicpm5_1b",
+        "raw_ids": 112104,
+        "first_ids": [
+          2492,
+          77142,
+          68,
+          13111,
+          72580,
+          437,
+          74118,
+          2328
+        ],
+        "last_ids": [
+          100,
+          419,
+          34856,
+          7231,
+          606,
+          12939,
+          91662,
+          350
+        ],
+        "elapsed_s": 0.15
+      }
+    }
+  }
+}

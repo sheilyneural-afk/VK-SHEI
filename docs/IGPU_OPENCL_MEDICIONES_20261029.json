@@ -1,0 +1,505 @@
+{
+  "date": "2026-10-29",
+  "location": "PC iGPU physical hardware OpenCL Mesa Rusticl",
+  "project_path": "/home/yo/Escritorio/terrsvusion-v3-rust-20261028-231043./terravision-v3",
+  "model": "MiniCPM5-1B config geometry only",
+  "weights_executed_on_igpu": false,
+  "synthetic_qkv": true,
+  "CPU": "portable Rust f64 accumulation reference",
+  "GPU": "OpenCL f32 QK/softmax/PV kernels on CL_DEVICE_TYPE_GPU",
+  "note": "GPU timings include host transfers and dispatch. Not end-to-end LLM speedup.",
+  "cases": [
+    {
+      "acceptance_abs_tolerance": 0.0005,
+      "backend": "rust-opencl-gpu-qk-softmax-pv",
+      "cpu_reference_ms": 4.58265,
+      "engine": "terrsvusion-opencl-rust-native",
+      "format": "BF16",
+      "frames": 2,
+      "full_llm_inference_on_gpu": false,
+      "geometry": {
+        "head_dim": 128,
+        "kv_heads": 2,
+        "query_heads": 16
+      },
+      "gpu_backend_compile_ms": 53.418527,
+      "gpu_input_kv_bytes": 524288,
+      "gpu_kernel_pv_ms_last": 0.35772,
+      "gpu_kernel_qk_ms_last": 0.28971,
+      "gpu_kernel_samples": [
+        {
+          "dispatch_host_ms": 4.968935,
+          "pv_ms": 0.353392,
+          "qk_ms": 0.293879,
+          "softmax_ms": 0.767939
+        },
+        {
+          "dispatch_host_ms": 2.422361,
+          "pv_ms": 0.387656,
+          "qk_ms": 0.291875,
+          "softmax_ms": 0.80549
+        },
+        {
+          "dispatch_host_ms": 2.5892139999999997,
+          "pv_ms": 0.351227,
+          "qk_ms": 0.28923,
+          "softmax_ms": 0.801643
+        },
+        {
+          "dispatch_host_ms": 2.410809,
+          "pv_ms": 0.356757,
+          "qk_ms": 0.291994,
+          "softmax_ms": 0.797475
+        },
+        {
+          "dispatch_host_ms": 2.775705,
+          "pv_ms": 0.35772,
+          "qk_ms": 0.28971,
+          "softmax_ms": 0.767659
+        }
+      ],
+      "gpu_kernel_softmax_ms_last": 0.767659,
+      "gpu_output_bytes": 8192,
+      "gpu_score_scratch_bytes": 32768,
+      "gpu_vs_cpu_reference_ratio": 1.7572460781046828,
+      "gpu_wall_median_ms": 2.607859,
+      "gpu_wall_ms_by_round": [
+        4.986117,
+        2.436819,
+        2.607859,
+        2.423002,
+        2.78894
+      ],
+      "hardware": {
+        "driver_version": "25.2.8-0ubuntu0.24.04.2",
+        "max_allocation_bytes": 2147483647,
+        "max_compute_units": 12,
+        "name": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+        "opencl_device_type": 4,
+        "reported_global_memory_bytes": 4294967296,
+        "vendor": "AMD",
+        "vendor_id": 4098
+      },
+      "kv_payload_bytes": 524288,
+      "max_abs_attention_difference": 2.421438694000244e-08,
+      "max_abs_cpu_attention_value": 0.03150590881705284,
+      "model_config_used_only_for_geometry": "/home/yo/models/MiniCPM5-1B",
+      "numerical_check_passed": true,
+      "physical_gpu_discovered_via": "OpenCL CL_DEVICE_TYPE_GPU",
+      "q_elements": 2048,
+      "rms_attention_difference": 4.654670194709875e-09,
+      "test_data": "deterministic_synthetic_qkv",
+      "tokens": 512
+    },
+    {
+      "acceptance_abs_tolerance": 0.0005,
+      "backend": "rust-opencl-gpu-qk-softmax-pv",
+      "cpu_reference_ms": 37.132762,
+      "engine": "terrsvusion-opencl-rust-native",
+      "format": "BF16",
+      "frames": 16,
+      "full_llm_inference_on_gpu": false,
+      "geometry": {
+        "head_dim": 128,
+        "kv_heads": 2,
+        "query_heads": 16
+      },
+      "gpu_backend_compile_ms": 47.561585,
+      "gpu_input_kv_bytes": 4194304,
+      "gpu_kernel_pv_ms_last": 2.781605,
+      "gpu_kernel_qk_ms_last": 4.393989,
+      "gpu_kernel_samples": [
+        {
+          "dispatch_host_ms": 21.465918000000002,
+          "pv_ms": 2.765895,
+          "qk_ms": 4.506803,
+          "softmax_ms": 6.283659
+        },
+        {
+          "dispatch_host_ms": 17.718788999999997,
+          "pv_ms": 2.753351,
+          "qk_ms": 4.440077,
+          "softmax_ms": 6.282016
+        },
+        {
+          "dispatch_host_ms": 17.345797,
+          "pv_ms": 2.74726,
+          "qk_ms": 4.438152,
+          "softmax_ms": 6.283298
+        },
+        {
+          "dispatch_host_ms": 17.18757,
+          "pv_ms": 2.757118,
+          "qk_ms": 4.435988,
+          "softmax_ms": 6.280733
+        },
+        {
+          "dispatch_host_ms": 17.318988,
+          "pv_ms": 2.781605,
+          "qk_ms": 4.393989,
+          "softmax_ms": 6.279491
+        }
+      ],
+      "gpu_kernel_softmax_ms_last": 6.279491,
+      "gpu_output_bytes": 8192,
+      "gpu_score_scratch_bytes": 262144,
+      "gpu_vs_cpu_reference_ratio": 2.0884705484282433,
+      "gpu_wall_median_ms": 17.779882999999998,
+      "gpu_wall_ms_by_round": [
+        22.133904,
+        18.159385999999998,
+        17.779882999999998,
+        17.619131,
+        17.739247
+      ],
+      "hardware": {
+        "driver_version": "25.2.8-0ubuntu0.24.04.2",
+        "max_allocation_bytes": 2147483647,
+        "max_compute_units": 12,
+        "name": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+        "opencl_device_type": 4,
+        "reported_global_memory_bytes": 4294967296,
+        "vendor": "AMD",
+        "vendor_id": 4098
+      },
+      "kv_payload_bytes": 4194304,
+      "max_abs_attention_difference": 3.3527612686157227e-08,
+      "max_abs_cpu_attention_value": 0.012382746674120426,
+      "model_config_used_only_for_geometry": "/home/yo/models/MiniCPM5-1B",
+      "numerical_check_passed": true,
+      "physical_gpu_discovered_via": "OpenCL CL_DEVICE_TYPE_GPU",
+      "q_elements": 2048,
+      "rms_attention_difference": 4.806510362533422e-09,
+      "test_data": "deterministic_synthetic_qkv",
+      "tokens": 4096
+    },
+    {
+      "acceptance_abs_tolerance": 0.0005,
+      "backend": "rust-opencl-gpu-qk-softmax-pv",
+      "cpu_reference_ms": 73.714659,
+      "engine": "terrsvusion-opencl-rust-native",
+      "format": "BF16",
+      "frames": 32,
+      "full_llm_inference_on_gpu": false,
+      "geometry": {
+        "head_dim": 128,
+        "kv_heads": 2,
+        "query_heads": 16
+      },
+      "gpu_backend_compile_ms": 49.833112,
+      "gpu_input_kv_bytes": 8388608,
+      "gpu_kernel_pv_ms_last": 2.129687,
+      "gpu_kernel_qk_ms_last": 37.38948,
+      "gpu_kernel_samples": [
+        {
+          "dispatch_host_ms": 69.1697,
+          "pv_ms": 4.572688,
+          "qk_ms": 42.018114,
+          "softmax_ms": 10.615249
+        },
+        {
+          "dispatch_host_ms": 55.900762,
+          "pv_ms": 3.275905,
+          "qk_ms": 38.745256,
+          "softmax_ms": 7.083739
+        },
+        {
+          "dispatch_host_ms": 52.758438,
+          "pv_ms": 2.648312,
+          "qk_ms": 38.271155,
+          "softmax_ms": 5.271136
+        },
+        {
+          "dispatch_host_ms": 51.572340000000004,
+          "pv_ms": 2.287987,
+          "qk_ms": 38.321531,
+          "softmax_ms": 4.257208
+        },
+        {
+          "dispatch_host_ms": 49.891831999999994,
+          "pv_ms": 2.129687,
+          "qk_ms": 37.38948,
+          "softmax_ms": 3.72115
+        }
+      ],
+      "gpu_kernel_softmax_ms_last": 3.72115,
+      "gpu_output_bytes": 8192,
+      "gpu_score_scratch_bytes": 524288,
+      "gpu_vs_cpu_reference_ratio": 1.3750249581754699,
+      "gpu_wall_median_ms": 53.609688000000006,
+      "gpu_wall_ms_by_round": [
+        70.560553,
+        56.894458,
+        53.609688000000006,
+        52.422906999999995,
+        50.785832000000006
+      ],
+      "hardware": {
+        "driver_version": "25.2.8-0ubuntu0.24.04.2",
+        "max_allocation_bytes": 2147483647,
+        "max_compute_units": 12,
+        "name": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+        "opencl_device_type": 4,
+        "reported_global_memory_bytes": 4294967296,
+        "vendor": "AMD",
+        "vendor_id": 4098
+      },
+      "kv_payload_bytes": 8388608,
+      "max_abs_attention_difference": 3.166496753692627e-08,
+      "max_abs_cpu_attention_value": 0.006260221358388662,
+      "model_config_used_only_for_geometry": "/home/yo/models/MiniCPM5-1B",
+      "numerical_check_passed": true,
+      "physical_gpu_discovered_via": "OpenCL CL_DEVICE_TYPE_GPU",
+      "q_elements": 2048,
+      "rms_attention_difference": 5.0151910523652695e-09,
+      "test_data": "deterministic_synthetic_qkv",
+      "tokens": 8192
+    },
+    {
+      "acceptance_abs_tolerance": 0.0005,
+      "backend": "rust-opencl-gpu-qk-softmax-pv",
+      "cpu_reference_ms": 302.064322,
+      "engine": "terrsvusion-opencl-rust-native",
+      "format": "BF16",
+      "frames": 128,
+      "full_llm_inference_on_gpu": false,
+      "geometry": {
+        "head_dim": 128,
+        "kv_heads": 2,
+        "query_heads": 16
+      },
+      "gpu_backend_compile_ms": 56.357208,
+      "gpu_input_kv_bytes": 33554432,
+      "gpu_kernel_pv_ms_last": 9.951147,
+      "gpu_kernel_qk_ms_last": 201.569542,
+      "gpu_kernel_samples": [
+        {
+          "dispatch_host_ms": 266.937179,
+          "pv_ms": 9.956438,
+          "qk_ms": 205.238193,
+          "softmax_ms": 15.545416
+        },
+        {
+          "dispatch_host_ms": 258.892204,
+          "pv_ms": 9.949224,
+          "qk_ms": 203.687927,
+          "softmax_ms": 15.129987
+        },
+        {
+          "dispatch_host_ms": 264.253478,
+          "pv_ms": 9.876365,
+          "qk_ms": 210.045327,
+          "softmax_ms": 14.757198
+        },
+        {
+          "dispatch_host_ms": 265.58797400000003,
+          "pv_ms": 9.951307,
+          "qk_ms": 209.959924,
+          "softmax_ms": 15.125258
+        },
+        {
+          "dispatch_host_ms": 255.448858,
+          "pv_ms": 9.951147,
+          "qk_ms": 201.569542,
+          "softmax_ms": 15.58954
+        }
+      ],
+      "gpu_kernel_softmax_ms_last": 15.58954,
+      "gpu_output_bytes": 8192,
+      "gpu_score_scratch_bytes": 2097152,
+      "gpu_vs_cpu_reference_ratio": 1.1233107038267922,
+      "gpu_wall_median_ms": 268.90540699999997,
+      "gpu_wall_ms_by_round": [
+        269.571458,
+        263.406466,
+        268.90540699999997,
+        269.933068,
+        259.339406
+      ],
+      "hardware": {
+        "driver_version": "25.2.8-0ubuntu0.24.04.2",
+        "max_allocation_bytes": 2147483647,
+        "max_compute_units": 12,
+        "name": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+        "opencl_device_type": 4,
+        "reported_global_memory_bytes": 4294967296,
+        "vendor": "AMD",
+        "vendor_id": 4098
+      },
+      "kv_payload_bytes": 33554432,
+      "max_abs_attention_difference": 2.514570951461792e-08,
+      "max_abs_cpu_attention_value": 0.0038995789363980293,
+      "model_config_used_only_for_geometry": "/home/yo/models/MiniCPM5-1B",
+      "numerical_check_passed": true,
+      "physical_gpu_discovered_via": "OpenCL CL_DEVICE_TYPE_GPU",
+      "q_elements": 2048,
+      "rms_attention_difference": 4.931763286828351e-09,
+      "test_data": "deterministic_synthetic_qkv",
+      "tokens": 32768
+    },
+    {
+      "acceptance_abs_tolerance": 0.0005,
+      "backend": "rust-opencl-gpu-qk-softmax-pv",
+      "cpu_reference_ms": 10.970551,
+      "engine": "terrsvusion-opencl-rust-native",
+      "format": "FP16",
+      "frames": 4,
+      "full_llm_inference_on_gpu": false,
+      "geometry": {
+        "head_dim": 128,
+        "kv_heads": 2,
+        "query_heads": 16
+      },
+      "gpu_backend_compile_ms": 50.730799,
+      "gpu_input_kv_bytes": 1048576,
+      "gpu_kernel_pv_ms_last": 0.81046,
+      "gpu_kernel_qk_ms_last": 0.499749,
+      "gpu_kernel_samples": [
+        {
+          "dispatch_host_ms": 6.943854999999999,
+          "pv_ms": 0.812143,
+          "qk_ms": 0.502475,
+          "softmax_ms": 1.535678
+        },
+        {
+          "dispatch_host_ms": 4.088291,
+          "pv_ms": 0.811061,
+          "qk_ms": 0.50504,
+          "softmax_ms": 1.611582
+        },
+        {
+          "dispatch_host_ms": 4.355702,
+          "pv_ms": 0.812264,
+          "qk_ms": 0.513255,
+          "softmax_ms": 1.536639
+        },
+        {
+          "dispatch_host_ms": 4.46034,
+          "pv_ms": 0.995452,
+          "qk_ms": 0.499149,
+          "softmax_ms": 1.744514
+        },
+        {
+          "dispatch_host_ms": 4.0079,
+          "pv_ms": 0.81046,
+          "qk_ms": 0.499749,
+          "softmax_ms": 1.536679
+        }
+      ],
+      "gpu_kernel_softmax_ms_last": 1.536679,
+      "gpu_output_bytes": 8192,
+      "gpu_score_scratch_bytes": 65536,
+      "gpu_vs_cpu_reference_ratio": 2.510314425688586,
+      "gpu_wall_median_ms": 4.37019,
+      "gpu_wall_ms_by_round": [
+        6.962701,
+        4.106966,
+        4.37019,
+        4.479966999999999,
+        4.020634
+      ],
+      "hardware": {
+        "driver_version": "25.2.8-0ubuntu0.24.04.2",
+        "max_allocation_bytes": 2147483647,
+        "max_compute_units": 12,
+        "name": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+        "opencl_device_type": 4,
+        "reported_global_memory_bytes": 4294967296,
+        "vendor": "AMD",
+        "vendor_id": 4098
+      },
+      "kv_payload_bytes": 1048576,
+      "max_abs_attention_difference": 2.421438694000244e-08,
+      "max_abs_cpu_attention_value": 0.022618796676397324,
+      "model_config_used_only_for_geometry": "/home/yo/models/MiniCPM5-1B",
+      "numerical_check_passed": true,
+      "physical_gpu_discovered_via": "OpenCL CL_DEVICE_TYPE_GPU",
+      "q_elements": 2048,
+      "rms_attention_difference": 4.416165664571961e-09,
+      "test_data": "deterministic_synthetic_qkv",
+      "tokens": 1024
+    },
+    {
+      "acceptance_abs_tolerance": 0.0005,
+      "backend": "rust-opencl-gpu-qk-softmax-pv",
+      "cpu_reference_ms": 10.277368000000001,
+      "engine": "terrsvusion-opencl-rust-native",
+      "format": "FP32",
+      "frames": 4,
+      "full_llm_inference_on_gpu": false,
+      "geometry": {
+        "head_dim": 128,
+        "kv_heads": 2,
+        "query_heads": 16
+      },
+      "gpu_backend_compile_ms": 49.204762,
+      "gpu_input_kv_bytes": 2097152,
+      "gpu_kernel_pv_ms_last": 0.685863,
+      "gpu_kernel_qk_ms_last": 1.207133,
+      "gpu_kernel_samples": [
+        {
+          "dispatch_host_ms": 8.016551,
+          "pv_ms": 0.691794,
+          "qk_ms": 1.219557,
+          "softmax_ms": 1.535838
+        },
+        {
+          "dispatch_host_ms": 5.090212999999999,
+          "pv_ms": 0.678729,
+          "qk_ms": 1.218756,
+          "softmax_ms": 1.535798
+        },
+        {
+          "dispatch_host_ms": 4.603809,
+          "pv_ms": 0.67893,
+          "qk_ms": 1.216351,
+          "softmax_ms": 1.536439
+        },
+        {
+          "dispatch_host_ms": 4.5849139999999995,
+          "pv_ms": 0.676686,
+          "qk_ms": 1.22637,
+          "softmax_ms": 1.536199
+        },
+        {
+          "dispatch_host_ms": 4.627705000000001,
+          "pv_ms": 0.685863,
+          "qk_ms": 1.207133,
+          "softmax_ms": 1.536399
+        }
+      ],
+      "gpu_kernel_softmax_ms_last": 1.536399,
+      "gpu_output_bytes": 8192,
+      "gpu_score_scratch_bytes": 65536,
+      "gpu_vs_cpu_reference_ratio": 2.21324522878283,
+      "gpu_wall_median_ms": 4.643574,
+      "gpu_wall_ms_by_round": [
+        8.041738,
+        5.113786999999999,
+        4.6205609999999995,
+        4.598419000000001,
+        4.643574
+      ],
+      "hardware": {
+        "driver_version": "25.2.8-0ubuntu0.24.04.2",
+        "max_allocation_bytes": 2147483647,
+        "max_compute_units": 12,
+        "name": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+        "opencl_device_type": 4,
+        "reported_global_memory_bytes": 4294967296,
+        "vendor": "AMD",
+        "vendor_id": 4098
+      },
+      "kv_payload_bytes": 2097152,
+      "max_abs_attention_difference": 3.5390257835388184e-08,
+      "max_abs_cpu_attention_value": 0.02261730469763279,
+      "model_config_used_only_for_geometry": "/home/yo/models/MiniCPM5-1B",
+      "numerical_check_passed": true,
+      "physical_gpu_discovered_via": "OpenCL CL_DEVICE_TYPE_GPU",
+      "q_elements": 2048,
+      "rms_attention_difference": 4.553274771329805e-09,
+      "test_data": "deterministic_synthetic_qkv",
+      "tokens": 1024
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+   Compiling terrsvusion v0.4.0 (/home/yo/Escritorio/terrsvusion-v3-rust-20261028-231043./terravision-v3)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.73s
+     Running unittests src/lib.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion-954b534cbffff4d0)
+
+running 1 test
+FUSED_EXACT_GPU_PARITY context=1 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_PARITY context=2 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_PARITY context=15 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_PARITY context=32 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_BENCH context=32 old_ms=0.589769 fused_ms=0.269085 speedup=2.1918 samples=72 exact_BF16=true
+FUSED_EXACT_GPU_PARITY context=127 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_PARITY context=375 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_BENCH context=375 old_ms=1.439816 fused_ms=0.755741 speedup=1.9052 samples=72 exact_BF16=true
+FUSED_EXACT_GPU_PARITY context=512 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_PARITY context=1024 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_BENCH context=1024 old_ms=2.317726 fused_ms=1.237055 speedup=1.8736 samples=72 exact_BF16=true
+FUSED_EXACT_GPU_PARITY context=2048 BF16_bytes=4096 equal=true
+FUSED_EXACT_GPU_BENCH context=2048 old_ms=3.116648 fused_ms=1.562015 speedup=1.9953 samples=72 exact_BF16=true
+test opencl_llm::tests::gpu_actual_exact_hot_fused_attention_parity_for_many_context_lengths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 81 filtered out; finished in 1.46s
+
+     Running unittests src/bin/terrsvusion-igpu-bench.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_igpu_bench-59ce2082c496c245)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-inspect.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_inspect-bcdfb881ec7b6cf6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-llm.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_opencl_llm-08fb505f5fa49c35)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-server.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_opencl_server-dc98337de62497e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+

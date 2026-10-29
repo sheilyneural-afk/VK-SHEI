@@ -1,0 +1,18 @@
+{
+  "test": "MiniCPM5-1B BF16 real AMD Radeon Phoenix; exact epsilon=0; 375 prompt tokens 16 greedy output",
+  "http_status": 200,
+  "input_tokens": 375,
+  "output_tokens": 16,
+  "response_text": "El código del dato verificable es **CEDRO-7319**.",
+  "model_time_seconds": 3.05533493,
+  "prefill_seconds": 1.876801532,
+  "http_seconds": 3.068610118003562,
+  "micro_sparse_queries": 0,
+  "micro_aux_memory_bytes": 0,
+  "K_dot_products_saved_by_micro": 0,
+  "V_skipped": 0,
+  "original_index_payload_bytes": 4680,
+  "original_coldstore_pages": 168,
+  "original_coldstore_bytes": 9761280,
+  "cpu_original_unchanged": true
+}

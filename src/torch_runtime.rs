@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tch::{Device, Kind, Tensor};
 use tokenizers::Tokenizer;
 
@@ -22,6 +23,7 @@ use crate::attention_certificate::omitted_error_bound;
 use crate::attention_certificate::{certified, select_by_exact_mass};
 use crate::cold_store::{ColdStore, ColdStoreStats, PageGeometry, PreparedPage};
 use crate::conversion_worker::{Bf16PageJob, ConversionStats, ConversionWorker, PageShape};
+use crate::model_config::ModelSpec;
 use crate::prefill_tch::protected_queries;
 use crate::shadow_metrics::{ShadowDiagnosticReport, ShadowEventId, ShadowMetrics};
 
@@ -68,6 +70,66 @@ impl WeightFile {
         );
         Ok(tensor.to_device(Device::Cpu))
     }
+
+    fn tensor_names(&self) -> Result<Vec<String>> {
+        let archive = SafeTensors::deserialize(&self.mapping)
+            .with_context(|| format!("safetensors inválido: {}", self.path.display()))?;
+        Ok(archive.names().into_iter().cloned().collect())
+    }
+}
+
+pub struct WeightArchive {
+    shards: Vec<WeightFile>,
+    owners: HashMap<String, usize>,
+}
+
+impl WeightArchive {
+    pub fn open_dir(model_dir: impl AsRef<Path>) -> Result<Self> {
+        let model_dir = model_dir.as_ref();
+        let mut paths = Vec::new();
+        let direct = model_dir.join("model.safetensors");
+        if direct.is_file() {
+            paths.push(direct);
+        } else {
+            paths = std::fs::read_dir(model_dir)
+                .with_context(|| format!("no se pudo listar {}", model_dir.display()))?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with("model-") && name.ends_with(".safetensors")
+                        })
+                })
+                .collect();
+            paths.sort();
+        }
+        ensure!(
+            !paths.is_empty(),
+            "no hay shards safetensors en {}",
+            model_dir.display()
+        );
+        let shards = paths
+            .into_iter()
+            .map(WeightFile::open)
+            .collect::<Result<Vec<_>>>()?;
+        let mut owners = HashMap::new();
+        for (index, shard) in shards.iter().enumerate() {
+            for name in shard.tensor_names()? {
+                owners.entry(name).or_insert(index);
+            }
+        }
+        Ok(Self { shards, owners })
+    }
+
+    pub fn require_bf16(&self, name: &str, expected: &[i64]) -> Result<Tensor> {
+        let index = self
+            .owners
+            .get(name)
+            .copied()
+            .with_context(|| format!("peso ausente: {name}"))?;
+        self.shards[index].require_bf16(name, expected)
+    }
 }
 
 pub fn model_weight_file(model_dir: impl AsRef<Path>) -> Result<PathBuf> {
@@ -93,6 +155,76 @@ pub fn model_weight_file(model_dir: impl AsRef<Path>) -> Result<PathBuf> {
     Ok(shards.remove(0))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatTemplateFamily {
+    MiniCpm5,
+    Llama3,
+}
+
+struct DecoderGeometry {
+    hidden: i64,
+    intermediate: i64,
+    vocab: i64,
+    n_layers: usize,
+    query_heads: i64,
+    kv_heads: i64,
+    head_dim: i64,
+    rope_theta: f64,
+    rms_eps: f64,
+    llama3_rope: bool,
+    eos: Vec<i64>,
+    chat: ChatTemplateFamily,
+}
+
+impl DecoderGeometry {
+    fn from_spec(spec: &ModelSpec) -> Result<Self> {
+        if spec.legacy_bf16_geometry_match {
+            Ok(Self {
+                hidden: 1_536,
+                intermediate: 4_608,
+                vocab: 130_560,
+                n_layers: 24,
+                query_heads: 16,
+                kv_heads: 2,
+                head_dim: 128,
+                rope_theta: 5_000_000.0,
+                rms_eps: 1e-6,
+                llama3_rope: false,
+                eos: vec![1, 130_073],
+                chat: ChatTemplateFamily::MiniCpm5,
+            })
+        } else if spec.is_llama31_8b_instruct_bf16() {
+            Ok(Self {
+                hidden: 4_096,
+                intermediate: 14_336,
+                vocab: 128_256,
+                n_layers: 32,
+                query_heads: 32,
+                kv_heads: 8,
+                head_dim: 128,
+                rope_theta: spec.rope_theta.unwrap_or(500_000.0),
+                rms_eps: spec.rms_norm_eps.unwrap_or(1e-5),
+                llama3_rope: true,
+                eos: vec![128_001, 128_008, 128_009],
+                chat: ChatTemplateFamily::Llama3,
+            })
+        } else {
+            bail!(
+                "geometría no soportada por el runtime CPU: {}",
+                spec.model_type
+            )
+        }
+    }
+
+    fn query_out(&self) -> i64 {
+        self.query_heads * self.head_dim
+    }
+
+    fn kv_out(&self) -> i64 {
+        self.kv_heads * self.head_dim
+    }
+}
+
 pub struct MiniCpmLayer {
     input_norm: Tensor,
     q: Tensor,
@@ -103,6 +235,12 @@ pub struct MiniCpmLayer {
     gate: Tensor,
     up: Tensor,
     down: Tensor,
+    query_heads: i64,
+    kv_heads: i64,
+    head_dim: i64,
+    rope_theta: f64,
+    rms_eps: f64,
+    llama3_rope: bool,
 }
 
 pub struct MiniCpmModel {
@@ -110,6 +248,13 @@ pub struct MiniCpmModel {
     layers: Vec<MiniCpmLayer>,
     final_norm: Tensor,
     lm_head: Tensor,
+    rms_eps: f64,
+    eos: Vec<i64>,
+    chat: ChatTemplateFamily,
+    query_heads: i64,
+    kv_heads: i64,
+    head_dim: i64,
+    streaming_prefill: bool,
 }
 
 pub struct DenseKvCache {
@@ -133,11 +278,25 @@ pub trait AttentionCache {
 
 impl DenseKvCache {
     pub fn new() -> Self {
+        Self::with_layers(24)
+    }
+
+    pub fn with_layers(n_layers: usize) -> Self {
         Self {
-            layers: (0..24).map(|_| None).collect(),
+            layers: (0..n_layers).map(|_| None).collect(),
             sequence_tokens: 0,
             querywise_attention: false,
         }
+    }
+
+    fn gqa_groups(query: &Tensor, key: &Tensor) -> Result<i64> {
+        let query_heads = query.size()[1];
+        let kv_heads = key.size()[1];
+        ensure!(
+            kv_heads > 0 && query_heads % kv_heads == 0,
+            "GQA incompatible: {query_heads}Q / {kv_heads}KV"
+        );
+        Ok(query_heads / kv_heads)
     }
 
     pub fn sequence_tokens(&self) -> usize {
@@ -319,8 +478,9 @@ impl AttentionCache for DenseKvCache {
             None => (new_key.shallow_clone(), new_value.shallow_clone()),
         };
         self.layers[layer_index] = Some((key.shallow_clone(), value.shallow_clone()));
-        let key = key.repeat_interleave_self_int(8, 1, None);
-        let value = value.repeat_interleave_self_int(8, 1, None);
+        let groups = Self::gqa_groups(query, &key)?;
+        let key = key.repeat_interleave_self_int(groups, 1, None);
+        let value = value.repeat_interleave_self_int(groups, 1, None);
         let query_tokens = query.size()[2] as usize;
         let total_tokens = self.sequence_tokens + query_tokens;
         if self.querywise_attention && query_tokens > 1 {
@@ -384,8 +544,14 @@ struct TerrsvusionPage {
 #[derive(Clone, Deserialize, Serialize)]
 struct PageAttentionCertificate {
     regions: Vec<KeyRegionCertificate>,
-    /// Maximum absolute V component for each KV head.
+    /// Historical MiniCPM5 2KV bound. Kept unchanged for v1 prefix
+    /// compatibility and the original 16Q/2KV branch-and-bound path.
     value_abs_max: [f32; 2],
+    /// New, optional exact BF16 V bound for ALL KV heads (8 for Llama).
+    /// A missing field in a legacy persisted prefix FAILS CLOSED
+    /// to full dense BF16 V reads; it never authorizes an omission.
+    #[serde(default)]
+    value_abs_max_by_kv_head: Vec<f32>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -420,6 +586,7 @@ struct ParallelAxisMetrics {
 enum PageStorage {
     Cold {
         exact_id: u64,
+        immutable: bool,
     },
     Pending {
         sequence: u64,
@@ -456,8 +623,12 @@ impl Clone for TerrsvusionPage {
             tokens: self.tokens,
             certificate: self.certificate.clone(),
             storage: match &self.storage {
-                PageStorage::Cold { exact_id } => PageStorage::Cold {
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => PageStorage::Cold {
                     exact_id: *exact_id,
+                    immutable: *immutable,
                 },
                 PageStorage::Pending {
                     sequence,
@@ -481,6 +652,9 @@ struct TerrsvusionLayer {
 
 pub struct TerrsvusionKvCache {
     layers: Vec<TerrsvusionLayer>,
+    kv_heads: i64,
+    head_dim: i64,
+    query_heads: i64,
     sequence_tokens: usize,
     _cold_directory: tempfile::TempDir,
     exact_cold: ColdStore,
@@ -534,6 +708,12 @@ pub struct TerrsvusionKvCache {
     /// Explicit transaction mode for exact multi-token target verification.
     /// It is never inferred from tensor length because prefill is multi-token.
     multitoken_verification: bool,
+    prefix_cold: Option<ColdStore>,
+    applied_mass_tolerance: Option<f64>,
+    prefix_copied_bytes: u64,
+    record_step_logits: bool,
+    step_logits: Vec<Vec<f32>>,
+    suffix_against_committed: bool,
 }
 
 impl TerrsvusionKvCache {
@@ -560,28 +740,55 @@ impl TerrsvusionKvCache {
     }
 
     pub fn try_new_with_storage_frame_tokens(storage_frame_tokens: usize) -> Result<Self> {
+        Self::try_new_with_geometry(storage_frame_tokens, 24, 2, 16, 128)
+    }
+
+    fn try_new_with_geometry(
+        storage_frame_tokens: usize,
+        n_layers: usize,
+        kv_heads: i64,
+        query_heads: i64,
+        head_dim: i64,
+    ) -> Result<Self> {
         ensure!(
             (16..=512).contains(&storage_frame_tokens) && storage_frame_tokens.is_power_of_two(),
             "storage_frame_tokens debe ser potencia de dos entre 16 y 512"
+        );
+        ensure!(
+            n_layers > 0
+                && kv_heads > 0
+                && query_heads > 0
+                && head_dim > 0
+                && query_heads % kv_heads == 0,
+            "geometría KV Terrsvusion inválida"
         );
         let cold_directory = tempfile::tempdir().context("directorio KV frío")?;
         let exact_cold = ColdStore::create(cold_directory.path().join("pages-exact.kv"), 0)
             .context("almacén BF16 exacto frío")?;
         let conversion = Self::conversion_worker(0)?;
+        let axis_dim = usize::try_from(kv_heads * head_dim).context("dimensión de eje")?;
+        let axis_heads = usize::try_from(kv_heads).context("cabezas KV")?;
         Ok(Self {
-            layers: (0..24)
+            layers: (0..n_layers)
                 .map(|_| TerrsvusionLayer {
                     pages: Vec::new(),
                     tail: None,
                     prefill_hot: None,
                 })
                 .collect(),
+            kv_heads,
+            head_dim,
+            query_heads,
             sequence_tokens: 0,
             _cold_directory: cold_directory,
             exact_cold,
             conversion,
             storage_frame_tokens,
-            parallel_axis: ParallelContextAxis::new(256, AxisPolicy::default())?,
+            parallel_axis: ParallelContextAxis::new_partitioned(
+                axis_dim,
+                axis_heads,
+                AxisPolicy::default(),
+            )?,
             parallel_query_events: 0,
             parallel_dimensional_views: 0,
             parallel_view_tokens: 0,
@@ -624,7 +831,84 @@ impl TerrsvusionKvCache {
             exact_oracle_enabled: false,
             shadow_metrics: None,
             multitoken_verification: false,
+            prefix_cold: None,
+            applied_mass_tolerance: None,
+            prefix_copied_bytes: 0,
+            record_step_logits: false,
+            step_logits: Vec::new(),
+            suffix_against_committed: false,
         })
+    }
+
+    fn cold_store(&mut self, immutable: bool) -> Result<&mut ColdStore> {
+        if immutable {
+            self.prefix_cold
+                .as_mut()
+                .context("página inmutable sin almacén de prefijo")
+        } else {
+            Ok(&mut self.exact_cold)
+        }
+    }
+
+    fn read_cold_key(&mut self, exact_id: u64, immutable: bool) -> Result<Vec<u8>> {
+        self.cold_store(immutable)?
+            .read_key(exact_id)
+            .map_err(anyhow::Error::from)
+    }
+
+    fn read_cold_value(&mut self, exact_id: u64, immutable: bool) -> Result<Vec<u8>> {
+        self.cold_store(immutable)?
+            .read_value(exact_id)
+            .map_err(anyhow::Error::from)
+    }
+
+    fn read_cold_key_tokens(
+        &mut self,
+        exact_id: u64,
+        immutable: bool,
+        local: &[usize],
+    ) -> Result<Vec<u8>> {
+        self.cold_store(immutable)?
+            .read_key_tokens(exact_id, local)
+            .map_err(anyhow::Error::from)
+    }
+
+    fn read_cold_value_tokens(
+        &mut self,
+        exact_id: u64,
+        immutable: bool,
+        local: &[usize],
+    ) -> Result<Vec<u8>> {
+        self.cold_store(immutable)?
+            .read_value_tokens(exact_id, local)
+            .map_err(anyhow::Error::from)
+    }
+
+    fn assemble_committed_layer(&mut self, layer_index: usize) -> Result<(Tensor, Tensor)> {
+        let pages = self.layers[layer_index].pages.clone();
+        ensure!(!pages.is_empty(), "capa comprometida vacía");
+        let mut keys = Vec::with_capacity(pages.len());
+        let mut values = Vec::with_capacity(pages.len());
+        for page in &pages {
+            match &page.storage {
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => {
+                    let key = self.read_cold_key(*exact_id, *immutable)?;
+                    let value = self.read_cold_value(*exact_id, *immutable)?;
+                    keys.push(self.exact_tensor_from_bytes(&key, page.tokens)?);
+                    values.push(self.exact_tensor_from_bytes(&value, page.tokens)?);
+                }
+                PageStorage::Pending { key, value, .. } => {
+                    keys.push(key.shallow_clone());
+                    values.push(value.shallow_clone());
+                }
+            }
+        }
+        let key_refs = keys.iter().collect::<Vec<_>>();
+        let value_refs = values.iter().collect::<Vec<_>>();
+        Ok((Tensor::cat(&key_refs, 2), Tensor::cat(&value_refs, 2)))
     }
 
     fn begin_multitoken_verification(&mut self) -> Result<()> {
@@ -706,11 +990,14 @@ impl TerrsvusionKvCache {
                 for head in 0..2 {
                     for page in &pages {
                         match &page.storage {
-                            PageStorage::Cold { exact_id } => {
+                            PageStorage::Cold {
+                                exact_id,
+                                immutable,
+                            } => {
                                 let bytes = if values {
-                                    self.exact_cold.read_value(*exact_id)?
+                                    self.read_cold_value(*exact_id, *immutable)?
                                 } else {
-                                    self.exact_cold.read_key(*exact_id)?
+                                    self.read_cold_key(*exact_id, *immutable)?
                                 };
                                 let head_bytes = page.tokens * 128 * 2;
                                 let start = head * head_bytes;
@@ -772,7 +1059,7 @@ impl TerrsvusionKvCache {
                     .iter()
                     .map(|page| {
                         let exact_id = match page.storage {
-                            PageStorage::Cold { exact_id } => exact_id,
+                            PageStorage::Cold { exact_id, .. } => exact_id,
                             PageStorage::Pending { .. } => {
                                 bail!("prefijo persistente contiene una página pendiente")
                             }
@@ -844,6 +1131,28 @@ impl TerrsvusionKvCache {
         model_identity: &str,
         storage_frame_tokens: usize,
     ) -> Result<Option<Self>> {
+        Self::restore_prefix_geometry(
+            cache_root,
+            cache_key,
+            model_identity,
+            storage_frame_tokens,
+            24,
+            2,
+            16,
+            128,
+        )
+    }
+
+    fn restore_prefix_geometry(
+        cache_root: &Path,
+        cache_key: &str,
+        model_identity: &str,
+        storage_frame_tokens: usize,
+        n_layers: usize,
+        kv_heads: i64,
+        query_heads: i64,
+        head_dim: i64,
+    ) -> Result<Option<Self>> {
         let source = cache_root.join(cache_key);
         if !source.is_dir() {
             return Ok(None);
@@ -869,16 +1178,37 @@ impl TerrsvusionKvCache {
             "geometría de páginas distinta"
         );
         ensure!(
-            manifest.layers.len() == 24,
+            manifest.layers.len() == n_layers,
             "número de capas persistidas inválido"
         );
-        let cold_directory = tempfile::tempdir().context("copia de trabajo del prefijo")?;
-        let working_store = cold_directory.path().join("pages-exact.kv");
-        fs::copy(source.join("pages-exact.kv"), &working_store)
-            .context("restaurar KV persistente")?;
-        let mut exact_cold = ColdStore::open(&working_store, 0).context("abrir KV restaurado")?;
-        exact_cold.audit_mapped().context("auditar KV restaurado")?;
-        let page_count = exact_cold.metadata().len() as u64;
+        Self::restore_prefix_from_manifest(
+            cache_root,
+            cache_key,
+            storage_frame_tokens,
+            manifest,
+            n_layers,
+            kv_heads,
+            query_heads,
+            head_dim,
+        )
+    }
+
+    fn restore_prefix_from_manifest(
+        cache_root: &Path,
+        cache_key: &str,
+        storage_frame_tokens: usize,
+        manifest: PersistentPrefixManifest,
+        n_layers: usize,
+        kv_heads: i64,
+        query_heads: i64,
+        head_dim: i64,
+    ) -> Result<Option<Self>> {
+        let source = cache_root.join(cache_key);
+        let mut prefix_cold = ColdStore::open_read_only(source.join("pages-exact.kv"), 0)
+            .context("abrir KV persistente inmutable")?;
+        prefix_cold
+            .audit_mapped()
+            .context("auditar KV persistente inmutable")?;
         let layers = manifest
             .layers
             .into_iter()
@@ -891,6 +1221,7 @@ impl TerrsvusionKvCache {
                         certificate: page.certificate,
                         storage: PageStorage::Cold {
                             exact_id: page.exact_id,
+                            immutable: true,
                         },
                     })
                     .collect(),
@@ -898,60 +1229,56 @@ impl TerrsvusionKvCache {
                 prefill_hot: None,
             })
             .collect();
-        let mut cache = Self::try_new_with_storage_frame_tokens(storage_frame_tokens)?;
+        let mut cache = Self::try_new_with_geometry(
+            storage_frame_tokens,
+            n_layers,
+            kv_heads,
+            query_heads,
+            head_dim,
+        )?;
         cache.layers = layers;
         cache.sequence_tokens = manifest.prefix_tokens;
-        cache._cold_directory = cold_directory;
-        cache.exact_cold = exact_cold;
-        cache.conversion = Self::conversion_worker(page_count)?;
+        cache.prefix_cold = Some(prefix_cold);
+        cache.prefix_copied_bytes = 0;
+        cache.suffix_against_committed = true;
+        cache.conversion = Self::conversion_worker(0)?;
         cache.parallel_axis = manifest.parallel_axis;
         Ok(Some(cache))
     }
 
+    #[allow(dead_code)]
     fn hydrate_prefill_hot(&mut self) -> Result<()> {
-        for layer in &mut self.layers {
-            let mut keys = Vec::with_capacity(layer.pages.len());
-            let mut values = Vec::with_capacity(layer.pages.len());
-            for page in &layer.pages {
-                let exact_id = match page.storage {
-                    PageStorage::Cold { exact_id } => exact_id,
-                    PageStorage::Pending { .. } => bail!("hidratación encontró página pendiente"),
-                };
-                let key = self
-                    .exact_cold
-                    .read_key(exact_id)
-                    .with_context(|| format!("hidratar K de prefijo {exact_id}"))?;
-                let value = self
-                    .exact_cold
-                    .read_value(exact_id)
-                    .with_context(|| format!("hidratar V de prefijo {exact_id}"))?;
-                keys.push(Self::exact_tensor_from_bytes(&key, page.tokens)?);
-                values.push(Self::exact_tensor_from_bytes(&value, page.tokens)?);
-            }
-            ensure!(!keys.is_empty(), "capa de prefijo persistente vacía");
-            let key_refs = keys.iter().collect::<Vec<_>>();
-            let value_refs = values.iter().collect::<Vec<_>>();
-            layer.prefill_hot = Some((Tensor::cat(&key_refs, 2), Tensor::cat(&value_refs, 2)));
+        for layer_index in 0..self.layers.len() {
+            self.layers[layer_index].prefill_hot =
+                Some(self.assemble_committed_layer(layer_index)?);
         }
         Ok(())
     }
 
     fn observe_parallel_axis(&mut self, key: &Tensor) -> Result<()> {
         let shape = key.size();
+        let kv_heads = self.kv_heads as usize;
+        let head_dim = self.head_dim as usize;
         ensure!(
-            shape.len() == 4 && shape[0] == 1 && shape[1] == 2 && shape[3] == 128,
+            shape.len() == 4
+                && shape[0] == 1
+                && shape[1] == self.kv_heads
+                && shape[3] == self.head_dim,
             "K incompatible con el eje paralelo"
         );
         let tokens = shape[2] as usize;
         let float = key.to_kind(Kind::Float).contiguous();
-        let mut values = vec![0_f32; 2 * tokens * 128];
-        float.copy_data(&mut values, 2 * tokens * 128);
+        let count = kv_heads * tokens * head_dim;
+        let mut values = vec![0_f32; count];
+        float.copy_data(&mut values, count);
+        let axis_dim = kv_heads * head_dim;
         for token in 0..tokens {
-            let mut signal = vec![0_f32; 256];
-            for head in 0..2 {
-                let source = (head * tokens + token) * 128;
-                let target = head * 128;
-                signal[target..target + 128].copy_from_slice(&values[source..source + 128]);
+            let mut signal = vec![0_f32; axis_dim];
+            for head in 0..kv_heads {
+                let source = (head * tokens + token) * head_dim;
+                let target = head * head_dim;
+                signal[target..target + head_dim]
+                    .copy_from_slice(&values[source..source + head_dim]);
             }
             self.parallel_axis.observe(&signal)?;
         }
@@ -1084,9 +1411,9 @@ impl TerrsvusionKvCache {
         ensure!(
             key_shape.len() == 4
                 && key_shape[0] == 1
-                && key_shape[1] == 2
+                && key_shape[1] == self.kv_heads
                 && key_shape[2] > 0
-                && key_shape[3] == 128
+                && key_shape[3] == self.head_dim
                 && value.size() == key_shape,
             "geometría de certificado KV inválida"
         );
@@ -1096,6 +1423,17 @@ impl TerrsvusionKvCache {
             .to_kind(Kind::Float)
             .contiguous();
         let tokens = key_shape[2] as usize;
+        // Authoritative per-head V maxima for GQA Llama 32Q/8KV.
+        // The original MiniCPM 16Q/2KV certificates below remain
+        // byte-for-byte compatible with their existing prefix cache.
+        let mut value_abs_max_by_kv_head = vec![0.0f32; self.kv_heads as usize];
+        value_maximum.copy_data(&mut value_abs_max_by_kv_head, self.kv_heads as usize);
+        ensure!(
+            value_abs_max_by_kv_head
+                .iter()
+                .all(|v| v.is_finite() && *v >= 0.0),
+            "original BF16 V per-KV-head maxima nonfinite"
+        );
         let regions = self
             .parallel_axis
             .partition_regions(token_start, token_start + tokens)?
@@ -1152,6 +1490,7 @@ impl TerrsvusionKvCache {
         Ok(PageAttentionCertificate {
             regions,
             value_abs_max,
+            value_abs_max_by_kv_head,
         })
     }
 
@@ -1171,6 +1510,7 @@ impl TerrsvusionKvCache {
             .context("resultado de conversión sin página pendiente")?;
         page.storage = PageStorage::Cold {
             exact_id: exact.page_id,
+            immutable: false,
         };
         Ok(())
     }
@@ -1179,6 +1519,25 @@ impl TerrsvusionKvCache {
         for result in self.conversion.try_collect_ordered() {
             self.commit_conversion(result)?;
         }
+        Ok(())
+    }
+
+    fn gqa_groups(query: &Tensor, key: &Tensor) -> i64 {
+        let query_heads = query.size()[1];
+        let kv_heads = key.size()[1].max(1);
+        if query_heads % kv_heads == 0 {
+            query_heads / kv_heads
+        } else {
+            1
+        }
+    }
+
+    fn seal_and_release_prefill(&mut self) -> Result<()> {
+        self.seal_partial_storage_frames()?;
+        for layer in &mut self.layers {
+            layer.prefill_hot = None;
+        }
+        self.suffix_against_committed = true;
         Ok(())
     }
 
@@ -1250,9 +1609,9 @@ impl TerrsvusionKvCache {
             let shape = PageShape {
                 layer: layer_index,
                 token_start,
-                heads: 2,
+                heads: self.kv_heads as usize,
                 tokens,
-                dim: 128,
+                dim: self.head_dim as usize,
                 tile: 16,
             };
             let job = Bf16PageJob::owned(
@@ -1278,9 +1637,11 @@ impl TerrsvusionKvCache {
         // frames are committed in parallel. One phase barrier makes cold
         // storage authoritative before autoregressive generation.
         self.drain_conversions()?;
-        self.exact_cold
-            .audit_mapped()
-            .context("auditoría BF16 fría mapeada")?;
+        if !self.exact_cold.metadata().is_empty() {
+            self.exact_cold
+                .audit_mapped()
+                .context("auditoría BF16 fría mapeada")?;
+        }
         for layer in &mut self.layers {
             layer.prefill_hot = None;
         }
@@ -1300,7 +1661,27 @@ impl TerrsvusionKvCache {
     }
 
     pub fn exact_cold_metrics(&self) -> ColdStoreStats {
-        self.exact_cold.stats()
+        let mut stats = self.exact_cold.stats();
+        if let Some(prefix) = &self.prefix_cold {
+            let extra = prefix.stats();
+            stats.pages += extra.pages;
+            stats.committed_bytes += extra.committed_bytes;
+            stats.reads += extra.reads;
+            stats.cache_hits += extra.cache_hits;
+            stats.cache_misses += extra.cache_misses;
+            stats.evictions += extra.evictions;
+            stats.hot_pages += extra.hot_pages;
+            stats.hot_bytes += extra.hot_bytes;
+            stats.bytes_read += extra.bytes_read;
+            stats.partial_value_reads += extra.partial_value_reads;
+            stats.partial_value_payload_bytes += extra.partial_value_payload_bytes;
+            stats.partial_value_bytes_avoided += extra.partial_value_bytes_avoided;
+            stats.partial_key_reads += extra.partial_key_reads;
+            stats.partial_key_payload_bytes += extra.partial_key_payload_bytes;
+            stats.partial_key_bytes_avoided += extra.partial_key_bytes_avoided;
+            stats.cryptographic_digests_verified += extra.cryptographic_digests_verified;
+        }
+        stats
     }
 
     pub fn resident_bytes(&self) -> usize {
@@ -1376,14 +1757,205 @@ impl TerrsvusionKvCache {
                 .sum::<usize>()
     }
 
-    fn exact_tensor_from_bytes(bytes: &[u8], tokens: usize) -> Result<Tensor> {
-        let expected = 2 * tokens * 128 * 2;
+    fn exact_tensor_from_bytes(&self, bytes: &[u8], tokens: usize) -> Result<Tensor> {
+        let expected = self.kv_heads as usize * tokens * self.head_dim as usize * 2;
         ensure!(bytes.len() == expected, "geometría BF16 fría inválida");
         Ok(Tensor::from_data_size(
             bytes,
-            &[1, 2, tokens as i64, 128],
+            &[1, self.kv_heads, tokens as i64, self.head_dim],
             Kind::BFloat16,
         ))
+    }
+
+    /// Optional 32Q/8KV Llama exact-score mass filter for BF16 V.
+    ///
+    /// Previously Llama always assembled *every* V from ColdStore,
+    /// including requests that opted into applied_mass_tolerance. This
+    /// method reads full exact K (needed for score mass) but retrieves
+    /// only the certified selected BF16 V token indices. The original
+    /// ColdStore is never rewritten or quantized, and with no proof
+    /// (missing old-prefix metadata, diffuse scores, NaN, zero tolerance)
+    /// returns None so the caller executes the ORIGINAL full SDPA.
+    ///
+    /// The error bound is a per-head mathematical softmax-mass bound
+    /// computed from actual BF16 Q/K operands in FP32 and conservative
+    /// per-KV-head |V| maxima; it does NOT prove token/logit identity.
+    fn llama_certified_value_attention(
+        &mut self,
+        layer_index: usize,
+        query: &Tensor,
+        pages: &[TerrsvusionPage],
+        tail: Option<&(Tensor, Tensor)>,
+        tolerance: f64,
+    ) -> Result<Option<Tensor>> {
+        ensure!(
+            layer_index < self.layers.len(),
+            "Llama ColdStore layer out of range"
+        );
+        if !(tolerance.is_finite() && tolerance > 0.0 && tolerance <= 1e-2) {
+            return Ok(None); // only explicit positive, bounded epsilon
+        }
+        if self.query_heads != 32
+            || self.kv_heads != 8
+            || self.head_dim != 128
+            || query.size() != [1, 32, 1, 128]
+        {
+            return Ok(None); // never reinterpret unrelated geometry
+        }
+        let mut max_per_kv = [0.0f64; 8];
+        for page in pages {
+            // A legacy v1 prefix lacked complete 8-KV-head bounds:
+            // its first-two-head certificate is NEVER sufficient
+            // authority for Llama omission. Restore old full attention.
+            if page.certificate.value_abs_max_by_kv_head.len() != 8 {
+                return Ok(None);
+            }
+            for (dst, &maxval) in max_per_kv
+                .iter_mut()
+                .zip(&page.certificate.value_abs_max_by_kv_head)
+            {
+                if !(maxval.is_finite() && maxval >= 0.0) {
+                    return Ok(None);
+                }
+                *dst = dst.max(f64::from(maxval));
+            }
+        }
+        if let Some((key, value)) = tail {
+            if key.size() != value.size() || key.size()[1] != 8 {
+                return Ok(None);
+            }
+            let maxima = value
+                .abs()
+                .amax([2_i64, 3_i64], false)
+                .to_kind(Kind::Float)
+                .contiguous();
+            let mut bf16_max = vec![0.0f32; 8];
+            maxima.copy_data(&mut bf16_max, 8);
+            for (dst, &maxval) in max_per_kv.iter_mut().zip(&bf16_max) {
+                if !(maxval.is_finite() && maxval >= 0.0) {
+                    return Ok(None);
+                }
+                *dst = dst.max(f64::from(maxval));
+            }
+        }
+        let mut keys = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
+        let mut cursor = 0usize;
+        for page in pages {
+            ensure!(
+                page.token_start == cursor && page.tokens > 0,
+                "Llama canonical ColdStore K page ordering invalid"
+            );
+            let key = match &page.storage {
+                PageStorage::Pending { key, .. } => key.shallow_clone(),
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => {
+                    let bf16 = self.read_cold_key(*exact_id, *immutable)?;
+                    self.exact_tensor_from_bytes(&bf16, page.tokens)?
+                }
+            };
+            keys.push(key);
+            cursor += page.tokens;
+        }
+        if let Some((k, _)) = tail {
+            keys.push(k.shallow_clone());
+            cursor += k.size()[2] as usize;
+        }
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        ensure!(
+            cursor == self.sequence_tokens + 1,
+            "Llama exact-score audit does not cover complete BF16 K history"
+        );
+        let key_refs = keys.iter().collect::<Vec<_>>();
+        let full_key = Tensor::cat(&key_refs, 2);
+        let gqa = self.query_heads / self.kv_heads;
+        let queries = query.to_kind(Kind::Float);
+        let repeated = full_key
+            .repeat_interleave_self_int(gqa, 1, None)
+            .to_kind(Kind::Float);
+        let scores = (queries.matmul(&repeated.transpose(-2, -1)) / (self.head_dim as f64).sqrt())
+            .to_kind(Kind::Float)
+            .contiguous();
+        let mut scores_flat = vec![0.0f32; 32 * cursor];
+        scores.copy_data(&mut scores_flat, 32 * cursor);
+        if scores_flat.iter().any(|value| !value.is_finite()) {
+            return Ok(None); // nonfinite attention never certifies omission
+        }
+        let scores_by_head = scores_flat
+            .chunks_exact(cursor)
+            .map(|head| {
+                head.iter()
+                    .map(|value| f64::from(*value))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let max_per_query = (0..32)
+            .map(|head| max_per_kv[head / (32 / 8)])
+            .collect::<Vec<_>>();
+        // Slack for numerical differences between FP32 score planning
+        // and LibTorch BF16 SDPA. Not a guarantee of arbitrary GPU
+        // backend parity; keep original path for epsilon=0.
+        let allowed = tolerance * 0.5;
+        let (chosen, bounds) = select_by_exact_mass(&scores_by_head, &max_per_query, allowed)?;
+        ensure!(
+            certified(&bounds, allowed),
+            "Llama exact-mass certificate failed under conservative threshold"
+        );
+        if chosen.len() == cursor || chosen.is_empty() {
+            // No BF16 V was physically avoided: record NO omission and
+            // preserve the original dense SDPA result bit-for-bit.
+            return Ok(None);
+        }
+        let selection = chosen.iter().copied().collect::<BTreeSet<_>>();
+        let key_indices = Tensor::from_slice(&chosen.iter().map(|&x| x as i64).collect::<Vec<_>>());
+        let selected_key = full_key.index_select(2, &key_indices);
+        let mut values = Vec::with_capacity(pages.len() + usize::from(tail.is_some()));
+        let mut offset = 0usize;
+        for page in pages {
+            let positions = selection
+                .range(offset..offset + page.tokens)
+                .map(|position| position - offset)
+                .collect::<Vec<_>>();
+            if !positions.is_empty() {
+                match &page.storage {
+                    PageStorage::Pending { value, .. } => {
+                        values.push(select_token_indices(value, &positions));
+                    }
+                    PageStorage::Cold {
+                        exact_id,
+                        immutable,
+                    } => {
+                        // Partial-I/O, token hashes and BF16 bytes are
+                        // verified by the original ColdStore implementation.
+                        let bf16 =
+                            self.read_cold_value_tokens(*exact_id, *immutable, &positions)?;
+                        values.push(self.exact_tensor_from_bytes(&bf16, positions.len())?);
+                    }
+                }
+            }
+            offset += page.tokens;
+        }
+        if let Some((_, tail_value)) = tail {
+            let n = tail_value.size()[2] as usize;
+            let positions = selection
+                .range(offset..offset + n)
+                .map(|position| position - offset)
+                .collect::<Vec<_>>();
+            if !positions.is_empty() {
+                values.push(select_token_indices(tail_value, &positions));
+            }
+        }
+        ensure!(!values.is_empty(), "Llama certified V selection empty");
+        let output = Self::scaled_attention(query, &[selected_key], &values, self.sequence_tokens);
+        self.exact_k_tokens_scanned += cursor;
+        self.exact_v_tokens_materialized += chosen.len();
+        self.exact_mass_max_bound = self
+            .exact_mass_max_bound
+            .max(bounds.into_iter().fold(0.0f64, f64::max));
+        Ok(Some(output))
     }
 
     fn exact_mass_attention(
@@ -1543,14 +2115,16 @@ impl TerrsvusionKvCache {
                     ensure!(!local.is_empty(), "región jerárquica vacía");
                     let key = match &page.storage {
                         PageStorage::Pending { key, .. } => select_token_indices(key, &local),
-                        PageStorage::Cold { exact_id } => {
+                        PageStorage::Cold {
+                            exact_id,
+                            immutable,
+                        } => {
                             let bytes = self
-                                .exact_cold
-                                .read_key_tokens(*exact_id, &local)
+                                .read_cold_key_tokens(*exact_id, *immutable, &local)
                                 .with_context(|| {
                                     format!("lectura K BF16 parcial exacta {exact_id}")
                                 })?;
-                            Self::exact_tensor_from_bytes(&bytes, local.len())?
+                            self.exact_tensor_from_bytes(&bytes, local.len())?
                         }
                     };
                     let region_tokens = local.len();
@@ -1810,13 +2384,16 @@ impl TerrsvusionKvCache {
                     value_source_tokens += page.tokens;
                     value.shallow_clone()
                 }
-                PageStorage::Cold { exact_id, .. } => {
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                    ..
+                } => {
                     let bytes = self
-                        .exact_cold
-                        .read_value_tokens(*exact_id, &local)
+                        .read_cold_value_tokens(*exact_id, *immutable, &local)
                         .with_context(|| format!("lectura V BF16 parcial exacta {exact_id}"))?;
                     value_source_tokens += local.len();
-                    Self::exact_tensor_from_bytes(&bytes, local.len())?
+                    self.exact_tensor_from_bytes(&bytes, local.len())?
                 }
             };
             value_parts.push(match &page.storage {
@@ -1904,18 +2481,19 @@ impl TerrsvusionKvCache {
                 PageStorage::Pending { key, value, .. } => {
                     (key.shallow_clone(), value.shallow_clone())
                 }
-                PageStorage::Cold { exact_id } => {
+                PageStorage::Cold {
+                    exact_id,
+                    immutable,
+                } => {
                     let key = self
-                        .exact_cold
-                        .read_key(*exact_id)
+                        .read_cold_key(*exact_id, *immutable)
                         .with_context(|| format!("lectura K BF16 completa {exact_id}"))?;
                     let value = self
-                        .exact_cold
-                        .read_value(*exact_id)
+                        .read_cold_value(*exact_id, *immutable)
                         .with_context(|| format!("lectura V BF16 completa {exact_id}"))?;
                     (
-                        Self::exact_tensor_from_bytes(&key, page.tokens)?,
-                        Self::exact_tensor_from_bytes(&value, page.tokens)?,
+                        self.exact_tensor_from_bytes(&key, page.tokens)?,
+                        self.exact_tensor_from_bytes(&value, page.tokens)?,
                     )
                 }
             };
@@ -1941,12 +2519,13 @@ impl TerrsvusionKvCache {
         for query_index in 0..query_tokens {
             let attended_tokens = self.sequence_tokens + query_index + 1;
             let query_token = query.narrow(2, query_index as i64, 1);
+            let groups = Self::gqa_groups(query, &full_key);
             let key = full_key
                 .narrow(2, 0, attended_tokens as i64)
-                .repeat_interleave_self_int(8, 1, None);
+                .repeat_interleave_self_int(groups, 1, None);
             let value = full_value
                 .narrow(2, 0, attended_tokens as i64)
-                .repeat_interleave_self_int(8, 1, None);
+                .repeat_interleave_self_int(groups, 1, None);
             let mask = Tensor::zeros(
                 [1, 1, 1, attended_tokens as i64],
                 (query.kind(), query.device()),
@@ -1977,8 +2556,9 @@ impl TerrsvusionKvCache {
         let key = Tensor::cat(&key_refs, 2);
         let value = Tensor::cat(&value_refs, 2);
         let attended_tokens = key.size()[2] as usize;
-        let key = key.repeat_interleave_self_int(8, 1, None);
-        let value = value.repeat_interleave_self_int(8, 1, None);
+        let groups = Self::gqa_groups(query, &key);
+        let key = key.repeat_interleave_self_int(groups, 1, None);
+        let value = value.repeat_interleave_self_int(groups, 1, None);
         let query_tokens = query.size()[2] as usize;
         let mut mask_values = vec![0_f32; query_tokens * attended_tokens];
         if query_tokens > 1 {
@@ -2618,6 +3198,13 @@ impl AttentionCache for TerrsvusionKvCache {
             .exact_cold
             .metadata()
             .iter()
+            .chain(
+                self.prefix_cold
+                    .as_ref()
+                    .map(ColdStore::metadata)
+                    .into_iter()
+                    .flatten(),
+            )
             .map(|page| (page.key_len + page.value_len) as usize)
             .sum();
         let tails: usize = self
@@ -2671,7 +3258,9 @@ impl AttentionCache for TerrsvusionKvCache {
         if layer_index == 0 {
             let started = std::time::Instant::now();
             self.observe_parallel_axis(new_key)?;
-            self.autocatalogue_parallel_axis(query)?;
+            if self.query_heads == 16 && self.kv_heads == 2 {
+                self.autocatalogue_parallel_axis(query)?;
+            }
             if is_prefill {
                 self.prefill_axis_nanos = self
                     .prefill_axis_nanos
@@ -2691,26 +3280,57 @@ impl AttentionCache for TerrsvusionKvCache {
         let prefill_hot = if is_prefill {
             let started = std::time::Instant::now();
             let previous = self.layers[layer_index].prefill_hot.take();
-            let combined = match previous {
-                Some((key, value)) => (
-                    Tensor::cat(&[&key, new_key], 2),
-                    Tensor::cat(&[&value, new_value], 2),
-                ),
-                None => (new_key.shallow_clone(), new_value.shallow_clone()),
-            };
-            self.layers[layer_index].prefill_hot =
-                Some((combined.0.shallow_clone(), combined.1.shallow_clone()));
-            let working_bytes = self
-                .layers
-                .iter()
-                .filter_map(|layer| layer.prefill_hot.as_ref())
-                .map(|(key, value)| (key.numel() + value.numel()) * 2)
-                .sum::<usize>();
-            self.prefill_working_peak_bytes = self.prefill_working_peak_bytes.max(working_bytes);
-            self.prefill_hot_concat_nanos = self
-                .prefill_hot_concat_nanos
-                .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
-            Some(combined)
+            if self.suffix_against_committed {
+                let (history_key, history_value) = self.assemble_committed_layer(layer_index)?;
+                let suffix = match previous {
+                    Some((key, value)) => (
+                        Tensor::cat(&[&key, new_key], 2),
+                        Tensor::cat(&[&value, new_value], 2),
+                    ),
+                    None => (new_key.shallow_clone(), new_value.shallow_clone()),
+                };
+                let combined = (
+                    Tensor::cat(&[&history_key, &suffix.0], 2),
+                    Tensor::cat(&[&history_value, &suffix.1], 2),
+                );
+                self.layers[layer_index].prefill_hot =
+                    Some((suffix.0.shallow_clone(), suffix.1.shallow_clone()));
+                let working_bytes = (combined.0.numel() + combined.1.numel()) * 2
+                    + self
+                        .layers
+                        .iter()
+                        .filter_map(|layer| layer.prefill_hot.as_ref())
+                        .map(|(key, value)| (key.numel() + value.numel()) * 2)
+                        .sum::<usize>();
+                self.prefill_working_peak_bytes =
+                    self.prefill_working_peak_bytes.max(working_bytes);
+                self.prefill_hot_concat_nanos = self
+                    .prefill_hot_concat_nanos
+                    .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+                Some(combined)
+            } else {
+                let combined = match previous {
+                    Some((key, value)) => (
+                        Tensor::cat(&[&key, new_key], 2),
+                        Tensor::cat(&[&value, new_value], 2),
+                    ),
+                    None => (new_key.shallow_clone(), new_value.shallow_clone()),
+                };
+                self.layers[layer_index].prefill_hot =
+                    Some((combined.0.shallow_clone(), combined.1.shallow_clone()));
+                let working_bytes = self
+                    .layers
+                    .iter()
+                    .filter_map(|layer| layer.prefill_hot.as_ref())
+                    .map(|(key, value)| (key.numel() + value.numel()) * 2)
+                    .sum::<usize>();
+                self.prefill_working_peak_bytes =
+                    self.prefill_working_peak_bytes.max(working_bytes);
+                self.prefill_hot_concat_nanos = self
+                    .prefill_hot_concat_nanos
+                    .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+                Some(combined)
+            }
         } else {
             None
         };
@@ -2767,9 +3387,9 @@ impl AttentionCache for TerrsvusionKvCache {
             let shape = PageShape {
                 layer: layer_index,
                 token_start,
-                heads: 2,
+                heads: self.kv_heads as usize,
                 tokens: storage_frame_tokens,
-                dim: 128,
+                dim: self.head_dim as usize,
                 tile: 16,
             };
             let handoff_started = std::time::Instant::now();
@@ -2834,7 +3454,44 @@ impl AttentionCache for TerrsvusionKvCache {
                 self.sequence_tokens,
             ));
         }
-        self.exact_mass_attention(layer_index, query, &pages, tail.as_ref(), 1e-6)
+        if self.query_heads != 16 || self.kv_heads != 2 {
+            if let Some(epsilon) = self.applied_mass_tolerance
+                && let Some(selected) = self.llama_certified_value_attention(
+                    layer_index,
+                    query,
+                    &pages,
+                    tail.as_ref(),
+                    epsilon,
+                )?
+            {
+                return Ok(selected);
+            }
+            let mut keys = Vec::new();
+            let mut values = Vec::new();
+            if !self.layers[layer_index].pages.is_empty() {
+                let (key, value) = self.assemble_committed_layer(layer_index)?;
+                keys.push(key);
+                values.push(value);
+            }
+            if let Some((tail_key, tail_value)) = tail.as_ref() {
+                keys.push(tail_key.shallow_clone());
+                values.push(tail_value.shallow_clone());
+            }
+            ensure!(!keys.is_empty(), "KV Llama sin páginas ni cola");
+            return Ok(Self::scaled_attention(
+                query,
+                &keys,
+                &values,
+                self.sequence_tokens,
+            ));
+        }
+        self.exact_mass_attention(
+            layer_index,
+            query,
+            &pages,
+            tail.as_ref(),
+            self.applied_mass_tolerance.unwrap_or(1e-6),
+        )
     }
 
     fn finish_step(&mut self, added_tokens: usize) {
@@ -2844,19 +3501,46 @@ impl AttentionCache for TerrsvusionKvCache {
 
 impl MiniCpmModel {
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
-        let weights = WeightFile::open(model_weight_file(model_dir)?)?;
-        let embedding = weights.require_bf16("model.embed_tokens.weight", &[130_560, 1_536])?;
-        let final_norm = weights.require_bf16("model.norm.weight", &[1_536])?;
-        let lm_head = weights.require_bf16("lm_head.weight", &[130_560, 1_536])?;
-        let layers = (0..24)
-            .map(|layer| MiniCpmLayer::load(&weights, layer))
+        let spec = ModelSpec::inspect(&model_dir)?;
+        spec.ensure_torch_runtime_compatible()?;
+        let geometry = DecoderGeometry::from_spec(&spec)?;
+        let weights = WeightArchive::open_dir(&model_dir)?;
+        let embedding = weights.require_bf16(
+            "model.embed_tokens.weight",
+            &[geometry.vocab, geometry.hidden],
+        )?;
+        let final_norm = weights.require_bf16("model.norm.weight", &[geometry.hidden])?;
+        let lm_head = weights.require_bf16("lm_head.weight", &[geometry.vocab, geometry.hidden])?;
+        let layers = (0..geometry.n_layers)
+            .map(|layer| MiniCpmLayer::load(&weights, layer, &geometry))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             embedding,
             layers,
             final_norm,
             lm_head,
+            rms_eps: geometry.rms_eps,
+            eos: geometry.eos,
+            chat: geometry.chat,
+            query_heads: geometry.query_heads,
+            kv_heads: geometry.kv_heads,
+            head_dim: geometry.head_dim,
+            streaming_prefill: geometry.chat == ChatTemplateFamily::Llama3,
         })
+    }
+
+    fn is_eos(&self, token: i64) -> bool {
+        self.eos.iter().any(|&id| id == token)
+    }
+
+    fn terrsvusion_cache(&self, storage_frame_tokens: usize) -> Result<TerrsvusionKvCache> {
+        TerrsvusionKvCache::try_new_with_geometry(
+            storage_frame_tokens,
+            self.layers.len(),
+            self.kv_heads,
+            self.query_heads,
+            self.head_dim,
+        )
     }
 
     pub fn forward_with_cache<C: AttentionCache>(
@@ -2872,7 +3556,7 @@ impl MiniCpmModel {
             hidden = layer.forward_cached(&hidden, layer_index, past_tokens, cache)?;
         }
         cache.finish_step(token_ids.len());
-        let hidden = MiniCpmLayer::rms_norm(&hidden, &self.final_norm);
+        let hidden = MiniCpmLayer::rms_norm(&hidden, &self.final_norm, self.rms_eps);
         Ok(hidden.matmul(&self.lm_head.transpose(0, 1)))
     }
 }
@@ -2883,7 +3567,7 @@ pub struct TorchChatMessage {
     pub content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 pub struct TorchGeneration {
     pub content: String,
     pub token_ids: Vec<u32>,
@@ -2978,6 +3662,12 @@ pub struct TorchGeneration {
     pub prefix_cache_tokens: usize,
     pub prefix_cache_lookup_seconds: f64,
     pub prefix_cache_hydrate_seconds: f64,
+    pub prefix_cache_copied_bytes: u64,
+    pub prefix_immutable: bool,
+    pub certified_v_tokens_omitted: usize,
+    pub applied_mass_tolerance: Option<f64>,
+    #[serde(skip_serializing)]
+    pub step_logits: Vec<Vec<f32>>,
     pub kv_sha256: String,
     pub speculative_enabled: bool,
     pub speculative_rounds: usize,
@@ -2987,6 +3677,22 @@ pub struct TorchGeneration {
     pub speculative_bypassed_tokens: usize,
     pub speculative_target_forward_calls: usize,
     pub speculative_maximum_k: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_parity: Option<NativeInferenceParity>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppliedOmissionReport {
+    pub tolerance: f64,
+    pub exact_token_parity: bool,
+    pub max_abs_logit_difference: f64,
+    pub logit_steps_compared: usize,
+    pub certified_v_tokens_omitted: usize,
+    pub hierarchy_k_tokens_avoided: usize,
+    pub canonical_token_ids: Vec<u32>,
+    pub applied_token_ids: Vec<u32>,
+    pub canonical: TorchGeneration,
+    pub applied: TorchGeneration,
 }
 
 #[derive(Debug, Serialize)]
@@ -3001,6 +3707,101 @@ pub struct DenseGeneration {
     pub decode_seconds: f64,
     pub kv_bf16_bytes: usize,
     pub kv_sha256: String,
+    #[serde(skip_serializing)]
+    pub step_logits: Vec<Vec<f32>>,
+}
+
+impl From<DenseGeneration> for TorchGeneration {
+    fn from(dense: DenseGeneration) -> Self {
+        Self {
+            content: dense.content,
+            token_ids: dense.token_ids,
+            prompt_tokens: dense.prompt_tokens,
+            completion_tokens: dense.completion_tokens,
+            kv_tokens: dense.kv_tokens,
+            latency_seconds: dense.latency_seconds,
+            prefill_seconds: dense.prefill_seconds,
+            decode_seconds: dense.decode_seconds,
+            kv_physical_bytes: dense.kv_bf16_bytes,
+            kv_bf16_reference_bytes: dense.kv_bf16_bytes,
+            kv_sha256: dense.kv_sha256,
+            step_logits: dense.step_logits,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct NativeStepDivergence {
+    pub step: usize,
+    pub dense_argmax: u32,
+    pub terrsvusion_argmax: u32,
+    pub dense_logit_at_dense_argmax: f32,
+    pub terrsvusion_logit_at_dense_argmax: f32,
+    pub dense_logit_at_terrsvusion_argmax: f32,
+    pub terrsvusion_logit_at_terrsvusion_argmax: f32,
+    pub linf: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NativeInferenceParity {
+    pub prompt_tokens: usize,
+    pub exact_token_parity: bool,
+    pub first_token_mismatch: Option<usize>,
+    pub max_abs_logit_difference: f64,
+    pub logit_steps_compared: usize,
+    pub first_logit_step_above_1e3: Option<usize>,
+    pub kv_sha256_equal: bool,
+    pub dense_kv_sha256: String,
+    pub terrsvusion_kv_sha256: String,
+    pub dense_tokens: Vec<u32>,
+    pub terrsvusion_tokens: Vec<u32>,
+    pub dense_text: String,
+    pub terrsvusion_text: String,
+    pub dense_prefill_seconds: f64,
+    pub terrsvusion_prefill_seconds: f64,
+    pub certified_v_tokens_omitted: usize,
+    pub terrsvusion_kv_resident_bytes: usize,
+    pub dense_kv_bf16_bytes: usize,
+    pub terrsvusion_kv_bf16_reference_bytes: usize,
+    pub prompt_authority: &'static str,
+    pub divergence: Option<NativeStepDivergence>,
+}
+
+fn capture_last_logits(last: &Tensor) -> Vec<f32> {
+    let flat = last.to_kind(Kind::Float).contiguous();
+    let mut values = vec![0.0_f32; flat.numel()];
+    let count = values.len();
+    flat.copy_data(&mut values, count);
+    values
+}
+
+fn argmax_logit(logits: &[f32]) -> u32 {
+    logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index as u32)
+        .unwrap_or(0)
+}
+
+fn first_step_divergence(step: usize, dense: &[f32], terrsvusion: &[f32]) -> NativeStepDivergence {
+    let dense_argmax = argmax_logit(dense);
+    let terrsvusion_argmax = argmax_logit(terrsvusion);
+    let mut linf = 0.0_f64;
+    for (left, right) in dense.iter().zip(terrsvusion) {
+        linf = linf.max((*left as f64 - *right as f64).abs());
+    }
+    NativeStepDivergence {
+        step,
+        dense_argmax,
+        terrsvusion_argmax,
+        dense_logit_at_dense_argmax: dense[dense_argmax as usize],
+        terrsvusion_logit_at_dense_argmax: terrsvusion[dense_argmax as usize],
+        dense_logit_at_terrsvusion_argmax: dense[terrsvusion_argmax as usize],
+        terrsvusion_logit_at_terrsvusion_argmax: terrsvusion[terrsvusion_argmax as usize],
+        linf,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -3066,11 +3867,25 @@ pub struct TorchModelRuntime {
     model_identity: String,
 }
 
-#[derive(Clone, Copy, Default)]
+/// Canonical prefix cache stores immutable original BF16 K/V keyed
+/// only by model/tokens/frame geometry, not by attention epsilon.
+/// An explicitly approximating decoder MUST NOT reuse or publish a
+/// prefix under the same key as an exact BF16 turn.
+fn safe_prefix_tokens_for_omission(requested: usize, applied_mass_tolerance: Option<f64>) -> usize {
+    if applied_mass_tolerance.is_some() {
+        0
+    } else {
+        requested
+    }
+}
+
+#[derive(Default)]
 struct GenerationInstrumentation {
     exact_oracle_enabled: bool,
     shadow_metrics_enabled: bool,
     prefix_tokens: usize,
+    applied_mass_tolerance: Option<f64>,
+    record_step_logits: bool,
 }
 
 impl TorchModelRuntime {
@@ -3089,9 +3904,15 @@ impl TorchModelRuntime {
     }
 
     fn load_internal(model_dir: &Path, prefix_cache_dir: Option<PathBuf>) -> Result<Self> {
-        let weight_path = model_weight_file(model_dir)?;
+        let spec = ModelSpec::inspect(model_dir)?;
+        spec.ensure_torch_runtime_compatible()?;
         let tokenizer_path = model_dir.join("tokenizer.json");
-        let model_identity = Self::runtime_identity(&weight_path, &tokenizer_path)?;
+        let model_identity = if spec.legacy_bf16_geometry_match {
+            let weight_path = model_weight_file(model_dir)?;
+            Self::runtime_identity(&weight_path, &tokenizer_path)?
+        } else {
+            Self::runtime_identity_from_shards(model_dir, &spec, &tokenizer_path)?
+        };
         let model = MiniCpmModel::load(model_dir)?;
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|error| anyhow::anyhow!("tokenizer {}: {error}", tokenizer_path.display()))?;
@@ -3120,6 +3941,37 @@ impl TorchModelRuntime {
         Ok(Self::hex_digest(digest.finalize().as_slice()))
     }
 
+    fn runtime_identity_from_shards(
+        model_dir: &Path,
+        spec: &ModelSpec,
+        tokenizer_path: &Path,
+    ) -> Result<String> {
+        let mut digest = Sha256::new();
+        digest.update(b"terrsvusion-runtime-id-shards-v1");
+        for relative in ["config.json", "tokenizer.json"] {
+            let path = if relative == "tokenizer.json" {
+                tokenizer_path.to_path_buf()
+            } else {
+                model_dir.join(relative)
+            };
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("abrir identidad runtime {}", path.display()))?;
+            digest.update(&(bytes.len() as u64).to_le_bytes());
+            digest.update(&bytes);
+        }
+        for shard in &spec.weight_shards {
+            let path = model_dir.join(shard);
+            digest.update(shard.as_bytes());
+            digest.update(
+                path.metadata()
+                    .with_context(|| format!("metadatos {}", path.display()))?
+                    .len()
+                    .to_le_bytes(),
+            );
+        }
+        Ok(Self::hex_digest(digest.finalize().as_slice()))
+    }
+
     fn hex_digest(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -3136,6 +3988,13 @@ impl TorchModelRuntime {
     }
 
     pub fn render_messages(messages: &[TorchChatMessage]) -> Result<String> {
+        Self::render_messages_with_thinking(messages, false)
+    }
+
+    pub fn render_messages_with_thinking(
+        messages: &[TorchChatMessage],
+        enable_thinking: bool,
+    ) -> Result<String> {
         ensure!(!messages.is_empty(), "messages no puede estar vacío");
         let mut prompt = String::from("<s>");
         for message in messages {
@@ -3151,7 +4010,54 @@ impl TorchModelRuntime {
             prompt.push_str("<|im_end|>\n");
         }
         prompt.push_str("<|im_start|>assistant\n");
+        // MiniCPM5's chat template: enable_thinking=false seeds an empty
+        // think block so decode starts at the visible answer, not a CoT.
+        if enable_thinking {
+            prompt.push_str("<think>\n");
+        } else {
+            prompt.push_str("<think>\n\n</think>\n\n");
+        }
         Ok(prompt)
+    }
+
+    fn render_llama3_messages(
+        messages: &[TorchChatMessage],
+        add_generation_prompt: bool,
+    ) -> Result<String> {
+        ensure!(!messages.is_empty(), "messages no puede estar vacío");
+        let mut prompt = String::from("<|begin_of_text|>");
+        for message in messages {
+            ensure!(
+                matches!(message.role.as_str(), "system" | "user" | "assistant"),
+                "rol no soportado: {}",
+                message.role
+            );
+            prompt.push_str("<|start_header_id|>");
+            prompt.push_str(&message.role);
+            prompt.push_str("<|end_header_id|>\n\n");
+            prompt.push_str(&message.content);
+            prompt.push_str("<|eot_id|>");
+        }
+        if add_generation_prompt {
+            prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+        }
+        Ok(prompt)
+    }
+
+    fn chat_prompt(&self, messages: &[TorchChatMessage], enable_thinking: bool) -> Result<String> {
+        match self.model.chat {
+            ChatTemplateFamily::MiniCpm5 => {
+                Self::render_messages_with_thinking(messages, enable_thinking)
+            }
+            ChatTemplateFamily::Llama3 => Self::render_llama3_messages(messages, true),
+        }
+    }
+
+    fn chat_prefix(&self, messages: &[TorchChatMessage]) -> Result<String> {
+        match self.model.chat {
+            ChatTemplateFamily::MiniCpm5 => Self::render_message_prefix(messages),
+            ChatTemplateFamily::Llama3 => Self::render_llama3_messages(messages, false),
+        }
     }
 
     fn render_message_prefix(messages: &[TorchChatMessage]) -> Result<String> {
@@ -3187,21 +4093,359 @@ impl TorchModelRuntime {
         messages: &[TorchChatMessage],
         max_tokens: usize,
     ) -> Result<TorchGeneration> {
-        let prompt = Self::render_messages(messages)?;
+        self.generate_messages_cancellable(messages, max_tokens, false, &AtomicBool::new(false))
+    }
+
+    const DEFAULT_CHAT_SYSTEM: &str = "Te llamas MiniCPM. Eres el asistente de Terrsvusion. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. No pidas aclaraciones si ya se entiende.";
+    const DEFAULT_LLAMA_CHAT_SYSTEM: &str = "Eres Llama 3.1 8B Instruct, el asistente de Terrsvusion. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. No pidas aclaraciones si ya se entiende.";
+
+    fn default_system_prompt(&self) -> &'static str {
+        match self.model.chat {
+            ChatTemplateFamily::MiniCpm5 => Self::DEFAULT_CHAT_SYSTEM,
+            ChatTemplateFamily::Llama3 => Self::DEFAULT_LLAMA_CHAT_SYSTEM,
+        }
+    }
+
+    fn sentence_case_if_shouting(text: &str) -> String {
+        let letters = text
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .collect::<Vec<_>>();
+        let words = text
+            .split_whitespace()
+            .filter(|word| word.chars().any(|character| character.is_alphabetic()))
+            .count();
+        if words < 2
+            || letters.len() < 8
+            || letters.iter().any(|character| character.is_lowercase())
+        {
+            return text.to_owned();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut capitalize = true;
+        for character in text.chars() {
+            if character.is_alphabetic() {
+                if capitalize {
+                    out.extend(character.to_uppercase());
+                    capitalize = false;
+                } else {
+                    out.extend(character.to_lowercase());
+                }
+            } else {
+                out.push(character);
+            }
+        }
+        out
+    }
+
+    fn spanish_question_word(word: &str) -> Option<&'static str> {
+        match word.to_lowercase().as_str() {
+            "que" | "qué" => Some("Qué"),
+            "cual" | "cuál" => Some("Cuál"),
+            "cuales" | "cuáles" => Some("Cuáles"),
+            "quien" | "quién" => Some("Quién"),
+            "quienes" | "quiénes" => Some("Quiénes"),
+            "como" | "cómo" => Some("Cómo"),
+            "donde" | "dónde" => Some("Dónde"),
+            "cuando" | "cuándo" => Some("Cuándo"),
+            "cuanto" | "cuánto" | "cuanta" | "cuánta" => Some("Cuánto"),
+            "cuantos" | "cuántos" | "cuantas" | "cuántas" => Some("Cuántos"),
+            _ => None,
+        }
+    }
+
+    fn spanish_question_if_informal(text: &str) -> String {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.starts_with('¿') {
+            return text.to_owned();
+        }
+        let without_mark = trimmed.trim_end_matches('?').trim_end();
+        let mut parts = without_mark.split_whitespace();
+        let Some(first) = parts.next() else {
+            return text.to_owned();
+        };
+        let second = parts.next();
+        let (replacement, skip_second) = if first.eq_ignore_ascii_case("por")
+            && second.is_some_and(|word| matches!(word.to_lowercase().as_str(), "que" | "qué"))
+        {
+            ("Por qué", true)
+        } else if first.eq_ignore_ascii_case("a")
+            && second.is_some_and(|word| matches!(word.to_lowercase().as_str(), "que" | "qué"))
+        {
+            ("A qué", true)
+        } else if let Some(word) = Self::spanish_question_word(first) {
+            (word, false)
+        } else {
+            return text.to_owned();
+        };
+        let rest = if skip_second {
+            without_mark
+                .split_whitespace()
+                .skip(2)
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            without_mark
+                .split_whitespace()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if rest.is_empty() {
+            format!("¿{replacement}?")
+        } else {
+            format!("¿{replacement} {rest}?")
+        }
+    }
+
+    fn expand_definition_question(text: &str) -> String {
+        let trimmed = text.trim();
+        let topic = trimmed
+            .strip_prefix("¿Qué es ")
+            .or_else(|| trimmed.strip_prefix("¿Qué son "));
+        let Some(topic) = topic else {
+            return text.to_owned();
+        };
+        let topic = topic.trim_end_matches('?').trim();
+        if topic.is_empty() {
+            return text.to_owned();
+        }
+        format!(
+            "Explica de forma concreta qué es {topic}. Da una definición; no repitas la pregunta."
+        )
+    }
+
+    fn expand_short_greeting(text: &str) -> String {
+        let compact = text
+            .trim()
+            .trim_matches(|character: char| matches!(character, '!' | '.' | '¡' | '?' | '¿'))
+            .trim()
+            .to_lowercase();
+        if matches!(
+            compact.as_str(),
+            "hola"
+                | "hello"
+                | "hi"
+                | "hey"
+                | "buenas"
+                | "buenos dias"
+                | "buenas tardes"
+                | "buenas noches"
+        ) {
+            "Saluda en una frase corta y espera la siguiente pregunta.".to_owned()
+        } else {
+            text.to_owned()
+        }
+    }
+
+    fn normalize_user_chat_text(text: &str) -> String {
+        let shouting = Self::sentence_case_if_shouting(text);
+        let greeted = Self::expand_short_greeting(&shouting);
+        if greeted != shouting {
+            return greeted;
+        }
+        Self::expand_definition_question(&Self::spanish_question_if_informal(&shouting))
+    }
+
+    fn prepare_chat_messages_with_system(
+        messages: &[TorchChatMessage],
+        system: &str,
+    ) -> Vec<TorchChatMessage> {
+        let mut prepared = Vec::with_capacity(messages.len() + 1);
+        if !messages.iter().any(|message| message.role == "system") {
+            prepared.push(TorchChatMessage {
+                role: "system".to_owned(),
+                content: system.to_owned(),
+            });
+        }
+        prepared.extend(messages.iter().map(|message| {
+            if message.role == "user" {
+                TorchChatMessage {
+                    role: message.role.clone(),
+                    content: Self::normalize_user_chat_text(&message.content),
+                }
+            } else {
+                message.clone()
+            }
+        }));
+        prepared
+    }
+
+    #[cfg(test)]
+    fn prepare_chat_messages(messages: &[TorchChatMessage]) -> Vec<TorchChatMessage> {
+        Self::prepare_chat_messages_with_system(messages, Self::DEFAULT_CHAT_SYSTEM)
+    }
+
+    fn prepare_runtime_chat_messages(
+        &self,
+        messages: &[TorchChatMessage],
+    ) -> Vec<TorchChatMessage> {
+        Self::prepare_chat_messages_with_system(messages, self.default_system_prompt())
+    }
+
+    fn wrap_question_if_reference_text(messages: &mut [TorchChatMessage]) {
+        let has_reference = messages.iter().any(|message| {
+            message.role == "user"
+                && message
+                    .content
+                    .starts_with("Texto de referencia (única fuente")
+        });
+        if !has_reference {
+            return;
+        }
+        let Some(last) = messages.last_mut() else {
+            return;
+        };
+        if last.role != "user"
+            || last
+                .content
+                .starts_with("Texto de referencia (única fuente")
+            || last.content.starts_with("Responde con un dato concreto")
+        {
+            return;
+        }
+        last.content = format!(
+            "Responde con un dato concreto del texto de referencia. No repitas la pregunta. Pregunta: {}",
+            last.content
+        );
+    }
+
+    fn visible_completion(content: &str, enable_thinking: bool) -> String {
+        if enable_thinking {
+            return content.to_owned();
+        }
+        if let Some(index) = content.rfind("</think>") {
+            content[index + "</think>".len()..].trim().to_owned()
+        } else {
+            content.to_owned()
+        }
+    }
+
+    fn encode_chat_prompt_ids(
+        &self,
+        messages: &[TorchChatMessage],
+        enable_thinking: bool,
+    ) -> Result<(Vec<TorchChatMessage>, Vec<i64>)> {
+        let mut messages = self.prepare_runtime_chat_messages(messages);
+        Self::wrap_question_if_reference_text(&mut messages);
+        let prompt = self.chat_prompt(&messages, enable_thinking)?;
+        // The chat template already includes bos `<s>`. Encoding with
+        // add_special_tokens would prepend a second BOS and derail chat.
         let encoded = self
             .tokenizer
-            .encode(prompt, true)
+            .encode(prompt, false)
             .map_err(|error| anyhow::anyhow!("tokenización falló: {error}"))?;
         let prompt_ids = encoded
             .get_ids()
             .iter()
             .map(|&token| token as i64)
             .collect::<Vec<_>>();
+        Ok((messages, prompt_ids))
+    }
+
+    pub fn encode_chat_prompt_token_ids(
+        &self,
+        messages: &[TorchChatMessage],
+        enable_thinking: bool,
+    ) -> Result<Vec<i64>> {
+        Ok(self.encode_chat_prompt_ids(messages, enable_thinking)?.1)
+    }
+
+    pub fn encode_raw_chat_prompt_token_ids(
+        &self,
+        messages: &[TorchChatMessage],
+        enable_thinking: bool,
+    ) -> Result<Vec<i64>> {
+        let prompt = self.chat_prompt(messages, enable_thinking)?;
+        let encoded = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|error| anyhow::anyhow!("tokenización falló: {error}"))?;
+        Ok(encoded
+            .get_ids()
+            .iter()
+            .map(|&token| token as i64)
+            .collect())
+    }
+
+    /// Official MiniCPM chat template + dense BF16 KV. No Terrsvusion cache,
+    /// no default system, no Spanish/document rewrites.
+    pub fn generate_messages_virgin_dense(
+        &self,
+        messages: &[TorchChatMessage],
+        max_tokens: usize,
+        enable_thinking: bool,
+    ) -> Result<TorchGeneration> {
+        ensure!(!messages.is_empty(), "messages no puede estar vacío");
+        let prompt = self.chat_prompt(messages, enable_thinking)?;
+        let encoded = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|error| anyhow::anyhow!("tokenización falló: {error}"))?;
+        let prompt_ids = encoded
+            .get_ids()
+            .iter()
+            .map(|&token| token as i64)
+            .collect::<Vec<_>>();
+        let mut dense = self.generate_token_ids_dense(&prompt_ids, max_tokens, 512)?;
+        dense.content = Self::visible_completion(&dense.content, enable_thinking);
+        Ok(TorchGeneration::from(dense))
+    }
+
+    /// Dense BF16 attention on the same chat template, tokenizer and greedy
+    /// decoding as `generate_messages`. Isolates model errors from Terrsvusion.
+    pub fn generate_messages_dense(
+        &self,
+        messages: &[TorchChatMessage],
+        max_tokens: usize,
+        enable_thinking: bool,
+    ) -> Result<DenseGeneration> {
+        let (_messages, prompt_ids) = self.encode_chat_prompt_ids(messages, enable_thinking)?;
+        let mut generation = self.generate_token_ids_dense(&prompt_ids, max_tokens, 512)?;
+        generation.content = Self::visible_completion(&generation.content, enable_thinking);
+        Ok(generation)
+    }
+
+    pub fn generate_messages_cancellable(
+        &self,
+        messages: &[TorchChatMessage],
+        max_tokens: usize,
+        enable_thinking: bool,
+        cancel: &AtomicBool,
+    ) -> Result<TorchGeneration> {
+        self.generate_messages_cancellable_with_mass_tolerance(
+            messages,
+            max_tokens,
+            enable_thinking,
+            None,
+            cancel,
+        )
+    }
+
+    /// Opt-in only: explicit positive omitted-V softmax-mass tolerance.
+    /// The historical chat normalization, system prompt, document
+    /// wrapper, Llama tokenizer, greedy and original ColdStore remain
+    /// unchanged. No tolerance means the untouched original route.
+    pub fn generate_messages_cancellable_with_mass_tolerance(
+        &self,
+        messages: &[TorchChatMessage],
+        max_tokens: usize,
+        enable_thinking: bool,
+        applied_mass_tolerance: Option<f64>,
+        cancel: &AtomicBool,
+    ) -> Result<TorchGeneration> {
+        if let Some(epsilon) = applied_mass_tolerance {
+            ensure!(
+                epsilon.is_finite() && epsilon > 0.0 && epsilon <= 1e-2,
+                "explicit certified V omission tolerance must be in (0,0.01]"
+            );
+        }
+        let (messages, prompt_ids) = self.encode_chat_prompt_ids(messages, enable_thinking)?;
         let prefix_tokens = if self.prefix_cache_dir.is_some() && messages.len() > 1 {
-            let prefix = Self::render_message_prefix(&messages[..messages.len() - 1])?;
+            let prefix = self.chat_prefix(&messages[..messages.len() - 1])?;
             let encoded_prefix = self
                 .tokenizer
-                .encode(prefix, true)
+                .encode(prefix, false)
                 .map_err(|error| anyhow::anyhow!("tokenización de prefijo falló: {error}"))?;
             let prefix_ids = encoded_prefix
                 .get_ids()
@@ -3216,7 +4460,7 @@ impl TorchModelRuntime {
         } else {
             0
         };
-        Ok(self
+        let mut generation = self
             .generate_token_ids_instrumented(
                 &prompt_ids,
                 max_tokens,
@@ -3224,10 +4468,14 @@ impl TorchModelRuntime {
                 512,
                 GenerationInstrumentation {
                     prefix_tokens,
+                    applied_mass_tolerance,
                     ..GenerationInstrumentation::default()
                 },
+                Some(cancel),
             )?
-            .0)
+            .0;
+        generation.content = Self::visible_completion(&generation.content, enable_thinking);
+        Ok(generation)
     }
 
     pub fn context_limit_tokens(&self) -> usize {
@@ -3378,6 +4626,7 @@ impl TorchModelRuntime {
                     exact_oracle_enabled,
                     ..GenerationInstrumentation::default()
                 },
+                None,
             )?
             .0)
     }
@@ -3400,9 +4649,79 @@ impl TorchModelRuntime {
                 exact_oracle_enabled: true,
                 shadow_metrics_enabled: true,
                 prefix_tokens: 0,
+                ..GenerationInstrumentation::default()
             },
+            None,
         )?;
         Ok((generation, report.context("informe shadow ausente")?))
+    }
+
+    pub fn generate_token_ids_with_applied_omission(
+        &self,
+        prompt_ids: &[i64],
+        max_tokens: usize,
+        chunk_size: usize,
+        storage_frame_tokens: usize,
+        tolerance: f64,
+    ) -> Result<AppliedOmissionReport> {
+        ensure!(
+            tolerance.is_finite() && tolerance > 0.0,
+            "tolerancia de omisión aplicada inválida"
+        );
+        let canonical = self
+            .generate_token_ids_instrumented(
+                prompt_ids,
+                max_tokens,
+                chunk_size,
+                storage_frame_tokens,
+                GenerationInstrumentation {
+                    record_step_logits: true,
+                    ..GenerationInstrumentation::default()
+                },
+                None,
+            )?
+            .0;
+        let applied = self
+            .generate_token_ids_instrumented(
+                prompt_ids,
+                max_tokens,
+                chunk_size,
+                storage_frame_tokens,
+                GenerationInstrumentation {
+                    applied_mass_tolerance: Some(tolerance),
+                    record_step_logits: true,
+                    ..GenerationInstrumentation::default()
+                },
+                None,
+            )?
+            .0;
+        let steps = canonical.step_logits.len().min(applied.step_logits.len());
+        let mut max_abs_logit_difference = 0.0_f64;
+        for index in 0..steps {
+            ensure!(
+                canonical.step_logits[index].len() == applied.step_logits[index].len(),
+                "logits de omisión aplicada con geometría distinta"
+            );
+            for (left, right) in canonical.step_logits[index]
+                .iter()
+                .zip(&applied.step_logits[index])
+            {
+                max_abs_logit_difference =
+                    max_abs_logit_difference.max((*left as f64 - *right as f64).abs());
+            }
+        }
+        Ok(AppliedOmissionReport {
+            tolerance,
+            exact_token_parity: canonical.token_ids == applied.token_ids,
+            max_abs_logit_difference,
+            logit_steps_compared: steps,
+            certified_v_tokens_omitted: applied.certified_v_tokens_omitted,
+            hierarchy_k_tokens_avoided: applied.hierarchy_k_tokens_avoided,
+            canonical_token_ids: canonical.token_ids.clone(),
+            applied_token_ids: applied.token_ids.clone(),
+            canonical,
+            applied,
+        })
     }
 
     fn generate_token_ids_instrumented(
@@ -3412,12 +4731,25 @@ impl TorchModelRuntime {
         chunk_size: usize,
         storage_frame_tokens: usize,
         instrumentation: GenerationInstrumentation,
+        cancel: Option<&AtomicBool>,
     ) -> Result<(TorchGeneration, Option<ShadowDiagnosticReport>)> {
         let GenerationInstrumentation {
             exact_oracle_enabled,
             shadow_metrics_enabled,
             prefix_tokens,
+            applied_mass_tolerance,
+            record_step_logits,
         } = instrumentation;
+        // SAFETY: a positive tolerance can alter BF16 attention and thus
+        // *future* K/V. Never load/publish the same persistent prefix key
+        // as a native/exact turn: an approximate KV snapshot must not be
+        // reused by a later exact request (or vice versa).
+        // Recompute the whole prompt for explicit experimental omission.
+        let prefix_tokens = safe_prefix_tokens_for_omission(prefix_tokens, applied_mass_tolerance);
+        let cancelled = || cancel.is_some_and(|flag| flag.load(Ordering::SeqCst));
+        if cancelled() {
+            bail!("inferencia cancelada");
+        }
         ensure!((1..=512).contains(&max_tokens), "max_tokens fuera de rango");
         ensure!(!prompt_ids.is_empty(), "prompt sin tokens");
         ensure!(chunk_size > 0, "chunk_size debe ser positivo");
@@ -3434,28 +4766,35 @@ impl TorchModelRuntime {
             .then(|| self.prefix_digest(&prompt_ids[..prefix_tokens], storage_frame_tokens));
         let lookup_started = std::time::Instant::now();
         let restored = match (&self.prefix_cache_dir, &prefix_key) {
-            (Some(root), Some(key)) => TerrsvusionKvCache::restore_prefix(
+            (Some(root), Some(key)) => TerrsvusionKvCache::restore_prefix_geometry(
                 root,
                 key,
                 &self.model_identity,
                 storage_frame_tokens,
+                self.model.layers.len(),
+                self.model.kv_heads,
+                self.model.query_heads,
+                self.model.head_dim,
             )?,
             _ => None,
         };
         let prefix_cache_lookup_seconds = lookup_started.elapsed().as_secs_f64();
         let prefix_cache_hit = restored.is_some();
-        let mut cache = restored.unwrap_or(TerrsvusionKvCache::try_new_with_storage_frame_tokens(
-            storage_frame_tokens,
-        )?);
+        let mut cache = restored.unwrap_or(self.model.terrsvusion_cache(storage_frame_tokens)?);
         cache.exact_oracle_enabled = exact_oracle_enabled || shadow_metrics_enabled;
         cache.shadow_metrics = shadow_metrics_enabled.then(ShadowMetrics::default);
+        cache.applied_mass_tolerance = applied_mass_tolerance;
+        cache.record_step_logits = record_step_logits;
         let mut generated = Vec::with_capacity(max_tokens);
         let mut prefill_seconds = 0.0_f64;
         let mut seal_seconds = 0.0_f64;
         let mut decode_seconds = 0.0_f64;
         let mut min_logit_margin = f64::INFINITY;
         let mut prefix_cache_hydrate_seconds = 0.0_f64;
-        let speculative_enabled = !exact_oracle_enabled && !shadow_metrics_enabled;
+        let speculative_enabled = !exact_oracle_enabled
+            && !shadow_metrics_enabled
+            && applied_mass_tolerance.is_none()
+            && !record_step_logits;
         let drafter = DeterministicSuffixDrafter::build(prompt_ids);
         let mut speculation_policy = AdaptiveSpeculationPolicy::new();
         let mut speculative_rounds = 0_usize;
@@ -3468,46 +4807,66 @@ impl TorchModelRuntime {
             let prefill_started = std::time::Instant::now();
             let mut logits;
             if prefix_cache_hit {
-                let hydrate_started = std::time::Instant::now();
-                cache.hydrate_prefill_hot()?;
-                prefix_cache_hydrate_seconds = hydrate_started.elapsed().as_secs_f64();
                 let suffix = &prompt_ids[prefix_tokens..];
                 ensure!(
                     !suffix.is_empty(),
                     "prefijo cacheado consume todo el prompt"
                 );
+                let hydrate_started = std::time::Instant::now();
                 let mut chunks = suffix.chunks(chunk_size).peekable();
                 logits = loop {
+                    if cancelled() {
+                        bail!("inferencia cancelada");
+                    }
                     let chunk = chunks.next().context("sufijo sin tokens")?;
                     let output = self.model.forward_with_cache(chunk, &mut cache)?;
                     if chunks.peek().is_none() {
                         break output;
                     }
+                    if self.model.streaming_prefill {
+                        cache.seal_and_release_prefill()?;
+                    }
                 };
+                prefix_cache_hydrate_seconds = hydrate_started.elapsed().as_secs_f64();
             } else if let (Some(root), Some(key)) = (&self.prefix_cache_dir, &prefix_key) {
                 let mut chunks = prompt_ids[..prefix_tokens].chunks(chunk_size).peekable();
                 logits = loop {
+                    if cancelled() {
+                        bail!("inferencia cancelada");
+                    }
                     let chunk = chunks.next().context("prefijo sin tokens")?;
                     let output = self.model.forward_with_cache(chunk, &mut cache)?;
                     if chunks.peek().is_none() {
                         break output;
                     }
+                    if self.model.streaming_prefill {
+                        cache.seal_and_release_prefill()?;
+                    }
                 };
                 cache.seal_partial_storage_frames()?;
                 cache.persist_prefix(root, key, &self.model_identity)?;
+                cache.suffix_against_committed = true;
                 let hydrate_started = std::time::Instant::now();
-                cache.hydrate_prefill_hot()?;
-                prefix_cache_hydrate_seconds = hydrate_started.elapsed().as_secs_f64();
                 for chunk in prompt_ids[prefix_tokens..].chunks(chunk_size) {
+                    if cancelled() {
+                        bail!("inferencia cancelada");
+                    }
                     logits = self.model.forward_with_cache(chunk, &mut cache)?;
                 }
+                prefix_cache_hydrate_seconds = hydrate_started.elapsed().as_secs_f64();
             } else {
                 let mut chunks = prompt_ids.chunks(chunk_size).peekable();
                 logits = loop {
+                    if cancelled() {
+                        bail!("inferencia cancelada");
+                    }
                     let chunk = chunks.next().context("prompt sin tokens")?;
                     let output = self.model.forward_with_cache(chunk, &mut cache)?;
                     if chunks.peek().is_none() {
                         break output;
+                    }
+                    if self.model.streaming_prefill {
+                        cache.seal_and_release_prefill()?;
                     }
                 }
             }
@@ -3517,14 +4876,24 @@ impl TorchModelRuntime {
             seal_seconds = seal_started.elapsed().as_secs_f64();
             let decode_started = std::time::Instant::now();
             while generated.len() < max_tokens {
+                if cancelled() {
+                    bail!("inferencia cancelada");
+                }
                 let last = logits.select(1, logits.size()[1] - 1);
+                if record_step_logits {
+                    let flat = last.to_kind(Kind::Float).contiguous();
+                    let mut values = vec![0.0_f32; flat.numel()];
+                    let count = values.len();
+                    flat.copy_data(&mut values, count);
+                    cache.step_logits.push(values);
+                }
                 if exact_oracle_enabled || shadow_metrics_enabled {
                     let top_two = last.topk(2, -1, true, true).0;
                     let margin = top_two.double_value(&[0, 0]) - top_two.double_value(&[0, 1]);
                     min_logit_margin = min_logit_margin.min(margin);
                 }
                 let token = last.argmax(-1, false).int64_value(&[0]);
-                if token == 1 || token == 130_073 {
+                if self.model.is_eos(token) {
                     break;
                 }
                 if !speculative_enabled || !speculation_policy.should_speculate() {
@@ -3573,7 +4942,7 @@ impl TorchModelRuntime {
                             .argmax(-1, false)
                             .int64_value(&[0])
                     };
-                    if expected == 1 || expected == 130_073 {
+                    if self.model.is_eos(expected) {
                         stop_reached = true;
                         break;
                     }
@@ -3621,7 +4990,12 @@ impl TorchModelRuntime {
         let resident = cache.resident_bytes();
         let active_resident_kv_bytes = cache.active_resident_kv_bytes();
         let inactive_zero_consumption_tokens = cache.inactive_zero_consumption_tokens();
-        let reference = cache.sequence_tokens() * 24 * 2 * 2 * 128 * 2;
+        let reference = cache.sequence_tokens()
+            * cache.layers.len()
+            * cache.kv_heads as usize
+            * 2
+            * cache.head_dim as usize
+            * 2;
         let exact_cold = cache.exact_cold_metrics();
         let conversion = cache.conversion_metrics();
         let storage_frame_tokens = cache.storage_frame_tokens();
@@ -3734,6 +5108,13 @@ impl TorchModelRuntime {
                 prefix_cache_tokens: prefix_tokens,
                 prefix_cache_lookup_seconds,
                 prefix_cache_hydrate_seconds,
+                prefix_cache_copied_bytes: cache.prefix_copied_bytes,
+                prefix_immutable: cache.prefix_cold.is_some(),
+                certified_v_tokens_omitted: cache
+                    .exact_k_tokens_scanned
+                    .saturating_sub(cache.exact_v_tokens_materialized),
+                applied_mass_tolerance: cache.applied_mass_tolerance,
+                step_logits: std::mem::take(&mut cache.step_logits),
                 kv_sha256,
                 speculative_enabled,
                 speculative_rounds,
@@ -3743,6 +5124,7 @@ impl TorchModelRuntime {
                 speculative_bypassed_tokens: speculation_policy.bypassed_tokens,
                 speculative_target_forward_calls,
                 speculative_maximum_k,
+                native_parity: None,
             },
             shadow_report,
         ))
@@ -3768,8 +5150,8 @@ impl TorchModelRuntime {
             "prompt y candidatos exceden 131072 tokens"
         );
         tch::no_grad(|| -> Result<MultiTokenVerificationOracle> {
-            let mut sequential_cache = DenseKvCache::new();
-            let mut batched_cache = DenseKvCache::new();
+            let mut sequential_cache = DenseKvCache::with_layers(self.model.layers.len());
+            let mut batched_cache = DenseKvCache::with_layers(self.model.layers.len());
             let mut sequential_logits = None;
             let mut batched_prompt_logits = None;
             for chunk in prompt_ids.chunks(chunk_size) {
@@ -3884,7 +5266,7 @@ impl TorchModelRuntime {
         ensure!((1..=512).contains(&max_tokens), "max_tokens fuera de rango");
         ensure!(!prompt_ids.is_empty(), "prompt sin tokens");
         ensure!(chunk_size > 0, "chunk_size debe ser positivo");
-        let mut cache = DenseKvCache::new();
+        let mut cache = DenseKvCache::with_layers(self.model.layers.len());
         let mut generated = Vec::<u32>::with_capacity(max_tokens);
         let mut prefill_seconds = 0.0_f64;
         let mut decode_seconds = 0.0_f64;
@@ -3908,7 +5290,7 @@ impl TorchModelRuntime {
             while generated.len() < max_tokens {
                 let last = logits.select(1, logits.size()[1] - 1);
                 let target_token = last.argmax(-1, false).int64_value(&[0]);
-                if target_token == 1 || target_token == 130_073 {
+                if self.model.is_eos(target_token) {
                     break;
                 }
                 let remaining = max_tokens - generated.len();
@@ -3955,7 +5337,7 @@ impl TorchModelRuntime {
                 cache.truncate_to(checkpoint + accepted)?;
                 current_k = (current_k / 2).max(2);
                 let expected = rejection_target.context("rechazo sin token objetivo")?;
-                if expected == 1 || expected == 130_073 || generated.len() >= max_tokens {
+                if self.model.is_eos(expected) || generated.len() >= max_tokens {
                     break;
                 }
                 generated.push(expected as u32);
@@ -4020,8 +5402,7 @@ impl TorchModelRuntime {
         ensure!((1..=512).contains(&max_tokens), "max_tokens fuera de rango");
         ensure!(!prompt_ids.is_empty(), "prompt sin tokens");
         ensure!(chunk_size > 0, "chunk_size debe ser positivo");
-        let mut cache =
-            TerrsvusionKvCache::try_new_with_storage_frame_tokens(storage_frame_tokens)?;
+        let mut cache = self.model.terrsvusion_cache(storage_frame_tokens)?;
         let mut generated = Vec::<u32>::with_capacity(max_tokens);
         let mut prefill_seconds = 0.0_f64;
         let mut decode_seconds = 0.0_f64;
@@ -4046,7 +5427,7 @@ impl TorchModelRuntime {
             while generated.len() < max_tokens {
                 let last = logits.select(1, logits.size()[1] - 1);
                 let target_token = last.argmax(-1, false).int64_value(&[0]);
-                if target_token == 1 || target_token == 130_073 {
+                if self.model.is_eos(target_token) {
                     break;
                 }
                 if !policy.should_speculate() {
@@ -4108,7 +5489,7 @@ impl TorchModelRuntime {
                 rejected_rounds += 1;
                 cache.rollback_unsealed_to(checkpoint + accepted)?;
                 let expected = rejection_target.context("rechazo frío sin token objetivo")?;
-                if expected == 1 || expected == 130_073 || generated.len() >= max_tokens {
+                if self.model.is_eos(expected) || generated.len() >= max_tokens {
                     break;
                 }
                 generated.push(expected as u32);
@@ -4163,6 +5544,53 @@ impl TorchModelRuntime {
     /// Dense BF16 control using the same model, tokenizer, prompt chunks and
     /// greedy decoding as Terrsvusion. This is a benchmark oracle, not a
     /// second serving route.
+    /// Optional GPU validation helper. Runs the original dense BF16 model
+    /// with the exact same prompt tokens and already-generated autoregressive
+    /// continuation, and returns logical BF16 KV bytes, layer by layer.
+    /// The reference path is unchanged when opencl-backend is disabled.
+    #[cfg(feature = "opencl-backend")]
+    pub fn debug_dense_kv_bytes(
+        &self,
+        prompt_ids: &[i64],
+        generated: &[u32],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        ensure!(!prompt_ids.is_empty(), "empty parity prompt");
+        ensure!(
+            prompt_ids.len() + generated.len() <= 4096,
+            "GPU diagnostic readback limited to 4096 tokens"
+        );
+        let mut cache = DenseKvCache::with_layers(self.model.layers.len());
+        tch::no_grad(|| -> Result<()> {
+            let _ = self.model.forward_with_cache(prompt_ids, &mut cache)?;
+            for &id in generated.iter().take(generated.len().saturating_sub(1)) {
+                let _ = self
+                    .model
+                    .forward_with_cache(&[i64::from(id)], &mut cache)?;
+            }
+            Ok(())
+        })?;
+        let mut result = Vec::with_capacity(cache.layers.len());
+        for (index, state) in cache.layers.iter().enumerate() {
+            let (key, value) = state
+                .as_ref()
+                .with_context(|| format!("dense KV layer {index} missing"))?;
+            let read = |tensor: &Tensor| -> Vec<u8> {
+                let contiguous = tensor.contiguous();
+                // SAFETY: Exactly numel()*2 bytes of contiguous BF16,
+                // copied to owned storage before local Tensor drops.
+                unsafe {
+                    std::slice::from_raw_parts(
+                        contiguous.data_ptr().cast::<u8>(),
+                        contiguous.numel() * 2,
+                    )
+                    .to_vec()
+                }
+            };
+            result.push((read(key), read(value)));
+        }
+        Ok(result)
+    }
+
     pub fn generate_token_ids_dense(
         &self,
         prompt_ids: &[i64],
@@ -4177,8 +5605,9 @@ impl TorchModelRuntime {
             "prompt y generación exceden 131072 tokens"
         );
         let started = std::time::Instant::now();
-        let mut cache = DenseKvCache::new();
+        let mut cache = DenseKvCache::with_layers(self.model.layers.len());
         let mut generated = Vec::with_capacity(max_tokens);
+        let mut step_logits = Vec::with_capacity(max_tokens);
         let mut prefill_seconds = 0.0_f64;
         let mut decode_seconds = 0.0_f64;
         tch::no_grad(|| -> Result<()> {
@@ -4195,8 +5624,9 @@ impl TorchModelRuntime {
             let decode_started = std::time::Instant::now();
             for step in 0..max_tokens {
                 let last = logits.select(1, logits.size()[1] - 1);
+                step_logits.push(capture_last_logits(&last));
                 let token = last.argmax(-1, false).int64_value(&[0]);
-                if token == 1 || token == 130_073 {
+                if self.model.is_eos(token) {
                     break;
                 }
                 generated.push(token as u32);
@@ -4223,6 +5653,91 @@ impl TorchModelRuntime {
             decode_seconds,
             kv_bf16_bytes: cache.physical_bytes(),
             kv_sha256,
+            step_logits,
+        })
+    }
+
+    /// Same prompt token ids, greedy argmax, Terrsvusion KV vs dense BF16 KV.
+    /// If greedy tokens diverge, inspect logits and KV hashes at the first step.
+    pub fn compare_native_inference(
+        &self,
+        prompt_ids: &[i64],
+        max_tokens: usize,
+    ) -> Result<NativeInferenceParity> {
+        let dense = self.generate_token_ids_dense(prompt_ids, max_tokens, 512)?;
+        let terrsvusion = self
+            .generate_token_ids_instrumented(
+                prompt_ids,
+                max_tokens,
+                512,
+                512,
+                GenerationInstrumentation {
+                    record_step_logits: true,
+                    ..GenerationInstrumentation::default()
+                },
+                None,
+            )?
+            .0;
+        let steps = dense.step_logits.len().min(terrsvusion.step_logits.len());
+        let mut max_abs_logit_difference = 0.0_f64;
+        let mut first_logit_step_above_1e3 = None;
+        for index in 0..steps {
+            ensure!(
+                dense.step_logits[index].len() == terrsvusion.step_logits[index].len(),
+                "logits nativos y Terrsvusion con vocabulario distinto"
+            );
+            let mut step_linf = 0.0_f64;
+            for (left, right) in dense.step_logits[index]
+                .iter()
+                .zip(&terrsvusion.step_logits[index])
+            {
+                step_linf = step_linf.max((*left as f64 - *right as f64).abs());
+            }
+            max_abs_logit_difference = max_abs_logit_difference.max(step_linf);
+            if first_logit_step_above_1e3.is_none() && step_linf > 1e-3 {
+                first_logit_step_above_1e3 = Some(index);
+            }
+        }
+        let first_token_mismatch = dense
+            .token_ids
+            .iter()
+            .zip(&terrsvusion.token_ids)
+            .position(|(left, right)| left != right)
+            .or_else(|| {
+                (dense.token_ids.len() != terrsvusion.token_ids.len())
+                    .then_some(dense.token_ids.len().min(terrsvusion.token_ids.len()))
+            });
+        let divergence = first_token_mismatch.and_then(|index| {
+            let dense_logits = dense.step_logits.get(index)?;
+            let terrsvusion_logits = terrsvusion.step_logits.get(index)?;
+            Some(first_step_divergence(
+                index,
+                dense_logits,
+                terrsvusion_logits,
+            ))
+        });
+        Ok(NativeInferenceParity {
+            prompt_tokens: prompt_ids.len(),
+            exact_token_parity: first_token_mismatch.is_none(),
+            first_token_mismatch,
+            max_abs_logit_difference,
+            logit_steps_compared: steps,
+            first_logit_step_above_1e3,
+            kv_sha256_equal: dense.kv_sha256 == terrsvusion.kv_sha256,
+            dense_kv_sha256: dense.kv_sha256,
+            terrsvusion_kv_sha256: terrsvusion.kv_sha256,
+            dense_tokens: dense.token_ids,
+            terrsvusion_tokens: terrsvusion.token_ids,
+            dense_text: dense.content,
+            terrsvusion_text: terrsvusion.content,
+            dense_prefill_seconds: dense.prefill_seconds,
+            terrsvusion_prefill_seconds: terrsvusion.prefill_seconds,
+            certified_v_tokens_omitted: terrsvusion.certified_v_tokens_omitted,
+            terrsvusion_kv_resident_bytes: terrsvusion.kv_resident_bytes,
+            dense_kv_bf16_bytes: dense.kv_bf16_bytes,
+            terrsvusion_kv_bf16_reference_bytes: terrsvusion.kv_bf16_reference_bytes,
+            prompt_authority: "identical_prompt_ids_raw_chat_template_no_default_system",
+            divergence,
         })
     }
 
@@ -4241,19 +5756,42 @@ impl TorchModelRuntime {
 }
 
 impl MiniCpmLayer {
-    pub fn load(weights: &WeightFile, layer: usize) -> Result<Self> {
+    fn load(weights: &WeightArchive, layer: usize, geometry: &DecoderGeometry) -> Result<Self> {
         let p = format!("model.layers.{layer}");
+        let hidden = geometry.hidden;
+        let query_out = geometry.query_out();
+        let kv_out = geometry.kv_out();
+        let intermediate = geometry.intermediate;
         Ok(Self {
-            input_norm: weights.require_bf16(&format!("{p}.input_layernorm.weight"), &[1_536])?,
-            q: weights.require_bf16(&format!("{p}.self_attn.q_proj.weight"), &[2_048, 1_536])?,
-            k: weights.require_bf16(&format!("{p}.self_attn.k_proj.weight"), &[256, 1_536])?,
-            v: weights.require_bf16(&format!("{p}.self_attn.v_proj.weight"), &[256, 1_536])?,
-            o: weights.require_bf16(&format!("{p}.self_attn.o_proj.weight"), &[1_536, 2_048])?,
+            input_norm: weights.require_bf16(&format!("{p}.input_layernorm.weight"), &[hidden])?,
+            q: weights.require_bf16(
+                &format!("{p}.self_attn.q_proj.weight"),
+                &[query_out, hidden],
+            )?,
+            k: weights.require_bf16(&format!("{p}.self_attn.k_proj.weight"), &[kv_out, hidden])?,
+            v: weights.require_bf16(&format!("{p}.self_attn.v_proj.weight"), &[kv_out, hidden])?,
+            o: weights.require_bf16(
+                &format!("{p}.self_attn.o_proj.weight"),
+                &[hidden, query_out],
+            )?,
             post_norm: weights
-                .require_bf16(&format!("{p}.post_attention_layernorm.weight"), &[1_536])?,
-            gate: weights.require_bf16(&format!("{p}.mlp.gate_proj.weight"), &[4_608, 1_536])?,
-            up: weights.require_bf16(&format!("{p}.mlp.up_proj.weight"), &[4_608, 1_536])?,
-            down: weights.require_bf16(&format!("{p}.mlp.down_proj.weight"), &[1_536, 4_608])?,
+                .require_bf16(&format!("{p}.post_attention_layernorm.weight"), &[hidden])?,
+            gate: weights.require_bf16(
+                &format!("{p}.mlp.gate_proj.weight"),
+                &[intermediate, hidden],
+            )?,
+            up: weights
+                .require_bf16(&format!("{p}.mlp.up_proj.weight"), &[intermediate, hidden])?,
+            down: weights.require_bf16(
+                &format!("{p}.mlp.down_proj.weight"),
+                &[hidden, intermediate],
+            )?,
+            query_heads: geometry.query_heads,
+            kv_heads: geometry.kv_heads,
+            head_dim: geometry.head_dim,
+            rope_theta: geometry.rope_theta,
+            rms_eps: geometry.rms_eps,
+            llama3_rope: geometry.llama3_rope,
         })
     }
 
@@ -4261,14 +5799,14 @@ impl MiniCpmLayer {
         input.matmul(&weight.transpose(0, 1))
     }
 
-    fn rms_norm(input: &Tensor, weight: &Tensor) -> Tensor {
+    fn rms_norm(input: &Tensor, weight: &Tensor, eps: f64) -> Tensor {
         let dtype = input.kind();
         let input_f32 = input.to_kind(Kind::Float);
         let variance =
             input_f32
                 .pow_tensor_scalar(2)
                 .mean_dim(Some([-1_i64].as_slice()), true, Kind::Float);
-        (input_f32 * (variance + 1e-6).rsqrt()).to_kind(dtype) * weight
+        (input_f32 * (variance + eps).rsqrt()).to_kind(dtype) * weight
     }
 
     fn rotate_half(input: &Tensor) -> Tensor {
@@ -4282,7 +5820,31 @@ impl MiniCpmLayer {
         )
     }
 
-    fn rope(input: &Tensor, position_start: usize) -> Tensor {
+    fn llama3_inv_freq(dim: i64, theta: f64) -> Tensor {
+        let mut values = Vec::with_capacity((dim / 2) as usize);
+        for index in (0..dim).step_by(2) {
+            let mut inv_freq = (-(index as f64) * (theta.ln() / dim as f64)).exp();
+            let wavelength = 2.0 * std::f64::consts::PI / inv_freq;
+            let original_max = 8192.0;
+            let low_freq_factor = 1.0;
+            let high_freq_factor = 4.0;
+            let factor = 8.0;
+            let low_freq_wavelen = original_max / low_freq_factor;
+            let high_freq_wavelen = original_max / high_freq_factor;
+            if wavelength > low_freq_wavelen {
+                inv_freq /= factor;
+            } else if wavelength < high_freq_wavelen {
+            } else {
+                let smooth = (original_max / wavelength - low_freq_factor)
+                    / (high_freq_factor - low_freq_factor);
+                inv_freq = (1.0 - smooth) * (inv_freq / factor) + smooth * inv_freq;
+            }
+            values.push(inv_freq as f32);
+        }
+        Tensor::from_slice(&values)
+    }
+
+    fn rope(&self, input: &Tensor, position_start: usize) -> Tensor {
         let seq = input.size()[2];
         let dim = input.size()[3];
         let positions = Tensor::arange_start(
@@ -4291,8 +5853,12 @@ impl MiniCpmLayer {
             (Kind::Float, Device::Cpu),
         )
         .unsqueeze(1);
-        let dimensions = Tensor::arange_start_step(0, dim, 2, (Kind::Float, Device::Cpu));
-        let inv_freq = (-dimensions * (5_000_000_f64.ln() / dim as f64)).exp();
+        let inv_freq = if self.llama3_rope {
+            Self::llama3_inv_freq(dim, self.rope_theta)
+        } else {
+            let dimensions = Tensor::arange_start_step(0, dim, 2, (Kind::Float, Device::Cpu));
+            (-dimensions * (self.rope_theta.ln() / dim as f64)).exp()
+        };
         let frequencies = positions.matmul(&inv_freq.unsqueeze(0));
         let embedding = Tensor::cat(&[&frequencies, &frequencies], 1);
         let cos = embedding
@@ -4316,31 +5882,31 @@ impl MiniCpmLayer {
         cache: &mut C,
     ) -> Result<Tensor> {
         let residual = input;
-        let normalized = Self::rms_norm(input, &self.input_norm);
+        let normalized = Self::rms_norm(input, &self.input_norm, self.rms_eps);
         let batch = normalized.size()[0];
         let seq = normalized.size()[1];
-        let q = Self::rope(
+        let q = self.rope(
             &Self::linear(&normalized, &self.q)
-                .view([batch, seq, 16, 128])
+                .view([batch, seq, self.query_heads, self.head_dim])
                 .transpose(1, 2),
             past_tokens,
         );
-        let new_key = Self::rope(
+        let new_key = self.rope(
             &Self::linear(&normalized, &self.k)
-                .view([batch, seq, 2, 128])
+                .view([batch, seq, self.kv_heads, self.head_dim])
                 .transpose(1, 2),
             past_tokens,
         );
         let new_value = Self::linear(&normalized, &self.v)
-            .view([batch, seq, 2, 128])
+            .view([batch, seq, self.kv_heads, self.head_dim])
             .transpose(1, 2);
         let attention = cache
             .attend(layer_index, &q, &new_key, &new_value)?
             .transpose(1, 2)
             .contiguous()
-            .view([batch, seq, 2_048]);
+            .view([batch, seq, self.query_heads * self.head_dim]);
         let hidden = Self::linear(&attention, &self.o) + residual;
-        let normalized = Self::rms_norm(&hidden, &self.post_norm);
+        let normalized = Self::rms_norm(&hidden, &self.post_norm, self.rms_eps);
         let mlp =
             Self::linear(&normalized, &self.gate).silu() * Self::linear(&normalized, &self.up);
         Ok(hidden + Self::linear(&mlp, &self.down))
@@ -4396,7 +5962,14 @@ mod tests {
                 .expect("prefijo persistido");
         assert_eq!(restored.sequence_tokens(), 2);
         assert_eq!(restored.parallel_axis.token_len(), 2);
-        assert_eq!(restored.exact_cold.metadata().len(), 24);
+        assert_eq!(restored.prefix_copied_bytes, 0);
+        assert!(
+            restored
+                .prefix_cold
+                .as_ref()
+                .is_some_and(|store| { store.is_read_only() && store.metadata().len() == 24 })
+        );
+        assert!(restored.exact_cold.metadata().is_empty());
         assert!(restored.layers.iter().all(|layer| layer.pages.len() == 1));
         restored.hydrate_prefill_hot().unwrap();
         assert!(restored.layers.iter().all(|layer| {
@@ -4405,6 +5978,44 @@ mod tests {
                 .as_ref()
                 .is_some_and(|(key, value)| key.size()[2] == 2 && value.size()[2] == 2)
         }));
+    }
+
+    #[test]
+    fn restored_prefix_attends_suffix_without_copying_or_keeping_history_hot() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cache = TerrsvusionKvCache::try_new_with_storage_frame_tokens(16).unwrap();
+        let query = Tensor::zeros([1, 16, 2, 128], (Kind::BFloat16, Device::Cpu));
+        let key = Tensor::zeros([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
+        let value = Tensor::zeros([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
+        for layer in 0..24 {
+            let _ = cache.attend(layer, &query, &key, &value).unwrap();
+        }
+        cache.finish_step(2);
+        cache.seal_partial_storage_frames().unwrap();
+        cache
+            .persist_prefix(root.path(), "prefix-digest", "model-digest")
+            .unwrap();
+        let mut restored =
+            TerrsvusionKvCache::restore_prefix(root.path(), "prefix-digest", "model-digest", 16)
+                .unwrap()
+                .expect("prefijo persistido");
+        assert_eq!(restored.prefix_copied_bytes, 0);
+        let suffix_query = Tensor::ones([1, 16, 2, 128], (Kind::BFloat16, Device::Cpu));
+        let suffix_key = Tensor::ones([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
+        let suffix_value = Tensor::ones([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
+        for layer in 0..24 {
+            let _ = restored
+                .attend(layer, &suffix_query, &suffix_key, &suffix_value)
+                .unwrap();
+        }
+        assert!(restored.layers.iter().all(|layer| {
+            layer
+                .prefill_hot
+                .as_ref()
+                .is_some_and(|(key, value)| key.size()[2] == 2 && value.size()[2] == 2)
+        }));
+        assert!(restored.prefill_working_peak_bytes > 0);
+        assert!(restored.prefill_working_peak_bytes < 24 * 2 * (2 + 2) * 128 * 2 * 2);
     }
 
     #[test]
@@ -4614,6 +6225,310 @@ mod tests {
             assert!(half::bf16::from_bits(lower[index]).to_f32() <= values[index]);
             assert!(half::bf16::from_bits(upper[index]).to_f32() >= values[index]);
         }
+    }
+
+    #[test]
+    fn chat_prompt_can_seed_an_empty_think_block() {
+        let messages = [TorchChatMessage {
+            role: "user".to_owned(),
+            content: "Hola".to_owned(),
+        }];
+        let silent = TorchModelRuntime::render_messages_with_thinking(&messages, false).unwrap();
+        assert!(silent.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        let thinking = TorchModelRuntime::render_messages_with_thinking(&messages, true).unwrap();
+        assert!(thinking.ends_with("<|im_start|>assistant\n<think>\n"));
+        assert!(!thinking.contains("</think>"));
+    }
+
+    #[test]
+    fn llama_32q8kv_certified_v_read_from_physical_coldstore_is_partial_and_bounded() {
+        // Test the actual CPU libtorch SDPA and original physical ColdStore;
+        // no Llama checkpoint/GPU is needed. The 32Q/8KV head geometry,
+        // BF16 precision, and 128-dimensional RoPE Q/K match Llama 3.1 8B.
+        let mut cache = TerrsvusionKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let tokens = 16usize;
+        let heads = 8usize;
+        let dim = 128usize;
+        let mut key_data = Vec::with_capacity(heads * tokens * dim);
+        let mut value_data = Vec::with_capacity(heads * tokens * dim);
+        for _head in 0..heads {
+            for token in 0..tokens {
+                for d in 0..dim {
+                    let dominant = token == 15;
+                    key_data.push(if d == 0 {
+                        if dominant { 20.0f32 } else { -20.0 }
+                    } else {
+                        0.0
+                    });
+                    value_data.push(if d == 0 {
+                        if dominant { 1.0f32 } else { -1.0 }
+                    } else {
+                        0.0
+                    });
+                }
+            }
+        }
+        let k = Tensor::from_slice(&key_data)
+            .view([1, 8, 16, 128])
+            .to_kind(Kind::BFloat16)
+            .contiguous();
+        let v = Tensor::from_slice(&value_data)
+            .view([1, 8, 16, 128])
+            .to_kind(Kind::BFloat16)
+            .contiguous();
+        for token in 0..16 {
+            let mut signal = vec![0.0f32; 8 * 128];
+            for head in 0..8 {
+                signal[head * 128] = if token == 15 { 20.0 } else { -20.0 };
+            }
+            cache.parallel_axis.observe(&signal).unwrap();
+        }
+        let certificate = cache.page_attention_certificate(&k, &v, 0).unwrap();
+        assert_eq!(certificate.value_abs_max_by_kv_head.len(), 8);
+        assert_eq!(certificate.value_abs_max_by_kv_head, [1.0f32; 8]);
+        let key_bits = TerrsvusionKvCache::bf16_bits(&k).unwrap();
+        let value_bits = TerrsvusionKvCache::bf16_bits(&v).unwrap();
+        let bf16_k = TerrsvusionKvCache::u16_bytes(&key_bits);
+        let bf16_v = TerrsvusionKvCache::u16_bytes(&value_bits);
+        let committed = cache
+            .exact_cold
+            .append_page(
+                PageGeometry {
+                    layer: 0,
+                    token_start: 0,
+                    tokens: 16,
+                    heads: 8,
+                    head_dim: 128,
+                    tile: 16,
+                },
+                &bf16_k,
+                &bf16_v,
+                false,
+            )
+            .unwrap();
+        assert_eq!(committed.page_id, 0);
+        cache.sequence_tokens = 16;
+        let page = TerrsvusionPage {
+            token_start: 0,
+            tokens: 16,
+            certificate,
+            storage: PageStorage::Cold {
+                exact_id: 0,
+                immutable: false,
+            },
+        };
+        let qdata = (0..32 * 128)
+            .map(|i| if i % 128 == 0 { 20.0f32 } else { 0.0 })
+            .collect::<Vec<_>>();
+        let q = Tensor::from_slice(&qdata)
+            .view([1, 32, 1, 128])
+            .to_kind(Kind::BFloat16);
+        let tail_data = (0..8 * 128)
+            .map(|i| if i % 128 == 0 { 20.0f32 } else { 0.0 })
+            .collect::<Vec<_>>();
+        let vtdata = (0..8 * 128)
+            .map(|i| if i % 128 == 0 { 1.0f32 } else { 0.0 })
+            .collect::<Vec<_>>();
+        let tailk = Tensor::from_slice(&tail_data)
+            .view([1, 8, 1, 128])
+            .to_kind(Kind::BFloat16);
+        let tailv = Tensor::from_slice(&vtdata)
+            .view([1, 8, 1, 128])
+            .to_kind(Kind::BFloat16);
+        let full = TerrsvusionKvCache::scaled_attention(
+            &q,
+            &[k.shallow_clone(), tailk.shallow_clone()],
+            &[v.shallow_clone(), tailv.shallow_clone()],
+            16,
+        );
+        let output = cache
+            .llama_certified_value_attention(
+                0,
+                &q,
+                &[page.clone()],
+                Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                1e-3,
+            )
+            .unwrap()
+            .expect("32Q8KV exact QK bound must certify omission");
+        let count = cache.exact_k_tokens_scanned;
+        let selected = cache.exact_v_tokens_materialized;
+        assert_eq!(count, 17);
+        assert_eq!(selected, 2);
+        assert_eq!(count - selected, 15);
+        let result = output.to_kind(Kind::Float).contiguous();
+        let reference = full.to_kind(Kind::Float).contiguous();
+        let mut actual = vec![0.0f32; 32 * 128];
+        let mut expected = vec![0.0f32; 32 * 128];
+        result.copy_data(&mut actual, 32 * 128);
+        reference.copy_data(&mut expected, 32 * 128);
+        let linf = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| f64::from((*a - *b).abs()))
+            .fold(0.0f64, f64::max);
+        assert!(linf <= 1e-3, "actual BF16 SDPA error exceeded local bound");
+        assert!(cache.exact_mass_max_bound <= 5e-4);
+        let stats = cache.exact_cold.stats();
+        assert_eq!(stats.partial_value_reads, 1);
+        assert!(
+            stats.partial_value_bytes_avoided > 0,
+            "ColdStore skipped no physical BF16 V bytes"
+        );
+        cache.exact_cold.audit_mapped().unwrap();
+
+        // Legacy persisted prefix has only MiniCPM-style two-head
+        // metadata. It MUST fail closed rather than fabricate 8KV bounds.
+        let mut legacy = page.clone();
+        legacy.certificate.value_abs_max_by_kv_head.clear();
+        assert!(
+            cache
+                .llama_certified_value_attention(
+                    0,
+                    &q,
+                    &[legacy],
+                    Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                    1e-3
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .llama_certified_value_attention(
+                    0,
+                    &q,
+                    &[page.clone()],
+                    Some(&(tailk.shallow_clone(), tailv.shallow_clone())),
+                    0.0
+                )
+                .unwrap()
+                .is_none()
+        );
+        let zero = Tensor::zeros([1, 32, 1, 128], (Kind::BFloat16, Device::Cpu));
+        assert!(
+            cache
+                .llama_certified_value_attention(0, &zero, &[page], Some(&(tailk, tailv)), 1e-3)
+                .unwrap()
+                .is_none(),
+            "diffuse equal scores must not certify Llama KV omission"
+        );
+        eprintln!(
+            "LLAMA_32Q8KV_CERTIFIED_PHYSICAL_V_PASS K_scored={} V_materialized={} V_omitted={} cold_partial_value_reads={} cold_partial_bytes_avoided={} BF16_SDPA_Linf={} bound={} epsilon=0.001 old_prefix_fail_closed=true exact_mode_fail_closed=true",
+            count,
+            selected,
+            count - selected,
+            stats.partial_value_reads,
+            stats.partial_value_bytes_avoided,
+            linf,
+            cache.exact_mass_max_bound
+        );
+    }
+
+    #[test]
+    fn omission_policy_never_reuses_exact_bf16_prefix_cache() {
+        assert_eq!(safe_prefix_tokens_for_omission(7143, None), 7143);
+        assert_eq!(safe_prefix_tokens_for_omission(7143, Some(0.001)), 0);
+        assert_eq!(safe_prefix_tokens_for_omission(111632, Some(0.01)), 0);
+        assert_eq!(safe_prefix_tokens_for_omission(0, None), 0);
+    }
+
+    #[test]
+    fn llama_missing_eight_kv_bounds_deserializes_as_fail_closed() {
+        let old = serde_json::json!({
+            "regions":[],
+            "value_abs_max":[1.0,2.0]
+        });
+        let parsed: PageAttentionCertificate = serde_json::from_value(old).unwrap();
+        assert!(parsed.value_abs_max_by_kv_head.is_empty());
+        let fresh = serde_json::json!({
+            "regions":[],
+            "value_abs_max":[1.0,2.0],
+            "value_abs_max_by_kv_head":[1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]
+        });
+        let parsed: PageAttentionCertificate = serde_json::from_value(fresh).unwrap();
+        assert_eq!(parsed.value_abs_max_by_kv_head.len(), 8);
+    }
+
+    #[test]
+    fn llama3_chat_template_uses_begin_of_text_headers() {
+        let prompt = TorchModelRuntime::render_llama3_messages(
+            &[
+                TorchChatMessage {
+                    role: "system".to_owned(),
+                    content: "Sé breve.".to_owned(),
+                },
+                TorchChatMessage {
+                    role: "user".to_owned(),
+                    content: "Qué es un coche?".to_owned(),
+                },
+            ],
+            true,
+        )
+        .unwrap();
+        assert!(prompt.starts_with("<|begin_of_text|>"));
+        assert!(prompt.contains("<|start_header_id|>user<|end_header_id|>"));
+        assert!(prompt.ends_with("<|start_header_id|>assistant<|end_header_id|>\n\n"));
+        assert!(!prompt.contains("<|im_start|>"));
+    }
+
+    #[test]
+    fn chat_template_string_already_contains_bos_so_encode_must_not_add_another() {
+        let prompt = TorchModelRuntime::render_messages(&[TorchChatMessage {
+            role: "user".to_owned(),
+            content: "Hola".to_owned(),
+        }])
+        .unwrap();
+        assert!(prompt.starts_with("<s>"));
+    }
+
+    #[test]
+    fn shouting_user_text_becomes_sentence_case() {
+        assert_eq!(
+            TorchModelRuntime::sentence_case_if_shouting("QUE ES UN COCHE"),
+            "Que es un coche"
+        );
+        assert_eq!(
+            TorchModelRuntime::sentence_case_if_shouting("Qué es un coche"),
+            "Qué es un coche"
+        );
+        assert_eq!(TorchModelRuntime::sentence_case_if_shouting("NASA"), "NASA");
+        let prepared = TorchModelRuntime::prepare_chat_messages(&[TorchChatMessage {
+            role: "user".to_owned(),
+            content: "QUE ES UN COCHE".to_owned(),
+        }]);
+        assert_eq!(prepared[0].role, "system");
+        assert_eq!(
+            prepared[1].content,
+            "Explica de forma concreta qué es un coche. Da una definición; no repitas la pregunta."
+        );
+        assert_eq!(
+            TorchModelRuntime::normalize_user_chat_text("como te llamas?"),
+            "¿Cómo te llamas?"
+        );
+        assert_eq!(
+            TorchModelRuntime::normalize_user_chat_text("que es el amor?"),
+            "Explica de forma concreta qué es el amor. Da una definición; no repitas la pregunta."
+        );
+        assert_eq!(
+            TorchModelRuntime::normalize_user_chat_text("What is a car?"),
+            "What is a car?"
+        );
+        assert_eq!(
+            TorchModelRuntime::normalize_user_chat_text("hola"),
+            "Saluda en una frase corta y espera la siguiente pregunta."
+        );
+        assert_eq!(
+            TorchModelRuntime::normalize_user_chat_text("a que hora llego el tren?"),
+            "¿A qué hora llego el tren?"
+        );
+        assert_eq!(
+            TorchModelRuntime::visible_completion(
+                "razonamiento interno</think>\n\nEl tren llegó a las 6:40.",
+                false
+            ),
+            "El tren llegó a las 6:40."
+        );
     }
 
     #[test]

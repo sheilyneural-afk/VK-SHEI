@@ -1,0 +1,134 @@
+{
+  "canonical_cpu_lod_components_active": true,
+  "canonical_cpu_lod_stats": {
+    "certificates_met": 168,
+    "cold_value_read_calls": 1008,
+    "exact_fallbacks": 0,
+    "exact_k_scores_computed_on_gpu": 51072,
+    "exact_v_tokens_read_from_cold": 3192,
+    "exact_v_tokens_skipped": 0,
+    "four_bit_index_payload_bytes": 264,
+    "gpu_stage_tokens": 8,
+    "maximum_certified_error_bound": 0.0,
+    "physical_cold_store_bytes": 579840,
+    "physical_cold_store_pages": 192,
+    "prefill_batched_page_tokens": 15,
+    "queries": 168,
+    "shared_original_cpu_algorithms": true
+  },
+  "completion_ids": [
+    61973,
+    61,
+    9239,
+    22,
+    49423,
+    358,
+    1715,
+    723
+  ],
+  "completion_text": "¡Hola! Parece que has",
+  "cpu_for_neural_arithmetic": false,
+  "device": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+  "engine": "Rust_OpenCL_Full_BF16_no_LibTorch",
+  "full_llm_layers_computed_on_gpu": true,
+  "gpu_compute": "FP32_accumulators_BF16_intermediate_storage",
+  "gpu_kv_capacity_bytes": 1585248,
+  "gpu_prefill_batch_tokens": 128,
+  "gpu_prefill_batches": 1,
+  "gpu_prefill_cold_seal_seconds": 0.007984868,
+  "gpu_prefill_temporary_v_capacity_bytes": 184320,
+  "historical_terravision_lod_active": false,
+  "input_prompt": "Hola",
+  "logits_summary": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "model_config": {
+    "declared_dtype": "bfloat16",
+    "declared_max_position_embeddings_not_certified": 131072,
+    "gpu_full_model_inference": false,
+    "gpu_kernels_implemented": true,
+    "gpu_reference_attention_compiled": true,
+    "legacy_bf16_geometry_match": true,
+    "legacy_model_ready_for_loading": true,
+    "model_metadata_inspection": true,
+    "model_type": "llama",
+    "native_cpu_llm_end_to_end": false,
+    "portable_byte_storage": true,
+    "remote_api_controls_external_weights_or_kv": false,
+    "rust_cpu_reference_attention": true,
+    "torch_inference_backend_compiled": false
+  },
+  "model_load_seconds": 0.634685602,
+  "model_weight_bytes": 2161265664,
+  "model_weights_dtype": "BF16",
+  "prefill_seconds": 0.353063161,
+  "prompt_ids": [
+    0,
+    130072,
+    8448,
+    220,
+    61,
+    9239,
+    130073,
+    220,
+    130072,
+    130071,
+    220,
+    8,
+    130063,
+    9,
+    130063
+  ],
+  "steps": [
+    {
+      "argmax_token": 61973,
+      "forward_seconds": 0.35303632,
+      "position": 14
+    },
+    {
+      "argmax_token": 61,
+      "forward_seconds": 0.11035652,
+      "position": 15
+    },
+    {
+      "argmax_token": 9239,
+      "forward_seconds": 0.133884719,
+      "position": 16
+    },
+    {
+      "argmax_token": 22,
+      "forward_seconds": 0.136372862,
+      "position": 17
+    },
+    {
+      "argmax_token": 49423,
+      "forward_seconds": 0.13577656,
+      "position": 18
+    },
+    {
+      "argmax_token": 358,
+      "forward_seconds": 0.134927601,
+      "position": 19
+    },
+    {
+      "argmax_token": 1715,
+      "forward_seconds": 0.135044942,
+      "position": 20
+    },
+    {
+      "argmax_token": 723,
+      "forward_seconds": 0.135929357,
+      "position": 21
+    }
+  ],
+  "torch_backend_used": false,
+  "total_generation_seconds": 1.27536008,
+  "weight_mode": "Resident"
+}

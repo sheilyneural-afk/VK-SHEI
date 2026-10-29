@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MiniCPM nativo BF16</title>
+    <style>
+      :root {
+        --bg: #111318;
+        --panel: #1a1d24;
+        --ink: #e8eaef;
+        --muted: #9aa3b2;
+        --line: #2a2f3a;
+        --accent: #e0b15a;
+        --user: #243044;
+        --assistant: #1f242e;
+        --danger: #ff8a80;
+        --ok: #7dcea0;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 15px/1.45 ui-sans-serif, system-ui, sans-serif; }
+      body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; min-height: 100%; }
+      main { display: flex; flex-direction: column; min-height: 100%; }
+      header, aside, footer { padding: 16px 20px; }
+      header { border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+      h1 { margin: 0; font-size: 18px; font-weight: 600; }
+      a { color: var(--accent); }
+      #status { color: var(--muted); font-size: 13px; }
+      #status.ok { color: var(--ok); }
+      #status.bad { color: var(--danger); }
+      #log { flex: 1; overflow: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+      .bubble { max-width: 46rem; padding: 10px 12px; border: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; }
+      .bubble.user { align-self: flex-end; background: var(--user); }
+      .bubble.assistant { align-self: flex-start; background: var(--assistant); }
+      .bubble.error { color: var(--danger); }
+      .role { display: block; color: var(--muted); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px; }
+      footer { border-top: 1px solid var(--line); display: grid; gap: 8px; }
+      textarea, input, button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); padding: 8px 10px; }
+      textarea { width: 100%; min-height: 72px; resize: vertical; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      button { background: var(--accent); color: #0b1220; border-color: transparent; font-weight: 600; cursor: pointer; }
+      button.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+      button:disabled { opacity: 0.5; cursor: wait; }
+      aside { background: var(--panel); border-left: 1px solid var(--line); overflow: auto; }
+      aside h2 { margin: 0 0 12px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; }
+      label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+      .check { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 13px; }
+      dl { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; font-size: 13px; }
+      dt { color: var(--muted); }
+      dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>MiniCPM nativo BF16 <a href="/" style="font-size:13px;font-weight:500">Terrsvusion</a></h1>
+        <div id="status">comprobando motor…</div>
+      </header>
+      <div id="log"></div>
+      <footer>
+        <textarea id="input" placeholder="El texto va tal cual al modelo: pega el libro, luego pregunta. Historial ON."></textarea>
+        <div class="row">
+          <button id="send" type="button">Enviar</button>
+          <button id="stop" class="ghost" type="button" hidden>Cancelar</button>
+          <button id="clear" class="ghost" type="button">Vaciar</button>
+        </div>
+      </footer>
+    </main>
+    <aside>
+      <h2>Control</h2>
+      <p style="color:#9aa3b2;font-size:13px;margin:0 0 12px">Mismos pesos MiniCPM5-1B. Atención densa BF16, plantilla oficial, sin sistema por defecto, sin reescribir preguntas, sin prefijo Terrsvusion.</p>
+      <dl id="engine"></dl>
+      <label for="system">Sistema (vacío = ninguno)</label>
+      <textarea id="system"></textarea>
+      <label for="max">max_tokens (1–512)</label>
+      <input id="max" type="number" min="1" max="512" value="128" />
+      <label class="check" for="history">
+        <input id="history" type="checkbox" checked />
+        Enviar historial
+      </label>
+      <label class="check" for="thinking">
+        <input id="thinking" type="checkbox" />
+        Cadena de pensamiento
+      </label>
+      <h2>Última respuesta</h2>
+      <dl id="metrics"></dl>
+    </aside>
+    <script>
+      const log = document.getElementById("log");
+      const input = document.getElementById("input");
+      const system = document.getElementById("system");
+      const maxTokens = document.getElementById("max");
+      const thinking = document.getElementById("thinking");
+      const history = document.getElementById("history");
+      const send = document.getElementById("send");
+      const stop = document.getElementById("stop");
+      const clear = document.getElementById("clear");
+      const status = document.getElementById("status");
+      const engine = document.getElementById("engine");
+      const metrics = document.getElementById("metrics");
+      const turns = [];
+      let abort = null;
+
+      function addBubble(role, text, isError) {
+        const node = document.createElement("div");
+        node.className = "bubble " + role + (isError ? " error" : "");
+        const label = document.createElement("span");
+        label.className = "role";
+        label.textContent = role;
+        node.append(label, document.createTextNode(text));
+        log.append(node);
+        log.scrollTop = log.scrollHeight;
+      }
+      function fillDl(el, rows) {
+        el.replaceChildren();
+        for (const [key, value] of rows) {
+          const dt = document.createElement("dt");
+          dt.textContent = key;
+          const dd = document.createElement("dd");
+          dd.textContent = value;
+          el.append(dt, dd);
+        }
+      }
+      async function ping() {
+        try {
+          const response = await fetch("/health");
+          const data = await response.json();
+          status.textContent = data.model + " · denso BF16";
+          status.className = "ok";
+          fillDl(engine, [
+            ["modelo", data.model],
+            ["atención", "dense_bf16"],
+            ["rewrites", "ninguno"],
+          ]);
+        } catch (error) {
+          status.textContent = "motor no disponible";
+          status.className = "bad";
+        }
+      }
+      async function submit() {
+        const text = input.value.trim();
+        if (!text || send.disabled) return;
+        const max = Number(maxTokens.value);
+        if (!(max >= 1 && max <= 512)) {
+          addBubble("assistant", "max_tokens debe estar entre 1 y 512.", true);
+          return;
+        }
+        turns.push({ role: "user", content: text });
+        addBubble("user", text);
+        input.value = "";
+        const messages = [];
+        if (system.value.trim()) {
+          messages.push({ role: "system", content: system.value.trim() });
+        }
+        if (history.checked) {
+          messages.push(...turns);
+        } else {
+          messages.push({ role: "user", content: text });
+        }
+        abort = new AbortController();
+        send.disabled = true;
+        stop.hidden = false;
+        try {
+          const response = await fetch("/v1/chat/completions", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            signal: abort.signal,
+            body: JSON.stringify({
+              messages,
+              max_tokens: max,
+              enable_thinking: thinking.checked,
+              native: true,
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error((data.error && data.error.message) || response.statusText);
+          }
+          const content = data.choices[0].message.content || "";
+          turns.push({ role: "assistant", content });
+          addBubble("assistant", content || "(vacío)");
+          const usage = data.usage || {};
+          fillDl(metrics, [
+            ["ruta", data.model],
+            ["prompt tok", usage.prompt_tokens],
+            ["salida tok", usage.completion_tokens],
+            ["prefill s", Number(usage.prefill_seconds || 0).toFixed(3)],
+            ["decode s", Number(usage.decode_seconds || 0).toFixed(3)],
+          ]);
+        } catch (error) {
+          addBubble("assistant", error.name === "AbortError" ? "Petición cancelada." : String(error.message || error), true);
+        } finally {
+          send.disabled = false;
+          stop.hidden = true;
+          abort = null;
+          input.focus();
+        }
+      }
+      send.addEventListener("click", submit);
+      stop.addEventListener("click", () => abort && abort.abort());
+      clear.addEventListener("click", () => {
+        turns.length = 0;
+        log.replaceChildren();
+        metrics.replaceChildren();
+      });
+      ping();
+    </script>
+  </body>
+</html>

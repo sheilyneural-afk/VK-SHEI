@@ -1,8 +1,0 @@
-/target/
-*.swp
-*.tmp
-.DS_Store
-
-# Local/editor and generated review scratch files
-tmp/
-*.log

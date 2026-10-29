@@ -1,0 +1,52 @@
+   Compiling terrsvusion v0.4.0 (/home/yo/Escritorio/terrsvusion-v3-rust-20261028-231043./terravision-v3)
+warning: associated function `restore_prefix` is never used
+    --> src/torch_runtime.rs:1128:8
+     |
+ 719 | impl TerrsvusionKvCache {
+     | ----------------------- associated function in this implementation
+...
+1128 |     fn restore_prefix(
+     |        ^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `terrsvusion` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.59s
+     Running unittests src/lib.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion-482eec9b343c2ca5)
+
+running 1 test
+LLAMA_32Q8KV_CERTIFIED_PHYSICAL_V_PASS K_scored=17 V_materialized=2 V_omitted=15 cold_partial_value_reads=1 cold_partial_bytes_avoided=30720 BF16_SDPA_Linf=0 bound=0.000000000000000000000000000002929772838020749 epsilon=0.001 old_prefix_fail_closed=true exact_mode_fail_closed=true
+test torch_runtime::tests::llama_32q8kv_certified_v_read_from_physical_coldstore_is_partial_and_bounded ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.08s
+
+     Running unittests src/bin/terrsvusion-inspect.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_inspect-ff4474c8e46ab81f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-long-context.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_long_context-15e340f0949023eb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-native-parity.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_native_parity-2c813a0daeee08e7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-server.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_server-71a573d8af28893c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-torch-chat.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_torch_chat-0135ef74eab10175)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -58,21 +58,36 @@ pub struct DimensionalMicroMetadata {
     pub validation_4bit: u8,
     /// Monotonic version of the last relationship update.
     pub relation_version: u64,
-    /// Logical neighbours connected by the communicating-dimension graph.
+    /// Logical neighbours connected by a measured semantic graph. Adjacent
+    /// extents are not linked unless their centroids actually agree.
+    #[serde(default)]
     pub communicating_dimensions: Vec<usize>,
-    /// Relevance propagated from connected dimensions, bounded to [0, 1].
+    /// Cosine similarity in `[0, 1]` aligned with `communicating_dimensions`.
+    #[serde(default)]
+    pub link_quality: Vec<f32>,
+    /// Previous extent in token order. This is structure, not semantics.
+    #[serde(default)]
+    pub temporal_predecessor: Option<usize>,
+    /// Highest measured link quality for this dimension, bounded to [0, 1].
+    #[serde(default)]
     pub propagated_relevance: f32,
+    /// Tightness of the extent around its centroid, bounded to (0, 1].
+    #[serde(default)]
+    pub coherence: f32,
     /// Number of compact deltas received by this dimension.
     pub received_deltas: u32,
 }
 
 impl DimensionalMicroMetadata {
-    fn new(validation_4bit: u8) -> Self {
+    fn new(validation_4bit: u8, coherence: f32) -> Self {
         Self {
             validation_4bit: validation_4bit & 0x0f,
             relation_version: 0,
             communicating_dimensions: Vec::new(),
-            propagated_relevance: 1.0,
+            link_quality: Vec::new(),
+            temporal_predecessor: None,
+            propagated_relevance: 0.0,
+            coherence: coherence.clamp(0.0, 1.0),
             received_deltas: 0,
         }
     }
@@ -80,7 +95,9 @@ impl DimensionalMicroMetadata {
     fn payload_bytes(&self) -> usize {
         1 + std::mem::size_of::<u64>()
             + self.communicating_dimensions.len() * std::mem::size_of::<usize>()
-            + std::mem::size_of::<f32>()
+            + self.link_quality.len() * std::mem::size_of::<f32>()
+            + std::mem::size_of::<Option<usize>>()
+            + std::mem::size_of::<f32>() * 2
             + std::mem::size_of::<u32>()
     }
 }
@@ -265,7 +282,7 @@ impl LshIndex {
 
     fn signatures(&self, values: &[f32]) -> [u64; 4] {
         std::array::from_fn(|table| {
-            let directional = self.projections[table].iter().enumerate().fold(
+            self.projections[table].iter().enumerate().fold(
                 0_u64,
                 |signature, (bit, projection)| {
                     let score = projection
@@ -275,26 +292,7 @@ impl LshIndex {
                         .sum::<f32>();
                     signature | u64::from(score >= 0.0) << bit
                 },
-            );
-            let mean =
-                values.iter().copied().map(f32::abs).sum::<f32>() / values.len().max(1) as f32;
-            let variance = values
-                .iter()
-                .map(|value| (value.abs() - mean).powi(2))
-                .sum::<f32>()
-                / values.len().max(1) as f32;
-            let norm_band = if mean > 0.0 {
-                mean.log2().round().clamp(-8.0, 7.0) as i8
-            } else {
-                -8
-            };
-            let spread = variance.sqrt();
-            let spread_band = if spread > 0.0 {
-                spread.log2().round().clamp(-8.0, 7.0) as i8
-            } else {
-                -8
-            };
-            directional ^ (((norm_band + 8) as u64) << 16) ^ (((spread_band + 8) as u64) << 20)
+            )
         })
     }
 
@@ -314,8 +312,8 @@ impl LshIndex {
     fn candidates(&self, query: &[f32], max_hamming: usize) -> Vec<usize> {
         let mut votes = HashMap::<usize, usize>::new();
         for (table, signature) in self.signatures(query).into_iter().enumerate() {
-            let limit = max_hamming.min(24);
-            visit_hamming_masks(0, limit, 0, &mut |mask| {
+            let limit = max_hamming.min(self.projections[table].len());
+            visit_hamming_masks(0, limit, 0, self.projections[table].len(), &mut |mask| {
                 if let Some(tokens) = self.buckets[table].get(&(signature ^ mask)) {
                     for token in tokens {
                         *votes.entry(*token).or_default() += 1;
@@ -337,19 +335,33 @@ impl LshIndex {
 /// Enumerate every distinct 24-bit mask with Hamming weight at most `limit`
 /// without allocating a per-query mask vector. The visit order and candidate
 /// votes are identical to the former materialized combination list.
-fn visit_hamming_masks(bit: usize, remaining: usize, current: u64, visit: &mut impl FnMut(u64)) {
+fn visit_hamming_masks(
+    bit: usize,
+    remaining: usize,
+    current: u64,
+    width: usize,
+    visit: &mut impl FnMut(u64),
+) {
     visit(current);
     if remaining == 0 {
         return;
     }
-    for next in bit..24 {
-        visit_hamming_masks(next + 1, remaining - 1, current | (1_u64 << next), visit);
+    for next in bit..width {
+        visit_hamming_masks(
+            next + 1,
+            remaining - 1,
+            current | (1_u64 << next),
+            width,
+            visit,
+        );
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ParallelContextAxis {
     dimension: usize,
+    kv_heads: usize,
+    head_dim: usize,
     fingerprint_dimension: usize,
     policy: AxisPolicy,
     next_token: usize,
@@ -358,8 +370,8 @@ pub struct ParallelContextAxis {
     previous_signal: Option<Vec<f32>>,
     open: Option<OpenExtent>,
     extents: Vec<SemanticExtent>,
-    token_fingerprints: Vec<FourBitFingerprint>,
-    lsh: LshIndex,
+    token_fingerprints: Vec<Vec<FourBitFingerprint>>,
+    lsh: Vec<LshIndex>,
     lsh_queries: usize,
     lsh_candidates: usize,
     lsh_misses: usize,
@@ -370,7 +382,15 @@ pub struct ParallelContextAxis {
 
 impl ParallelContextAxis {
     pub fn new(dimension: usize, policy: AxisPolicy) -> Result<Self> {
+        Self::new_partitioned(dimension, infer_kv_heads(dimension), policy)
+    }
+
+    pub fn new_partitioned(dimension: usize, kv_heads: usize, policy: AxisPolicy) -> Result<Self> {
         ensure!(dimension > 0, "dimensión paralela vacía");
+        ensure!(
+            kv_heads > 0 && dimension.is_multiple_of(kv_heads),
+            "partición KV inválida"
+        );
         ensure!(policy.warmup_observations > 0, "warmup vacío");
         ensure!(
             policy.novelty_sigma.is_finite() && policy.novelty_sigma >= 0.0,
@@ -382,9 +402,13 @@ impl ParallelContextAxis {
                 .is_none_or(|limit| limit > 0),
             "límite de seguridad vacío"
         );
+        let head_dim = dimension / kv_heads;
+        let fingerprint_dimension = head_dim.min(32);
         Ok(Self {
             dimension,
-            fingerprint_dimension: dimension.min(16),
+            kv_heads,
+            head_dim,
+            fingerprint_dimension,
             policy,
             next_token: 0,
             centroid_surprise: RunningNovelty::default(),
@@ -393,10 +417,13 @@ impl ParallelContextAxis {
             open: None,
             extents: Vec::new(),
             token_fingerprints: Vec::new(),
-            // The compact axis currently has at most 16 coordinates. A
-            // 16-bit signature keeps multi-probe useful instead of making
-            // every unrelated query miss in a 64-bit sparse space.
-            lsh: LshIndex::new(dimension.min(16), 16),
+            // One LSH table family per KV head. Mixing heads into a single
+            // 16-d average made query routing miss because protected Q only
+            // occupies the serving head. 16 directional bits stay dense
+            // enough for Hamming-2/4 probes.
+            lsh: (0..kv_heads)
+                .map(|_| LshIndex::new(fingerprint_dimension, 16))
+                .collect(),
             lsh_queries: 0,
             lsh_candidates: 0,
             lsh_misses: 0,
@@ -410,9 +437,12 @@ impl ParallelContextAxis {
     /// Returns the extent closed immediately before this token, if any.
     pub fn observe(&mut self, signal: &[f32]) -> Result<Option<SemanticExtent>> {
         self.validate_signal(signal)?;
-        let fingerprint = FourBitFingerprint::encode(&self.fingerprint(signal));
-        self.lsh.insert(self.token_fingerprints.len(), &fingerprint);
-        self.token_fingerprints.push(fingerprint);
+        let fingerprints = self.encode_heads(signal);
+        let token = self.token_fingerprints.len();
+        for (head, fingerprint) in fingerprints.iter().enumerate() {
+            self.lsh[head].insert(token, fingerprint);
+        }
+        self.token_fingerprints.push(fingerprints);
         let Some(open) = self.open.as_ref() else {
             self.open = Some(OpenExtent::new(self.next_token, signal));
             self.previous_signal = Some(signal.to_vec());
@@ -566,12 +596,16 @@ impl ParallelContextAxis {
     pub fn fingerprint_payload_bytes(&self) -> usize {
         self.token_fingerprints
             .iter()
+            .flatten()
             .map(FourBitFingerprint::payload_bytes)
             .sum()
     }
 
     pub fn f32_fingerprint_reference_bytes(&self) -> usize {
-        self.token_fingerprints.len() * self.fingerprint_dimension * std::mem::size_of::<f32>()
+        self.token_fingerprints.len()
+            * self.kv_heads
+            * self.fingerprint_dimension
+            * std::mem::size_of::<f32>()
     }
 
     /// Select a query-dependent number of reversible coordinates. The count is
@@ -588,16 +622,16 @@ impl ParallelContextAxis {
             !self.token_fingerprints.is_empty(),
             "catálogo de tokens vacío"
         );
-        let query = self.fingerprint(query);
+        let query_heads = self.encode_heads(query);
         self.lsh_queries += 1;
-        let mut candidate_tokens = self.lsh.candidates(&query, 2);
+        let mut candidate_tokens = self.candidates_from_heads(&query_heads, 2);
         if !candidate_tokens.is_empty() {
             self.lsh_probe_two += 1;
         }
         if candidate_tokens.is_empty() {
             // A wider probe remains advisory LSH routing. If it also misses,
             // the canonical certificate continues without heuristic seeds.
-            candidate_tokens = self.lsh.candidates(&query, 4);
+            candidate_tokens = self.candidates_from_heads(&query_heads, 4);
             if !candidate_tokens.is_empty() {
                 self.lsh_probe_four += 1;
             }
@@ -613,7 +647,7 @@ impl ParallelContextAxis {
             return Ok(Vec::new());
         }
         self.lsh_candidates += candidate_tokens.len();
-        let query_signatures = self.lsh.signatures(&query);
+        let query_signatures = self.signatures_for_heads(&query_heads);
         let extent_ids = self
             .extents
             .iter()
@@ -638,12 +672,12 @@ impl ParallelContextAxis {
                             && *token < extent.token_end
                     })
             })
-            .map(|token| (token, self.token_fingerprints[token].dot(&query)))
+            .map(|token| (token, self.token_dot(token, &query_heads)))
             .collect::<Vec<_>>();
         if scored.is_empty() {
             scored = candidate_tokens_before_extent_filter
                 .into_iter()
-                .map(|token| (token, self.token_fingerprints[token].dot(&query)))
+                .map(|token| (token, self.token_dot(token, &query_heads)))
                 .collect();
         }
         let maximum = scored
@@ -749,11 +783,20 @@ impl ParallelContextAxis {
         Ok(())
     }
 
-    fn fingerprint(&self, signal: &[f32]) -> Vec<f32> {
+    fn encode_heads(&self, signal: &[f32]) -> Vec<FourBitFingerprint> {
+        (0..self.kv_heads)
+            .map(|head| {
+                let start = head * self.head_dim;
+                FourBitFingerprint::encode(&self.pool_head(&signal[start..start + self.head_dim]))
+            })
+            .collect()
+    }
+
+    fn pool_head(&self, head: &[f32]) -> Vec<f32> {
         let mut fingerprint = vec![0.0_f32; self.fingerprint_dimension];
         let mut counts = vec![0_usize; self.fingerprint_dimension];
-        for (index, value) in signal.iter().copied().enumerate() {
-            let bucket = index * self.fingerprint_dimension / self.dimension;
+        for (index, value) in head.iter().copied().enumerate() {
+            let bucket = index * self.fingerprint_dimension / self.head_dim;
             fingerprint[bucket] += value;
             counts[bucket] += 1;
         }
@@ -763,14 +806,54 @@ impl ParallelContextAxis {
         fingerprint
     }
 
+    fn candidates_from_heads(
+        &self,
+        query_heads: &[FourBitFingerprint],
+        max_hamming: usize,
+    ) -> Vec<usize> {
+        let mut tokens = BTreeSet::new();
+        for (head, fingerprint) in query_heads.iter().enumerate() {
+            if head_energy(fingerprint) <= 1e-8 {
+                continue;
+            }
+            tokens.extend(self.lsh[head].candidates(&fingerprint.values(), max_hamming));
+        }
+        tokens.into_iter().collect()
+    }
+
+    fn signatures_for_heads(&self, heads: &[FourBitFingerprint]) -> [u64; 4] {
+        let mut combined = [0_u64; 4];
+        for (head, fingerprint) in heads.iter().enumerate() {
+            if head_energy(fingerprint) <= 1e-8 {
+                continue;
+            }
+            let signature = self.lsh[head].signatures(&fingerprint.values());
+            for (index, value) in signature.into_iter().enumerate() {
+                combined[index] ^= value.rotate_left((head as u32 * 5) % 16);
+            }
+        }
+        combined
+    }
+
+    fn token_dot(&self, token: usize, query_heads: &[FourBitFingerprint]) -> f32 {
+        self.token_fingerprints[token]
+            .iter()
+            .zip(query_heads)
+            .map(|(token_head, query_head)| token_head.dot(&query_head.values()))
+            .sum()
+    }
+
     fn close_open(&mut self, boundary_novelty: f32) -> Option<SemanticExtent> {
         let open = self.open.take()?;
         let centroid = open.centroid();
-        let lsh_signatures = self.lsh.signatures(&self.fingerprint(&centroid));
-        let validation_4bit = (lsh_signatures
+        let head_fingerprints = self.encode_heads(&centroid);
+        let lsh_signatures = self.signatures_for_heads(&head_fingerprints);
+        let validation_4bit = head_fingerprints
             .iter()
-            .fold(0_u64, |accumulator, signature| accumulator ^ signature)
-            & 0x0f) as u8;
+            .flat_map(|fingerprint| fingerprint.packed.iter().copied())
+            .fold(0_u8, |seal, byte| seal ^ byte)
+            & 0x0f;
+        let coherence = extent_coherence(&centroid, &open.minimum, &open.maximum);
         let extent = SemanticExtent {
             id: self.extents.len(),
             token_start: open.token_start,
@@ -780,7 +863,7 @@ impl ParallelContextAxis {
             maximum: open.maximum,
             boundary_novelty,
             lsh_signatures,
-            micro_metadata: DimensionalMicroMetadata::new(validation_4bit),
+            micro_metadata: DimensionalMicroMetadata::new(validation_4bit, coherence),
         };
         self.extents.push(extent.clone());
         self.propagate_dimensional_delta(extent.id);
@@ -788,52 +871,107 @@ impl ParallelContextAxis {
     }
 
     /// Connect a newly closed dimension to related dimensions using only
-    /// compact metadata. Adjacent dimensions always communicate; non-adjacent
-    /// links are added when their centroids are sufficiently close. The BF16
+    /// compact metadata. Links require a high cosine agreement of centroids
+    /// and non-trivial extent coherence. Adjacent-but-orthogonal extents are
+    /// recorded as temporal structure, not as semantic neighbours. The BF16
     /// extents are not read or copied here.
     fn propagate_dimensional_delta(&mut self, new_id: usize) {
         let new_centroid = self.extents[new_id].centroid.clone();
-        let mut neighbours = BTreeSet::new();
+        let new_coherence = self.extents[new_id].micro_metadata.coherence;
         if new_id > 0 {
-            neighbours.insert(new_id - 1);
+            self.extents[new_id].micro_metadata.temporal_predecessor = Some(new_id - 1);
         }
-        for candidate in 0..new_id.saturating_sub(1) {
-            if cosine_distance(&new_centroid, &self.extents[candidate].centroid) <= 0.35 {
-                neighbours.insert(candidate);
+        let mut neighbours = Vec::new();
+        for candidate in 0..new_id {
+            let quality = cosine_similarity(&new_centroid, &self.extents[candidate].centroid);
+            let other_coherence = self.extents[candidate].micro_metadata.coherence;
+            if quality >= SEMANTIC_LINK_QUALITY
+                && new_coherence >= MIN_EXTENT_COHERENCE
+                && other_coherence >= MIN_EXTENT_COHERENCE
+            {
+                neighbours.push((candidate, quality));
             }
         }
         self.relation_version = self.relation_version.saturating_add(1);
         let version = self.relation_version;
-        for neighbour in neighbours.iter().copied() {
-            self.extents[neighbour]
-                .micro_metadata
-                .communicating_dimensions
-                .push(new_id);
-            self.extents[neighbour]
-                .micro_metadata
-                .communicating_dimensions
-                .sort_unstable();
-            self.extents[neighbour]
-                .micro_metadata
-                .communicating_dimensions
-                .dedup();
+        for &(neighbour, quality) in &neighbours {
+            insert_quality_link(&mut self.extents[neighbour].micro_metadata, new_id, quality);
             self.extents[neighbour].micro_metadata.relation_version = version;
             self.extents[neighbour].micro_metadata.received_deltas = self.extents[neighbour]
                 .micro_metadata
                 .received_deltas
                 .saturating_add(1);
         }
-        self.extents[new_id].micro_metadata.communicating_dimensions =
-            neighbours.into_iter().collect();
-        self.extents[new_id].micro_metadata.relation_version = version;
-        self.extents[new_id].micro_metadata.propagated_relevance = 1.0
-            / (1.0
-                + self.extents[new_id]
-                    .micro_metadata
-                    .communicating_dimensions
-                    .len() as f32
-                    * 0.05);
+        let metadata = &mut self.extents[new_id].micro_metadata;
+        metadata.communicating_dimensions = neighbours.iter().map(|(id, _)| *id).collect();
+        metadata.link_quality = neighbours.iter().map(|(_, quality)| *quality).collect();
+        metadata.relation_version = version;
+        metadata.propagated_relevance = neighbours
+            .iter()
+            .map(|(_, quality)| *quality)
+            .fold(0.0_f32, f32::max);
     }
+}
+
+const SEMANTIC_LINK_QUALITY: f32 = 0.80;
+const MIN_EXTENT_COHERENCE: f32 = 0.12;
+
+fn infer_kv_heads(dimension: usize) -> usize {
+    for head_dim in [128, 64, 32] {
+        if dimension.is_multiple_of(head_dim) {
+            let heads = dimension / head_dim;
+            if (1..=16).contains(&heads) {
+                return heads;
+            }
+        }
+    }
+    1
+}
+
+fn head_energy(fingerprint: &FourBitFingerprint) -> f32 {
+    fingerprint
+        .values()
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt()
+}
+
+fn extent_coherence(centroid: &[f32], minimum: &[f32], maximum: &[f32]) -> f32 {
+    let mut centroid_norm = 0.0_f64;
+    let mut radius = 0.0_f64;
+    for ((centroid, minimum), maximum) in centroid.iter().zip(minimum).zip(maximum) {
+        let value = f64::from(*centroid);
+        centroid_norm += value * value;
+        let left = value - f64::from(*minimum);
+        let right = f64::from(*maximum) - value;
+        radius += left.max(right).max(0.0).powi(2);
+    }
+    let centroid_norm = centroid_norm.sqrt();
+    let radius = radius.sqrt();
+    if centroid_norm + radius == 0.0 {
+        1.0
+    } else {
+        (centroid_norm / (centroid_norm + radius)) as f32
+    }
+}
+
+fn insert_quality_link(metadata: &mut DimensionalMicroMetadata, neighbour: usize, quality: f32) {
+    if let Some(index) = metadata
+        .communicating_dimensions
+        .iter()
+        .position(|id| *id == neighbour)
+    {
+        metadata.link_quality[index] = metadata.link_quality[index].max(quality);
+    } else {
+        metadata.communicating_dimensions.push(neighbour);
+        metadata.link_quality.push(quality);
+    }
+    metadata.propagated_relevance = metadata.propagated_relevance.max(quality);
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    (1.0 - cosine_distance(left, right) / 2.0).clamp(0.0, 1.0)
 }
 
 fn cosine_distance(left: &[f32], right: &[f32]) -> f32 {
@@ -960,7 +1098,7 @@ mod tests {
     #[test]
     fn hamming_probe_streams_every_mask_once_without_materializing_a_vector() {
         let mut masks = BTreeSet::new();
-        visit_hamming_masks(0, 4, 0, &mut |mask| {
+        visit_hamming_masks(0, 4, 0, 24, &mut |mask| {
             assert!(masks.insert(mask), "máscara Hamming duplicada");
             assert!(mask.count_ones() <= 4);
         });
@@ -1063,18 +1201,12 @@ mod tests {
     }
 
     #[test]
-    fn dimensional_micro_metadata_communicates_by_compact_deltas() {
+    fn dimensional_micro_metadata_rejects_orthogonal_adjacent_garbage() {
         let mut axis = axis();
         for _ in 0..10 {
             axis.observe(&[1.0, 0.0]).unwrap();
         }
-        for _ in 0..5 {
-            axis.observe(&[1.0, 0.0]).unwrap();
-        }
         axis.flush();
-        assert_eq!(axis.extents().len(), 1);
-
-        // Force a second adaptive dimension with a distinct signal.
         for _ in 0..10 {
             axis.observe(&[0.0, 8.0]).unwrap();
         }
@@ -1084,9 +1216,72 @@ mod tests {
         let second = &axis.extents()[1].micro_metadata;
         assert!(first.validation_4bit < 16);
         assert!(second.validation_4bit < 16);
-        assert!(first.communicating_dimensions.contains(&1));
-        assert!(second.communicating_dimensions.contains(&0));
-        assert!(first.received_deltas >= 1);
+        assert!(
+            first.coherence > 0.9,
+            "a constant regime must produce a tight extent"
+        );
+        assert!(second.coherence > 0.9);
+        assert!(
+            first.communicating_dimensions.is_empty(),
+            "orthogonal extents must not emit a semantic link"
+        );
+        assert!(second.communicating_dimensions.is_empty());
+        assert_eq!(second.temporal_predecessor, Some(0));
+        assert_eq!(second.link_quality.len(), 0);
+        assert_eq!(second.propagated_relevance, 0.0);
         assert!(axis.micro_metadata_bytes() > 0);
+    }
+
+    #[test]
+    fn dimensional_micro_metadata_links_only_high_quality_semantic_neighbours() {
+        let mut axis = axis();
+        for _ in 0..10 {
+            axis.observe(&[1.0, 0.0]).unwrap();
+        }
+        axis.flush();
+        for _ in 0..10 {
+            axis.observe(&[0.0, 8.0]).unwrap();
+        }
+        axis.flush();
+        for _ in 0..10 {
+            axis.observe(&[1.0, 0.0]).unwrap();
+        }
+        axis.flush();
+        assert_eq!(axis.extents().len(), 3);
+        let first = &axis.extents()[0].micro_metadata;
+        let middle = &axis.extents()[1].micro_metadata;
+        let last = &axis.extents()[2].micro_metadata;
+        assert_eq!(first.communicating_dimensions, vec![2]);
+        assert_eq!(last.communicating_dimensions, vec![0]);
+        assert!(first.link_quality[0] >= 0.99);
+        assert!(last.link_quality[0] >= 0.99);
+        assert!(middle.communicating_dimensions.is_empty());
+        assert_eq!(last.temporal_predecessor, Some(1));
+        assert!(last.propagated_relevance >= 0.99);
+    }
+
+    #[test]
+    fn per_head_fourbit_index_routes_a_protected_query_without_scanning() {
+        let mut axis = ParallelContextAxis::new(256, AxisPolicy::default()).unwrap();
+        let mut serving = vec![0.0_f32; 256];
+        let mut other = vec![0.0_f32; 256];
+        serving[0] = 4.0;
+        other[128] = 4.0;
+        for _ in 0..8 {
+            axis.observe(&serving).unwrap();
+        }
+        for _ in 0..8 {
+            axis.observe(&other).unwrap();
+        }
+        let mut query = vec![0.0_f32; 256];
+        query[0] = 4.0;
+        let views = axis.materialize_query_tokens_adaptive(&query).unwrap();
+        let tokens = views
+            .iter()
+            .flat_map(ParallelContextAxis::expand_token_positions)
+            .collect::<Vec<_>>();
+        assert!(!tokens.is_empty());
+        assert!(tokens.iter().all(|token| *token < 8));
+        assert_eq!(axis.lsh_metrics().2, 0);
     }
 }

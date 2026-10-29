@@ -10,6 +10,7 @@ use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -21,7 +22,11 @@ pub trait InferenceExecutor: Send + 'static {
     type Response: Send + 'static;
     type Error: Send + 'static;
 
-    fn execute(&mut self, request: Self::Request) -> Result<Self::Response, Self::Error>;
+    fn execute(
+        &mut self,
+        request: Self::Request,
+        cancel: &AtomicBool,
+    ) -> Result<Self::Response, Self::Error>;
 }
 
 /// Submission failed before ownership of the request was accepted.
@@ -48,6 +53,7 @@ pub enum InferenceError<E> {
     Executor(E),
     ExecutorPanicked,
     WorkerStopped,
+    Cancelled,
 }
 
 impl<E: Display> Display for InferenceError<E> {
@@ -56,6 +62,7 @@ impl<E: Display> Display for InferenceError<E> {
             Self::Executor(error) => write!(formatter, "inference failed: {error}"),
             Self::ExecutorPanicked => formatter.write_str("inference executor panicked"),
             Self::WorkerStopped => formatter.write_str("inference worker stopped before replying"),
+            Self::Cancelled => formatter.write_str("inference cancelled"),
         }
     }
 }
@@ -124,12 +131,29 @@ impl<R, E> Drop for Completion<R, E> {
 
 struct Job<Q, R, E> {
     request: Q,
+    cancel: Arc<AtomicBool>,
     completion: Completion<R, E>,
 }
 
 /// Awaitable response for one accepted inference request.
 pub struct InferenceResponse<R, E> {
     cell: Arc<ResponseCell<R, E>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl<R, E> Drop for InferenceResponse<R, E> {
+    fn drop(&mut self) {
+        let finished = self
+            .cell
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .result
+            .is_some();
+        if !finished {
+            self.cancel.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 impl<R, E> InferenceResponse<R, E> {
@@ -212,8 +236,13 @@ where
             .spawn(move || {
                 let mut executor = executor;
                 while let Ok(job) = receiver.recv() {
-                    let result =
-                        panic::catch_unwind(AssertUnwindSafe(|| executor.execute(job.request)));
+                    if job.cancel.load(Ordering::SeqCst) {
+                        job.completion.finish(Err(InferenceError::Cancelled));
+                        continue;
+                    }
+                    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                        executor.execute(job.request, &job.cancel)
+                    }));
                     match result {
                         Ok(Ok(response)) => job.completion.finish(Ok(response)),
                         Ok(Err(error)) => {
@@ -221,7 +250,6 @@ where
                         }
                         Err(_) => {
                             job.completion.finish(Err(InferenceError::ExecutorPanicked));
-                            break;
                         }
                     }
                 }
@@ -233,17 +261,94 @@ where
     /// backpressure suitable for mapping to HTTP 429 or 503 plus Retry-After.
     pub fn try_submit(&self, request: Q) -> Result<InferenceResponse<R, E>, SubmitError> {
         let cell = Arc::new(ResponseCell::pending());
+        let cancel = Arc::new(AtomicBool::new(false));
         let job = Job {
             request,
+            cancel: Arc::clone(&cancel),
             completion: Completion {
                 cell: Arc::clone(&cell),
                 completed: false,
             },
         };
         match self.sender.try_send(job) {
-            Ok(()) => Ok(InferenceResponse { cell }),
+            Ok(()) => Ok(InferenceResponse { cell, cancel }),
             Err(TrySendError::Full(_)) => Err(SubmitError::QueueFull),
             Err(TrySendError::Disconnected(_)) => Err(SubmitError::WorkerStopped),
+        }
+    }
+}
+
+/// Round-robin pool of independent model owners. Each worker loads its own
+/// authority; requests never share a LibTorch module.
+pub struct InferencePool<Q, R, E> {
+    workers: Vec<InferenceWorker<Q, R, E>>,
+    cursor: AtomicUsize,
+}
+
+impl<Q, R, E> Clone for InferencePool<Q, R, E> {
+    fn clone(&self) -> Self {
+        Self {
+            workers: self.workers.clone(),
+            cursor: AtomicUsize::new(self.cursor.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl<Q, R, E> InferencePool<Q, R, E>
+where
+    Q: Send + 'static,
+    R: Send + 'static,
+    E: Send + 'static,
+{
+    pub fn spawn_many<X, F>(
+        worker_count: usize,
+        queue_capacity: usize,
+        mut factory: F,
+    ) -> std::io::Result<Self>
+    where
+        X: InferenceExecutor<Request = Q, Response = R, Error = E>,
+        F: FnMut(usize) -> std::io::Result<X>,
+    {
+        if worker_count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "inference worker count must be greater than zero",
+            ));
+        }
+        let mut workers = Vec::with_capacity(worker_count);
+        for index in 0..worker_count {
+            workers.push(InferenceWorker::spawn(factory(index)?, queue_capacity)?);
+        }
+        Ok(Self {
+            workers,
+            cursor: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    pub fn try_submit(&self, request: Q) -> Result<InferenceResponse<R, E>, SubmitError>
+    where
+        Q: Clone,
+    {
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+        let mut stopped = 0_usize;
+        for offset in 0..self.workers.len() {
+            match self.workers[(start + offset) % self.workers.len()].try_submit(request.clone()) {
+                Ok(response) => return Ok(response),
+                Err(SubmitError::QueueFull) => continue,
+                Err(SubmitError::WorkerStopped) => {
+                    stopped += 1;
+                    continue;
+                }
+            }
+        }
+        if stopped == self.workers.len() {
+            Err(SubmitError::WorkerStopped)
+        } else {
+            Err(SubmitError::QueueFull)
         }
     }
 }
@@ -251,7 +356,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     struct RecordingExecutor {
@@ -264,7 +369,7 @@ mod tests {
         type Response = usize;
         type Error = &'static str;
 
-        fn execute(&mut self, request: usize) -> Result<usize, Self::Error> {
+        fn execute(&mut self, request: usize, _cancel: &AtomicBool) -> Result<usize, Self::Error> {
             let current = thread::current().id();
             let mut owner = self.owner.lock().unwrap();
             match *owner {
@@ -313,7 +418,7 @@ mod tests {
         type Response = usize;
         type Error = ();
 
-        fn execute(&mut self, request: usize) -> Result<usize, ()> {
+        fn execute(&mut self, request: usize, _cancel: &AtomicBool) -> Result<usize, ()> {
             if request == 1 {
                 self.started.send(()).unwrap();
                 self.release.recv().unwrap();
@@ -344,32 +449,101 @@ mod tests {
         assert_eq!(queued.wait(), Ok(2));
     }
 
-    struct PanicExecutor;
+    struct RecoveringExecutor {
+        panics: AtomicUsize,
+    }
 
-    impl InferenceExecutor for PanicExecutor {
+    impl InferenceExecutor for RecoveringExecutor {
         type Request = ();
-        type Response = ();
+        type Response = &'static str;
         type Error = ();
 
-        fn execute(&mut self, (): ()) -> Result<(), ()> {
-            panic!("synthetic executor panic")
+        fn execute(&mut self, (): (), _cancel: &AtomicBool) -> Result<&'static str, ()> {
+            if self.panics.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("synthetic executor panic");
+            }
+            Ok("recovered")
         }
     }
 
     #[test]
-    fn panic_is_reported_and_later_submissions_see_stopped_worker() {
-        let worker = InferenceWorker::spawn(PanicExecutor, 1).unwrap();
+    fn panic_is_reported_and_the_worker_keeps_serving() {
+        let worker = InferenceWorker::spawn(
+            RecoveringExecutor {
+                panics: AtomicUsize::new(0),
+            },
+            1,
+        )
+        .unwrap();
         assert_eq!(
             worker.try_submit(()).unwrap().wait(),
             Err(InferenceError::ExecutorPanicked)
         );
-        for _ in 0..100 {
-            if matches!(worker.try_submit(()), Err(SubmitError::WorkerStopped)) {
-                return;
-            }
-            thread::yield_now();
+        assert_eq!(worker.try_submit(()).unwrap().wait(), Ok("recovered"));
+    }
+
+    #[test]
+    fn dropping_the_response_cancels_a_queued_job() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = InferenceWorker::spawn(
+            GatedExecutor {
+                started: started_tx,
+                release: release_rx,
+            },
+            1,
+        )
+        .unwrap();
+        let running = worker.try_submit(1).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let queued = worker.try_submit(2).unwrap();
+        drop(queued);
+        release_tx.send(()).unwrap();
+        assert_eq!(running.wait(), Ok(1));
+        let after = worker.try_submit(4).unwrap().wait();
+        assert_eq!(after, Ok(4));
+    }
+
+    #[test]
+    fn pool_runs_independent_executors_in_parallel() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let started = Arc::new(Mutex::new(Some(started_tx)));
+        let release = Arc::new(Mutex::new(Some(release_rx)));
+        struct PoolGate {
+            started: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+            release: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
         }
-        panic!("worker sender did not observe receiver shutdown");
+        impl InferenceExecutor for PoolGate {
+            type Request = usize;
+            type Response = usize;
+            type Error = ();
+            fn execute(&mut self, request: usize, _cancel: &AtomicBool) -> Result<usize, ()> {
+                if request == 1 {
+                    if let Some(started) = self.started.lock().unwrap().take() {
+                        started.send(()).unwrap();
+                    }
+                    if let Some(release) = self.release.lock().unwrap().take() {
+                        release.recv().unwrap();
+                    }
+                }
+                Ok(request)
+            }
+        }
+        let pool = InferencePool::spawn_many(2, 1, |_| {
+            Ok(PoolGate {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            })
+        })
+        .unwrap();
+        let first = pool.try_submit(1).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second = pool.try_submit(7).unwrap();
+        assert_eq!(second.wait(), Ok(7));
+        release_tx.send(()).unwrap();
+        assert_eq!(first.wait(), Ok(1));
+        assert_eq!(pool.worker_count(), 2);
     }
 
     #[test]

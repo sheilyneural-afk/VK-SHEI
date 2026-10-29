@@ -1,0 +1,34 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion-954b534cbffff4d0)
+
+running 3 tests
+test gpu_micro_regions::tests::metadata_never_authorizes_epsilon_zero_or_nan ... ok
+test gpu_micro_regions::tests::regional_micro_certificate_prunes_only_reliably_separated_original_states ... ok
+test gpu_micro_regions::tests::ambiguous_regions_fail_closed_to_full_scoring ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-igpu-bench.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_igpu_bench-59ce2082c496c245)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-inspect.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_inspect-bcdfb881ec7b6cf6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-llm.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_opencl_llm-08fb505f5fa49c35)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-server.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_opencl_server-dc98337de62497e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+

@@ -1,0 +1,35 @@
+   Compiling terrsvusion v0.4.0 (/home/yo/Escritorio/terrsvusion-v3-rust-20261028-231043./terravision-v3)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.25s
+     Running unittests src/lib.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion-954b534cbffff4d0)
+
+running 1 test
+GPU_SHARED_PREFIX_PHYSICAL_PASS original_prompt_tokens=375 changed_prompt_tokens=376 shared_verified_prefix_tokens=355 suffix_new_tokens=21 full_prefill_s=2.192866 shared_prefill_s=1.138269 full_model_total_s=3.355698 shared_model_total_s=2.313670 full_logits_all_steps_identical=true ColdStore_KV_SHA_identical=true original_index_4bit_rebuilt=true
+GPU_SHARED_PREFIX_SHA_CORRUPTION_REJECTED full_gpu_prefill_recomputed=true
+test opencl_llm::tests::gpu_actual_verified_shared_prefix_375_vs_full_bf16_kv_and_logits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out; finished in 20.04s
+
+     Running unittests src/bin/terrsvusion-igpu-bench.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_igpu_bench-59ce2082c496c245)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-inspect.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_inspect-bcdfb881ec7b6cf6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-llm.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_opencl_llm-08fb505f5fa49c35)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-server.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_opencl_server-dc98337de62497e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+

@@ -1,0 +1,18 @@
+{
+  "full_gpu_model_weights_uploaded": true,
+  "gpu": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+  "gpu_reported_global_memory_bytes": 4294967296,
+  "loaded": true,
+  "mode": "Resident",
+  "note": "No token generated in --load-only mode",
+  "startup_seconds": 100.132626317,
+  "weight_bytes_from_checkpoint": 2161265664,
+  "weight_verification": {
+    "all_original_bf16_bytes_equal": true,
+    "gpu_readback_concatenated_sha256": "1fb1632db083ec58baad8d7870b8bcfa4d593af112a903e6c14c2d231c7c2b5d",
+    "original_concatenated_sha256": "1fb1632db083ec58baad8d7870b8bcfa4d593af112a903e6c14c2d231c7c2b5d",
+    "tensor_count": 219,
+    "verification_method": "GPU_readback_every_BF16_byte_vs_original_safetensors_mmap",
+    "verified_bytes": 2161265664
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "comparison": "MiniCPM5-1B_dense_BF16_CPU_vs_native_Rust_OpenCL_iGPU",
+  "dense_cpu_outputs": [
+    61973,
+    61
+  ],
+  "dense_cpu_seconds": 0.220468994,
+  "dense_kv_sha256": "3eb97b98bb68b88bf47c7307edba05910e79c2f34a48a979433de4b8cede74c4",
+  "first_token_mismatch": null,
+  "gpu_device": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+  "gpu_historical_terravision_lod_active": false,
+  "gpu_kv_sha256": "60686162707d80172aece26b0094c844fb711a71ad57d3143205b5366812bc5b",
+  "gpu_load_seconds": 2.735813734,
+  "gpu_outputs": [
+    61973,
+    61
+  ],
+  "gpu_total_seconds": 1.23478169,
+  "kv_sha256_equal": false,
+  "logit_comparisons": [
+    {
+      "cpu_token": 61973,
+      "exactly_equal_logits_count": 5956,
+      "first_logit_mismatch_index": 0,
+      "gpu_token": 61973,
+      "max_abs_logit_difference": 0.5,
+      "mean_abs_logit_difference": 0.07752379141200115,
+      "step": 0,
+      "vocab_count": 130560
+    },
+    {
+      "cpu_token": 61,
+      "exactly_equal_logits_count": 8452,
+      "first_logit_mismatch_index": 0,
+      "gpu_token": 61,
+      "max_abs_logit_difference": 0.5,
+      "mean_abs_logit_difference": 0.06581939206842113,
+      "step": 1,
+      "vocab_count": 130560
+    }
+  ],
+  "logits_bit_exact": false,
+  "max_abs_logit_difference": 0.5,
+  "same_greedy_decoding": true,
+  "same_input_token_ids": [
+    0,
+    130072,
+    8448,
+    220,
+    61,
+    9239,
+    130073,
+    220,
+    130072,
+    130071,
+    220,
+    8,
+    130063,
+    9,
+    130063
+  ],
+  "same_tokenizer": true,
+  "same_weights": true,
+  "token_parity": true
+}

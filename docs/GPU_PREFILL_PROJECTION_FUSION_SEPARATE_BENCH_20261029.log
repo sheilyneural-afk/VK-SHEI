@@ -1,0 +1,43 @@
+   Compiling terrsvusion v0.4.0 (/home/yo/Escritorio/terrsvusion-v3-rust-20261028-231043./terravision-v3)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.90s
+     Running unittests src/lib.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion-954b534cbffff4d0)
+
+running 1 test
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=1 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=3 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=7 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=8 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=9 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=16 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=17 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=64 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens=128 hidden=1536 q_rows=2048 kv_rows=256 middle=4096 all_QKV_SwiGLU_BF16_bytes_identical=true
+GPU_PREFILL_PROJECTION_TIMING tokens=128 qkv_old_ms=4.185085 qkv_fused_ms=8.008811 qkv_speedup=0.5226 mlp_old_ms=11.667607 mlp_fused_ms=10.600722 mlp_speedup=1.1006 samples=40 BF16_exact=true
+test opencl_llm::tests::gpu_actual_prefill_fused_qkv_and_swiglu_match_original_128_lanes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 89 filtered out; finished in 4.01s
+
+     Running unittests src/bin/terrsvusion-igpu-bench.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_igpu_bench-59ce2082c496c245)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-inspect.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_inspect-bcdfb881ec7b6cf6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-llm.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_opencl_llm-08fb505f5fa49c35)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-server.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/debug/deps/terrsvusion_opencl_server-dc98337de62497e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
