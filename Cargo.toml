@@ -1,0 +1,41 @@
+[package]
+name = "terrsvusion"
+version = "0.4.0"
+edition = "2024"
+
+[lib]
+name = "terrsvusion"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "terrsvusion-server"
+path = "src/bin/terrsvusion-server.rs"
+
+[[bin]]
+name = "terrsvusion-long-context"
+path = "src/bin/terrsvusion-long-context.rs"
+
+[[bin]]
+name = "terrsvusion-torch-chat"
+path = "src/bin/terrsvusion-torch-chat.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+half = { version = "2", features = ["bytemuck", "serde"] }
+memmap2 = "0.9"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+safetensors = "0.3.3"
+tempfile = "3"
+tokenizers = "0.22"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
+tch = "0.18"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
