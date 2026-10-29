@@ -500,7 +500,16 @@ mod tests {
         drop(queued);
         release_tx.send(()).unwrap();
         assert_eq!(running.wait(), Ok(1));
-        let after = worker.try_submit(4).unwrap().wait();
+        // The worker must dequeue the cancelled item before the bounded
+        // channel has a free slot.  Waiting for that observable transition
+        // avoids making the test depend on scheduler timing.
+        let after = loop {
+            match worker.try_submit(4) {
+                Ok(response) => break response.wait(),
+                Err(SubmitError::QueueFull) => thread::sleep(Duration::from_millis(1)),
+                Err(error) => panic!("unexpected submission failure: {error}"),
+            }
+        };
         assert_eq!(after, Ok(4));
     }
 
