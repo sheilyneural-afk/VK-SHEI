@@ -194,8 +194,8 @@ pub fn model_weight_file(model_dir: impl AsRef<Path>) -> Result<PathBuf> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatTemplateFamily {
-    MiniCpm5,
-    Llama3,
+    PrefixDelimited,
+    TemplateDelimited,
 }
 
 struct DecoderGeometry {
@@ -215,42 +215,25 @@ struct DecoderGeometry {
 
 impl DecoderGeometry {
     fn from_spec(spec: &ModelSpec) -> Result<Self> {
-        if spec.native_profile_match {
-            Ok(Self {
-                hidden: 1_536,
-                intermediate: 4_608,
-                vocab: 130_560,
-                n_layers: 24,
-                query_heads: 16,
-                kv_heads: 2,
-                head_dim: 128,
-                rope_theta: 5_000_000.0,
-                rms_eps: 1e-6,
-                llama3_rope: false,
-                eos: vec![1, 130_073],
-                chat: ChatTemplateFamily::MiniCpm5,
-            })
-        } else if spec.matches_dense_profile() {
-            Ok(Self {
-                hidden: 4_096,
-                intermediate: 14_336,
-                vocab: 128_256,
-                n_layers: 32,
-                query_heads: 32,
-                kv_heads: 8,
-                head_dim: 128,
-                rope_theta: spec.rope_theta.unwrap_or(500_000.0),
-                rms_eps: spec.rms_norm_eps.unwrap_or(1e-5),
-                llama3_rope: true,
-                eos: vec![128_001, 128_008, 128_009],
-                chat: ChatTemplateFamily::Llama3,
-            })
-        } else {
-            bail!(
-                "geometría no soportada por el runtime CPU: {}",
-                spec.model_type
-            )
-        }
+        let intermediate = spec
+            .intermediate_size
+            .context("missing intermediate_size")?;
+        let vocab = spec.vocab_size.context("missing vocab_size")?;
+        let eos = spec.eos_token_ids.iter().map(|&id| i64::from(id)).collect();
+        Ok(Self {
+            hidden: spec.hidden_size as i64,
+            intermediate: intermediate as i64,
+            vocab: vocab as i64,
+            n_layers: spec.num_hidden_layers,
+            query_heads: spec.attention.query_heads as i64,
+            kv_heads: spec.attention.kv_heads as i64,
+            head_dim: spec.attention.head_dim as i64,
+            rope_theta: spec.rope_theta.unwrap_or(10_000.0),
+            rms_eps: spec.rms_norm_eps.unwrap_or(1e-5),
+            llama3_rope: spec.rope_scaling.is_some(),
+            eos,
+            chat: ChatTemplateFamily::TemplateDelimited,
+        })
     }
 
     fn query_out(&self) -> i64 {
@@ -262,7 +245,7 @@ impl DecoderGeometry {
     }
 }
 
-pub struct MiniCpmLayer {
+pub struct DecoderLayer {
     input_norm: Tensor,
     q: Tensor,
     k: Tensor,
@@ -280,9 +263,9 @@ pub struct MiniCpmLayer {
     llama3_rope: bool,
 }
 
-pub struct MiniCpmModel {
+pub struct DecoderModel {
     embedding: Tensor,
-    layers: Vec<MiniCpmLayer>,
+    layers: Vec<DecoderLayer>,
     final_norm: Tensor,
     lm_head: Tensor,
     rms_eps: f64,
@@ -5094,7 +5077,7 @@ impl AttentionCache for KVSLIMKvCache {
     }
 }
 
-impl MiniCpmModel {
+impl DecoderModel {
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
         let spec = ModelSpec::inspect(&model_dir)?;
         spec.ensure_cpu_runtime_compatible()?;
@@ -5107,7 +5090,7 @@ impl MiniCpmModel {
         let final_norm = weights.require_bf16("model.norm.weight", &[geometry.hidden])?;
         let lm_head = weights.require_bf16("lm_head.weight", &[geometry.vocab, geometry.hidden])?;
         let layers = (0..geometry.n_layers)
-            .map(|layer| MiniCpmLayer::load(&weights, layer, &geometry))
+            .map(|layer| DecoderLayer::load(&weights, layer, &geometry))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             embedding,
@@ -5120,7 +5103,7 @@ impl MiniCpmModel {
             query_heads: geometry.query_heads,
             kv_heads: geometry.kv_heads,
             head_dim: geometry.head_dim,
-            streaming_prefill: geometry.chat == ChatTemplateFamily::Llama3,
+            streaming_prefill: geometry.chat == ChatTemplateFamily::TemplateDelimited,
             declared_context_limit: spec
                 .max_position_embeddings
                 .context("config.json necesita max_position_embeddings")?,
@@ -5154,7 +5137,7 @@ impl MiniCpmModel {
             hidden = layer.forward_cached(&hidden, layer_index, past_tokens, cache)?;
         }
         cache.finish_step(token_ids.len());
-        let hidden = MiniCpmLayer::rms_norm(&hidden, &self.final_norm, self.rms_eps);
+        let hidden = DecoderLayer::rms_norm(&hidden, &self.final_norm, self.rms_eps);
         Ok(hidden.matmul(&self.lm_head.transpose(0, 1)))
     }
 
@@ -5534,7 +5517,7 @@ pub struct ReferenceSpeculativeGeneration {
 }
 
 pub struct TorchModelRuntime {
-    model: MiniCpmModel,
+    model: DecoderModel,
     tokenizer: Tokenizer,
     prefix_cache_dir: Option<PathBuf>,
     model_identity: String,
@@ -5581,13 +5564,8 @@ impl TorchModelRuntime {
         let spec = ModelSpec::inspect(model_dir)?;
         spec.ensure_cpu_runtime_compatible()?;
         let tokenizer_path = model_dir.join("tokenizer.json");
-        let model_identity = if spec.native_profile_match {
-            let weight_path = model_weight_file(model_dir)?;
-            Self::runtime_identity(&weight_path, &tokenizer_path)?
-        } else {
-            Self::runtime_identity_from_shards(model_dir, &spec, &tokenizer_path)?
-        };
-        let model = MiniCpmModel::load(model_dir)?;
+        let model_identity = Self::runtime_identity_from_shards(model_dir, &spec, &tokenizer_path)?;
+        let model = DecoderModel::load(model_dir)?;
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|error| anyhow::anyhow!("tokenizer {}: {error}", tokenizer_path.display()))?;
         Ok(Self {
@@ -5603,13 +5581,13 @@ impl TorchModelRuntime {
     /// each generation call and are never shared by this operation.
     pub fn shallow_clone_shared_weights(&self) -> Result<Self> {
         let clone = Self {
-            model: MiniCpmModel {
+            model: DecoderModel {
                 embedding: self.model.embedding.shallow_clone(),
                 layers: self
                     .model
                     .layers
                     .iter()
-                    .map(MiniCpmLayer::shallow_clone_shared_weights)
+                    .map(DecoderLayer::shallow_clone_shared_weights)
                     .collect(),
                 final_norm: self.model.final_norm.shallow_clone(),
                 lm_head: self.model.lm_head.shallow_clone(),
@@ -5650,23 +5628,6 @@ impl TorchModelRuntime {
         ids.push(self.model.final_norm.data_ptr() as usize);
         ids.push(self.model.lm_head.data_ptr() as usize);
         ids
-    }
-
-    fn runtime_identity(weight_path: &Path, tokenizer_path: &Path) -> Result<String> {
-        let mut digest = Sha256::new();
-        for path in [weight_path, tokenizer_path] {
-            let mut file = File::open(path)
-                .with_context(|| format!("abrir identidad runtime {}", path.display()))?;
-            let mut buffer = vec![0_u8; 1024 * 1024];
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                digest.update(&buffer[..read]);
-            }
-        }
-        Ok(Self::hex_digest(digest.finalize().as_slice()))
     }
 
     fn runtime_identity_from_shards(
@@ -5748,7 +5709,7 @@ impl TorchModelRuntime {
         Ok(prompt)
     }
 
-    fn render_llama3_messages(
+    fn render_template_messages(
         messages: &[TorchChatMessage],
         add_generation_prompt: bool,
     ) -> Result<String> {
@@ -5774,17 +5735,19 @@ impl TorchModelRuntime {
 
     fn chat_prompt(&self, messages: &[TorchChatMessage], enable_thinking: bool) -> Result<String> {
         match self.model.chat {
-            ChatTemplateFamily::MiniCpm5 => {
+            ChatTemplateFamily::PrefixDelimited => {
                 Self::render_messages_with_thinking(messages, enable_thinking)
             }
-            ChatTemplateFamily::Llama3 => Self::render_llama3_messages(messages, true),
+            ChatTemplateFamily::TemplateDelimited => Self::render_template_messages(messages, true),
         }
     }
 
     fn chat_prefix(&self, messages: &[TorchChatMessage]) -> Result<String> {
         match self.model.chat {
-            ChatTemplateFamily::MiniCpm5 => Self::render_message_prefix(messages),
-            ChatTemplateFamily::Llama3 => Self::render_llama3_messages(messages, false),
+            ChatTemplateFamily::PrefixDelimited => Self::render_message_prefix(messages),
+            ChatTemplateFamily::TemplateDelimited => {
+                Self::render_template_messages(messages, false)
+            }
         }
     }
 
@@ -5825,12 +5788,13 @@ impl TorchModelRuntime {
     }
 
     const DEFAULT_CHAT_SYSTEM: &str = "Eres el asistente de KVSLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. No pidas aclaraciones si ya se entiende.";
-    const DEFAULT_LLAMA_CHAT_SYSTEM: &str = "Eres el asistente de KVSLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. No pidas aclaraciones si ya se entiende.";
+    const DEFAULT_TEMPLATE_CHAT_SYSTEM: &str =
+        "Responde de forma directa y breve, en el idioma del usuario.";
 
     fn default_system_prompt(&self) -> &'static str {
         match self.model.chat {
-            ChatTemplateFamily::MiniCpm5 => Self::DEFAULT_CHAT_SYSTEM,
-            ChatTemplateFamily::Llama3 => Self::DEFAULT_LLAMA_CHAT_SYSTEM,
+            ChatTemplateFamily::PrefixDelimited => Self::DEFAULT_CHAT_SYSTEM,
+            ChatTemplateFamily::TemplateDelimited => Self::DEFAULT_TEMPLATE_CHAT_SYSTEM,
         }
     }
 
@@ -7428,7 +7392,7 @@ impl TorchModelRuntime {
     }
 }
 
-impl MiniCpmLayer {
+impl DecoderLayer {
     fn shallow_clone_shared_weights(&self) -> Self {
         Self {
             input_norm: self.input_norm.shallow_clone(),
@@ -8135,9 +8099,9 @@ mod tests {
     fn shallow_runtime_clone_shares_every_weight_storage() {
         let weight = || Tensor::zeros([1], (Kind::BFloat16, Device::Cpu));
         let authority = TorchModelRuntime {
-            model: MiniCpmModel {
+            model: DecoderModel {
                 embedding: weight(),
-                layers: vec![MiniCpmLayer {
+                layers: vec![DecoderLayer {
                     input_norm: weight(),
                     q: weight(),
                     k: weight(),
@@ -8158,7 +8122,7 @@ mod tests {
                 lm_head: weight(),
                 rms_eps: 1e-5,
                 eos: vec![1],
-                chat: ChatTemplateFamily::MiniCpm5,
+                chat: ChatTemplateFamily::PrefixDelimited,
                 query_heads: 1,
                 kv_heads: 1,
                 head_dim: 1,
@@ -8678,7 +8642,7 @@ mod tests {
 
     #[test]
     fn llama3_chat_template_uses_begin_of_text_headers() {
-        let prompt = TorchModelRuntime::render_llama3_messages(
+        let prompt = TorchModelRuntime::render_template_messages(
             &[
                 TorchChatMessage {
                     role: "system".to_owned(),

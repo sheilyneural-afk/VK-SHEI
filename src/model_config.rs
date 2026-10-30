@@ -37,8 +37,8 @@ pub struct ModelSpec {
     pub tie_word_embeddings: Option<bool>,
     pub weight_shards: Vec<String>,
     pub tokenizer_json_present: bool,
-    /// These fields are always descriptive; they do not certify actual accuracy.
-    pub native_profile_match: bool,
+    /// End-of-sequence ids declared by the bundle, if present.
+    pub eos_token_ids: Vec<u32>,
 }
 
 impl ModelSpec {
@@ -166,18 +166,27 @@ impl ModelSpec {
             })
             .collect::<Vec<_>>();
         weight_shards.sort();
-        let native_profile_match = model_type == "llama"
-            && storage_format == Some(FloatFormat::Bf16)
-            && hidden_size == 1536
-            && intermediate_size == Some(4608)
-            && num_hidden_layers == 24
-            && query_heads == 16
-            && kv_heads == 2
-            && head_dim == 128
-            && vocab_size == Some(130_560)
-            && rope_theta == Some(5_000_000.0)
-            && rms_norm_eps == Some(1e-6)
-            && tie_word_embeddings == Some(false);
+        let eos_token_ids = match config.get("eos_token_id") {
+            Some(Value::Number(value)) => vec![
+                value
+                    .as_u64()
+                    .context("eos_token_id debe ser un entero")?
+                    .try_into()
+                    .context("eos_token_id fuera de rango")?,
+            ],
+            Some(Value::Array(values)) => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .context("eos_token_id debe contener enteros")?
+                        .try_into()
+                        .context("eos_token_id fuera de rango")
+                })
+                .collect::<Result<Vec<u32>>>()?,
+            Some(_) => anyhow::bail!("eos_token_id debe ser entero o lista de enteros"),
+            None => Vec::new(),
+        };
 
         Ok(Self {
             model_dir: model_dir.to_path_buf(),
@@ -197,7 +206,7 @@ impl ModelSpec {
             tie_word_embeddings,
             weight_shards,
             tokenizer_json_present,
-            native_profile_match,
+            eos_token_ids,
         })
     }
 
@@ -210,80 +219,18 @@ impl ModelSpec {
         }
     }
 
-    /// Fail closed for the bounded dense runtime. Parsing a
-    /// generic config alone never makes an arbitrary LLM executable.
-    pub fn ensure_dense_runtime_compatible(&self) -> Result<()> {
-        ensure!(
-            self.native_profile_match,
-            "dense runtime limitado a una geometría BF16 verificada; '{}' solo puede inspeccionarse",
-            self.model_type
-        );
-        ensure!(self.tokenizer_json_present, "falta tokenizer.json");
-        ensure!(
-            self.weight_shards.len() == 1,
-            "dense runtime requiere un único archivo safetensors; encontrados {}",
-            self.weight_shards.len()
-        );
-        ensure!(
-            self.model_dir.join(&self.weight_shards[0]).is_file(),
-            "el único safetensors no existe"
-        );
-        Ok(())
-    }
-
-    pub fn matches_dense_profile(&self) -> bool {
-        let rope = self.rope_scaling.as_ref();
-        self.model_type == "llama"
-            && self.storage_format == Some(FloatFormat::Bf16)
-            && self.hidden_size == 4096
-            && self.intermediate_size == Some(14_336)
-            && self.num_hidden_layers == 32
-            && self.attention.query_heads == 32
-            && self.attention.kv_heads == 8
-            && self.attention.head_dim == 128
-            && self.vocab_size == Some(128_256)
-            && (rope.is_none_or(|rope| {
-                rope.factor == 8.0
-                    && rope.low_freq_factor == 1.0
-                    && rope.high_freq_factor == 4.0
-                    && rope.original_max_position_embeddings == 8192
-            }))
-            && self.tokenizer_json_present
-            && !self.weight_shards.is_empty()
-    }
-
-    pub fn runtime_profile(&self) -> Option<&'static str> {
-        if self.native_profile_match {
-            Some("minicpm5-1b")
-        } else if self.matches_dense_profile() {
-            Some("llama-3.1-8b-instruct")
-        } else {
-            None
-        }
-    }
-
     pub fn ensure_cpu_runtime_compatible(&self) -> Result<()> {
-        match self.runtime_profile() {
-            Some("minicpm5-1b") => self.ensure_dense_runtime_compatible(),
-            Some("llama-3.1-8b-instruct") => {
-                ensure!(self.tokenizer_json_present, "falta tokenizer.json");
-                ensure!(
-                    !self.weight_shards.is_empty(),
-                    "Llama 3.1 8B necesita shards safetensors"
-                );
-                for shard in &self.weight_shards {
-                    ensure!(
-                        self.model_dir.join(shard).is_file(),
-                        "falta el shard {shard}"
-                    );
-                }
-                Ok(())
-            }
-            _ => anyhow::bail!(
-                "runtime CPU no tiene un decoder compatible con la arquitectura declarada '{}'; el bundle solo puede inspeccionarse",
-                self.model_type
-            ),
+        ensure!(self.tokenizer_json_present, "falta tokenizer.json");
+        ensure!(!self.weight_shards.is_empty(), "no hay shards de pesos");
+        ensure!(self.intermediate_size.is_some(), "falta intermediate_size");
+        ensure!(self.vocab_size.is_some(), "falta vocab_size");
+        for shard in &self.weight_shards {
+            ensure!(
+                self.model_dir.join(shard).is_file(),
+                "falta el shard {shard}"
+            );
         }
+        Ok(())
     }
 
     pub fn declared_context_limit(&self) -> Option<usize> {
@@ -296,22 +243,16 @@ impl ModelSpec {
             "declared_dtype": self.declared_dtype,
             "portable_byte_storage": self.storage_format.is_some(),
             "model_metadata_inspection": true,
-            "native_profile_match": self.native_profile_match,
-            "dense_runtime_ready_for_loading": self.ensure_dense_runtime_compatible().is_ok(),
-            "llama31_8b_instruct_bf16": self.matches_dense_profile(),
+            "decoder_geometry_declared": self.intermediate_size.is_some()
+                && self.vocab_size.is_some(),
             "rope_scaling": self.rope_scaling,
-            "runtime_profile": self.runtime_profile(),
             "cpu_runtime_ready_for_loading": self.ensure_cpu_runtime_compatible().is_ok(),
             "rust_cpu_reference_attention": true,
             "native_cpu_llm_end_to_end": false,
             "torch_inference_backend_compiled": cfg!(feature = "torch-backend"),
             "gpu_reference_attention_compiled": cfg!(feature = "accelerator-backend"),
             "gpu_kernels_implemented": cfg!(feature = "accelerator-backend"),
-            "gpu_full_model_inference": cfg!(feature = "accelerator-backend")
-                && (self.native_profile_match || self.matches_dense_profile()),
-            "gpu_full_model_inference_certified": self.native_profile_match,
-            "gpu_llama31_minimal_physical_inference_only": cfg!(feature = "accelerator-backend")
-                && self.matches_dense_profile(),
+            "accelerator_full_model_inference": false,
             "remote_api_controls_external_weights_or_kv": false,
             "declared_max_position_embeddings_not_certified": self.max_position_embeddings
         })
@@ -335,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_generic_qwen_gqa_without_claiming_inference() {
+    fn accepts_generic_gqa_metadata_without_backend_claim() {
         let (_tmp, spec) = model(json!({
             "model_type": "qwen2",
             "hidden_size": 1536,
@@ -348,12 +289,11 @@ mod tests {
         }));
         assert_eq!(spec.attention, AttentionGeometry::new(12, 2, 128).unwrap());
         assert_eq!(spec.storage_format, Some(FloatFormat::F16));
-        assert!(!spec.native_profile_match);
-        assert!(spec.ensure_dense_runtime_compatible().is_err());
+        assert!(spec.ensure_cpu_runtime_compatible().is_err());
     }
 
     #[test]
-    fn detects_minicpm_geometry_then_demands_real_files() {
+    fn accepts_declared_geometry_but_requires_real_bundle_files() {
         let (tmp, spec) = model(json!({
             "model_type": "llama",
             "hidden_size": 1536,
@@ -369,55 +309,15 @@ mod tests {
             "torch_dtype": "bfloat16",
             "max_position_embeddings": 131072
         }));
-        assert!(spec.native_profile_match);
-        assert!(spec.ensure_dense_runtime_compatible().is_err());
+        assert!(spec.ensure_cpu_runtime_compatible().is_err());
         fs::write(tmp.path().join("model-00001.safetensors"), []).unwrap();
         fs::write(tmp.path().join("tokenizer.json"), []).unwrap();
         assert!(
             ModelSpec::inspect(tmp.path())
                 .unwrap()
-                .ensure_dense_runtime_compatible()
+                .ensure_cpu_runtime_compatible()
                 .is_ok()
         );
-    }
-
-    #[test]
-    fn detects_llama31_8b_for_dense_runtime() {
-        let (tmp, spec) = model(json!({
-            "model_type": "llama",
-            "architectures": ["LlamaForCausalLM"],
-            "hidden_size": 4096,
-            "intermediate_size": 14336,
-            "num_hidden_layers": 32,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 8,
-            "head_dim": 128,
-            "vocab_size": 128256,
-            "rope_theta": 500000.0,
-            "rope_scaling": {
-                "factor": 8.0,
-                "high_freq_factor": 4.0,
-                "low_freq_factor": 1.0,
-                "original_max_position_embeddings": 8192,
-                "rope_type": "llama3"
-            },
-            "rms_norm_eps": 1e-5,
-            "torch_dtype": "bfloat16",
-            "max_position_embeddings": 131072
-        }));
-        assert!(!spec.native_profile_match);
-        assert!(!spec.matches_dense_profile());
-        assert!(spec.ensure_dense_runtime_compatible().is_err());
-        fs::write(tmp.path().join("model-00001-of-00004.safetensors"), []).unwrap();
-        fs::write(tmp.path().join("tokenizer.json"), []).unwrap();
-        let spec = ModelSpec::inspect(tmp.path()).unwrap();
-        assert!(spec.matches_dense_profile());
-        let rope = spec.rope_scaling.as_ref().unwrap();
-        assert_eq!(rope.factor, 8.0);
-        assert_eq!(rope.original_max_position_embeddings, 8192);
-        assert_eq!(spec.runtime_profile(), Some("llama-3.1-8b-instruct"));
-        assert!(spec.ensure_cpu_runtime_compatible().is_ok());
-        assert!(spec.ensure_dense_runtime_compatible().is_err());
     }
 
     #[test]

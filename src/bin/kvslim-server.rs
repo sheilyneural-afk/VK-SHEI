@@ -548,7 +548,8 @@ async fn chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let dense_route = advertised_dense_model(state.model_spec.matches_dense_profile());
+    let dense_route =
+        advertised_dense_model(state.model_spec.ensure_cpu_runtime_compatible().is_ok());
     let (max_tokens, native, compare_native) =
         validate_request(&request, &state.model_id, dense_route)?;
     let applied_mass_tolerance = request.applied_mass_tolerance;

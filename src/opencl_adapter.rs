@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use kvslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use serde_json::{Value, json};
 
@@ -42,9 +42,12 @@ impl ModelAdapter for OpenClModelAdapter {
     fn inspect(&self, model_dir: &Path, config: &Value) -> Result<()> {
         let bundle = ModelBundle::load(model_dir)?;
         let spec = &bundle.spec;
-        if !spec.matches_dense_profile() && spec.model_type != "llama" {
-            bail!("OpenCL adapter rejects this model configuration");
-        }
+        ensure!(
+            spec.intermediate_size.is_some(),
+            "model lacks intermediate_size"
+        );
+        ensure!(spec.vocab_size.is_some(), "model lacks vocab_size");
+        bundle.validate_decoder_layout()?;
         let context = config
             .get("max_context_tokens")
             .or_else(|| config.get("max_position_embeddings"))

@@ -48,7 +48,8 @@ impl ModelAdapter for TorchModelAdapter {
 
     fn inspect(&self, model_dir: &Path, _config: &Value) -> Result<()> {
         let bundle = ModelBundle::load(model_dir)?;
-        bundle.spec.ensure_cpu_runtime_compatible()
+        bundle.spec.ensure_cpu_runtime_compatible()?;
+        bundle.validate_decoder_layout()
     }
 
     fn load(&mut self, model_dir: &Path, config: &Value) -> Result<()> {

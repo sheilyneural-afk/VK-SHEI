@@ -71,9 +71,15 @@ fn main() -> Result<()> {
         "insufficient GPU context capacity"
     );
     let model_spec = kvslim::model_config::ModelSpec::inspect(&model)?;
+    ensure!(
+        model_spec.ensure_cpu_runtime_compatible().is_ok(),
+        "model bundle is not compatible with the CPU reference contract"
+    );
     let model_family = model_spec
-        .torch_runtime_family()
-        .context("model is not supported by the dense LibTorch reference")?;
+        .architectures
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "declared-decoder".to_owned());
 
     eprintln!("GPU model and BF16 KV reference comparison: {:?}", ids);
     let mut gpu = OpenClLlm::load(&model, max_context, mode)?;

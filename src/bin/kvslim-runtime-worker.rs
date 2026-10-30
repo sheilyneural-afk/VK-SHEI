@@ -326,12 +326,12 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "engine":"kvslim-engine",
         "model":state.model_id,
         "model_directory": state.model_dir,
-        "running_backend": "physical_OpenCL_GPU_Rust",
+        "running_backend": "local-accelerator-adapter",
         "device":state.gpu_device,
         "weight_mode":state.weight_mode,
         "load_seconds":state.load_seconds,
         "model_weights":"original_BF16_unchanged",
-        "neural_arithmetic":"OpenCL_GPU_FP32_accumulation_BF16_intermediates",
+        "neural_arithmetic":"measured-device-kernels-with-declared-precision",
         "full_llm_layers_computed_on_gpu":true,
         "kvslim_lod_active":false,
         "canonical_cpu_kvslim_lod_components_active":state.lod_epsilon.is_some(),
@@ -360,11 +360,11 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "gpu_decode_fused_kernels":state.gpu_decode_fused_kernels,
         "gpu_exact_hot_fused_attention":state.gpu_exact_hot_fused_attention,
         "gpu_prefill_backend":if state.gpu_prefill_batch_tokens.is_some(){
-            "OpenCL_layer_major_batched_causal_F16BF16"
-        }else{"OpenCL_sequential_token_prefill"},
+            "batched-device-prefill"
+        }else{"sequential-device-prefill"},
         "gpu_kv_cache":if state.lod_epsilon.is_some() {
-            "GPU_exact_BF16_K_canonical_CPU_ColdStore_exact_BF16_V"
-        } else {"GPU_dense_BF16_KV"},
+            "exact-device-kv-with-cold-store-authority"
+        } else {"dense-device-kv"},
         "max_context_tokens":state.max_context_tokens,
         "no_libtorch":true,
         "exact_dense_logits_parity_proven":false
@@ -516,7 +516,7 @@ async fn chat(
             "prefill_seconds":generation.prefill_seconds,
             "latency_seconds":generation.total_seconds,
             "gpu_model_load_seconds":generation.model_load_seconds,
-            "engine":"Rust_OpenCL_Full_BF16",
+            "engine":"local-accelerator-runtime",
             "gpu_weight_bytes":generation.gpu_weight_payload_bytes,
             "gpu_device":generation.device_name,
             "kvslim_lod_active":false,
