@@ -8,26 +8,32 @@ use std::{
 };
 
 fn main() -> Result<()> {
-    let bundle = PathBuf::from(
+    let bundle_path = PathBuf::from(
         std::env::args()
             .nth(1)
             .context("uso: kvslim-validate-model <runtime/models/<digest>>")?,
     );
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let bundle = if bundle.is_absolute() {
-        bundle
+    let bundle_path = if bundle_path.is_absolute() {
+        bundle_path
     } else {
-        root.join(bundle)
+        root.join(bundle_path)
     };
-    let config_path = bundle.join("config.json");
+    let config_path = bundle_path.join("config.json");
     let config: Value = serde_json::from_slice(&fs::read(&config_path)?)
         .with_context(|| format!("config.json inválido: {}", config_path.display()))?;
-    enforce_profile_budget(&root, &bundle)?;
-    let selection = kvslim::adapter_catalog::select_available_for_model(&bundle, None, None)?;
+    let bundle = kvslim::model_bundle::ModelBundle::load(&bundle_path)?;
+    enforce_profile_budget(&root, &bundle.root)?;
+    let selection = kvslim::adapter_catalog::select_available_for_model(&bundle.root, None, None)?;
     let adapter = kvslim::adapter_catalog::create_adapter(&selection.adapter_id)?;
-    let conformance =
-        kvslim::conformance::run_adapter_conformance(adapter, &bundle, &config, &[0])?;
+    let conformance = kvslim::conformance::run_adapter_conformance(
+        adapter,
+        &bundle.root,
+        &config,
+        &bundle.probe_token_ids()?,
+    )?;
     let bundle_digest = bundle
+        .root
         .file_name()
         .and_then(|name| name.to_str())
         .context("el bundle debe estar bajo un directorio con digest")?;

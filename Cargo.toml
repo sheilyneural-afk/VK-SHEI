@@ -49,6 +49,7 @@ unified-router = ["dep:reqwest", "http-server"]
 # Release installer: opt-in because the core does not need network access.
 release-installer = ["dep:reqwest"]
 model-import = []
+model-validation = ["model-bundle"]
 model-catalog = ["dep:reqwest"]
 # Native gfx1103 hipBLASLt BF16 matrix backend; only enabled explicitly.
 hip-backend = ["accelerator-backend", "dep:libloading"]
@@ -107,6 +108,7 @@ required-features = ["model-catalog"]
 [[bin]]
 name = "kvslim-validate-model"
 path = "src/bin/kvslim-validate-model.rs"
+required-features = ["model-bundle"]
 
 [[bin]]
 name = "kvslim-attention-bench"

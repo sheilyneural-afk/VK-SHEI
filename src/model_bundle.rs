@@ -57,6 +57,20 @@ impl ModelBundle {
     pub fn has_tensor(&self, name: &str) -> bool {
         self.tensor_names.contains(name)
     }
+
+    pub fn probe_token_ids(&self) -> Result<Vec<u32>> {
+        let tokenizer = Tokenizer::from_file(self.root.join("tokenizer.json"))
+            .map_err(|error| anyhow::anyhow!("tokenizer.json inválido: {error}"))?;
+        let encoded = tokenizer
+            .encode("KVSLIM conformance probe", true)
+            .map_err(|error| anyhow::anyhow!("no se pudo tokenizar la prueba: {error}"))?;
+        let ids = encoded.get_ids().to_vec();
+        ensure!(
+            !ids.is_empty(),
+            "la prueba de tokenización no produjo tokens"
+        );
+        Ok(ids)
+    }
 }
 
 fn read_chat_template(root: &Path) -> Result<Option<String>> {
