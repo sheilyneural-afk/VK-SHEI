@@ -7,6 +7,12 @@ pruebas físicas de GPU e inferencia real del checkpoint Llama. El README y los
 informes previos se tratan como afirmaciones que deben verificarse, no como
 prueba de ejecución.
 
+**Alcance de la paridad:** las barreras `exact_logit_parity`, `L∞=0`
+y los fallbacks del experimento de Llama comprueban la variante
+optimizada y su ruta densa **dentro del mismo backend**. No significan
+que OpenCL GPU deba producir bits idénticos a LibTorch CPU.
+Véase [criterios de validación](CRITERIOS_VALIDACION_CPU_GPU.md).
+
 ## Estado de validación ejecutado
 
 ```text

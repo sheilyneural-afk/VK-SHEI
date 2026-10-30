@@ -45,8 +45,9 @@
     Motor experimental: ejecuta el LLM completo en GPU. Si se activa
     --gpu-lod, reutiliza los módulos originales CPU de índice 4-bit/LSH,
     ColdStore BF16 y certificado exact-mass. El branch-and-bound regional
-    CPU y su caché de prefijos siguen pendientes en GPU. No existe paridad
-    exacta de logits GPU frente al backend CPU BF16 denso.
+    CPU y su caché de prefijos siguen pendientes en GPU. La igualdad
+    bit a bit con CPU LibTorch no es requisito: la precisión LOD se
+    valida frente a GPU densa del mismo backend.
   </div>
   <div id="conversation" role="log" aria-live="polite"></div>
   <section class="form" aria-label="Enviar consulta">

@@ -71,8 +71,9 @@ BF16 caliente, NO del pruning QK en ese texto.
 
 La prueba estricta GPU original vs micro hot comprobó identidad
 de todos los logits y de 9.584.640 bytes BF16 K/V de las 24 capas,
-también desde ColdStore. No se afirma paridad bit a bit contra
-LibTorch CPU.
+también desde ColdStore. La comparación con LibTorch CPU solo sirve
+como diagnóstico: no se requiere identidad binaria entre backends.
+Véase [criterios de validación](CRITERIOS_VALIDACION_CPU_GPU.md).
 
 ## HTTP experimental
 

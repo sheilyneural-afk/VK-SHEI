@@ -3,6 +3,11 @@
 Fecha: 29/10/2026. Proyecto: Terrsvusion V3.
 Backup bit a bit previo: /home/yo/Escritorio/terrsvusion-v3-rust-BACKUP-pre-llama-certified-v-and-faro-audit-20261029/
 
+La exigencia de coincidencia exacta en esta auditoría corresponde a
+rutas densas y optimizadas **del mismo backend CPU LibTorch** y a su
+gate de servicio; no exige igualdad bit a bit con GPU OpenCL. Véase
+[criterios de validación](CRITERIOS_VALIDACION_CPU_GPU.md).
+
 ## Distinción obligatoria: KV residente frente a omisión certificada
 
 El resultado de la prueba fría anterior (Llama 3.1 8B, 7.143 IDs de entrada idénticos, 8 pasos greedy con L-infinito de logits 0,0, sin prefijo persistido) sigue limitado a esa entrada y ese modelo.

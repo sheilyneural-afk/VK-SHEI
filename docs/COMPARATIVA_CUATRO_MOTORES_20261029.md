@@ -37,11 +37,19 @@ Diagnóstico: el prefill GPU sigue procesando tokens secuencialmente. El LOD GPU
 
 ## Comparación numérica con los mismos 15 IDs raw de Hola y 16 pasos greedy
 
+**Criterio:** las pruebas LOD vs densa del **mismo** backend son la
+referencia de fidelidad de cada optimización. Las cifras CPU densa vs GPU
+densa son diagnósticas: no se exige coincidencia bit a bit entre
+LibTorch CPU y OpenCL GPU. Véase
+[criterios de validación](CRITERIOS_VALIDACION_CPU_GPU.md).
+
 - CPU LOD frente a CPU densa: 16/16 tokens idénticos, L-infinito logits = 0.0, KV SHA idéntico = True.
 - iGPU LOD con epsilon=0 frente a iGPU densa: 16/16 tokens y todos los logits BF16 idénticos bit a bit en prueba física de regresión GPU.
 - CPU densa frente a iGPU densa: 16/16 tokens idénticos, diferencia máxima logits = 0.625; KV SHA iguales = False.
 - El primer KV diferente entre CPU y GPU aparece en la capa 0; total de elementos BF16 KV divergentes = 297,828, máxima diferencia KV = 0.41552734375.
-- Coincidencia de tokens NO equivale a paridad numérica de atención ni a ausencia general de cambios semánticos entre CPU y GPU.
+- Coincidencia de tokens NO equivale a igualdad de logits o ausencia de
+  diferencias numéricas. Esas diferencias deben analizarse, pero no
+  constituyen por sí mismas un incumplimiento de paridad CPU/GPU.
 
 ## Memoria de caché (no confundir con pesos ni VRAM total)
 

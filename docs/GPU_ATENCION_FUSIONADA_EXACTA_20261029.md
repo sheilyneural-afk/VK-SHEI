@@ -76,8 +76,11 @@ Servidor CPU no se modificó, en http://127.0.0.1:8099/
 
 ## D. Precisión, alcance y limitaciones
 
-- Se ha demostrado paridad BITWISE contra el mismo backend GPU original
-  en las entradas indicadas; no es paridad global GPU vs LibTorch CPU.
+- Se ha demostrado igualdad BITWISE frente a la ruta GPU original
+  en las entradas indicadas. Este es el criterio pertinente para
+  la optimización exacta; no se exige igualdad bit a bit CPU LibTorch
+  vs GPU OpenCL. Véase
+  [criterios de validación](CRITERIOS_VALIDACION_CPU_GPU.md).
 - No hay ninguna cuantización nueva ni pérdida de K/V. El índice y el
   almacenamiento frío siguen siendo los módulos canónicos CPU.
 - La GPU comparte memoria con la CPU; durante el benchmark el servidor
