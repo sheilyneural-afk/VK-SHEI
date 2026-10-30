@@ -51,11 +51,9 @@ pub mod opencl_adapter;
 #[cfg(feature = "accelerator-backend")]
 pub mod opencl_llm;
 
-#[cfg(feature = "accelerator-backend")]
 pub mod gpu_canonical_lod;
 
 #[cfg(feature = "hip-backend")]
 pub mod native_hip;
 
-#[cfg(feature = "accelerator-backend")]
 pub mod gpu_micro_regions;

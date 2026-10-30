@@ -19,9 +19,10 @@ use safetensors::{Dtype, SafeTensors};
 use serde_json::{Value, json};
 
 use crate::{
-    cold_store::{ColdStore, PageGeometry},
+    gpu_canonical_lod::{CanonicalGpuLod, CanonicalGpuLodConfig},
     model_bundle::ModelBundle,
     model_config::ModelSpec,
+    portable::AttentionGeometry,
 };
 
 struct WeightShard {
@@ -144,15 +145,14 @@ trait NativeCausalRuntime: Send {
     fn last_logits(&self) -> Option<Vec<f32>>;
     fn session_tokens(&self) -> &[u32];
     fn kv_report(&self) -> Value;
-    fn reset(&mut self);
+    fn reset(&mut self) -> Result<()>;
 }
 
 struct NativeCpuDecoder {
     spec: ModelSpec,
     weights: NativeWeightArchive,
-    _kv_directory: tempfile::TempDir,
-    kv_store: ColdStore,
-    layer_pages: Vec<Vec<u64>>,
+    kv: CanonicalGpuLod,
+    kv_config: CanonicalGpuLodConfig,
     tokens: Vec<u32>,
     last_logits: Option<Vec<f32>>,
 }
@@ -214,7 +214,7 @@ fn softmax(values: &mut [f32]) {
 }
 
 impl NativeCpuDecoder {
-    fn load(model_dir: &Path) -> Result<Self> {
+    fn load(model_dir: &Path, config: &Value) -> Result<Self> {
         let bundle = ModelBundle::load(model_dir)?;
         bundle.validate_decoder_layout()?;
         let spec = bundle.spec;
@@ -223,79 +223,100 @@ impl NativeCpuDecoder {
             "la CPU nativa requiere pesos BF16"
         );
         let weights = NativeWeightArchive::open(model_dir, &spec.weight_shards)?;
-        let kv_directory = tempfile::Builder::new()
-            .prefix("kvslim-native-cpu-")
-            .tempdir()
-            .context("crear directorio KVSLIM CPU")?;
-        let kv_store = ColdStore::create(kv_directory.path().join("session.tskv"), 64 << 20)
-            .context("crear ColdStore KVSLIM CPU")?;
-        let layer_pages = (0..spec.num_hidden_layers).map(|_| Vec::new()).collect();
+        let epsilon = config
+            .get("kvslim_epsilon")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let stage_tokens = config
+            .get("kvslim_stage_tokens")
+            .and_then(Value::as_u64)
+            .map(usize::try_from)
+            .transpose()
+            .context("kvslim_stage_tokens fuera de rango")?
+            .unwrap_or(64);
+        let geometry = AttentionGeometry::new(
+            spec.attention.query_heads,
+            spec.attention.kv_heads,
+            spec.attention.head_dim,
+        )?;
+        let kv_config = CanonicalGpuLodConfig {
+            epsilon,
+            stage_tokens,
+            cold_directory: None,
+        };
+        let kv = CanonicalGpuLod::new(geometry, spec.num_hidden_layers, kv_config.clone())?;
         Ok(Self {
             spec,
             weights,
-            _kv_directory: kv_directory,
-            kv_store,
-            layer_pages,
+            kv,
+            kv_config,
             tokens: Vec::new(),
             last_logits: None,
         })
     }
 
-    fn attend(
-        &mut self,
-        layer: usize,
-        query: &[f32],
-        current_k: &[f32],
-        current_v: &[f32],
-    ) -> Result<Vec<f32>> {
+    fn attend(&mut self, layer: usize, query: &[f32]) -> Result<Vec<f32>> {
         let g = self.spec.attention;
-        let cached_pages = self.layer_pages[layer]
+        let total = self.kv.layer_tokens(layer);
+        ensure!(total > 0, "atención nativa sin KV");
+        let query_bytes = query
             .iter()
-            .map(|&page_id| {
-                self.kv_store
-                    .read_page(page_id)
-                    .with_context(|| format!("leer página KVSLIM {page_id}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let cached = cached_pages.len();
-        let total = cached + 1;
+            .flat_map(|&x| bf16::from_f32(x).to_bits().to_le_bytes())
+            .collect::<Vec<_>>();
+        let regional = self.kv.plan_micro_regions(layer, &query_bytes)?;
+        let scored_positions = regional
+            .as_ref()
+            .map(|selection| selection.positions.clone())
+            .unwrap_or_else(|| (0..total).collect());
+        let keys = self.kv.read_keys(layer, &scored_positions)?;
         let head_bytes = g.head_dim * 2;
-        let mut output = vec![0.0f32; g.query_heads * g.head_dim];
+        let mut scored = vec![vec![0.0f32; scored_positions.len()]; g.query_heads];
         for qh in 0..g.query_heads {
             let kh = qh / (g.query_heads / g.kv_heads);
             let q = &query[qh * g.head_dim..(qh + 1) * g.head_dim];
-            let mut scores = vec![0.0; total];
-            for (token, score) in scores.iter_mut().enumerate() {
-                if token == cached {
-                    let key = &current_k[kh * g.head_dim..(kh + 1) * g.head_dim];
-                    *score = q.iter().zip(key).map(|(&a, &b)| a * b).sum::<f32>()
-                        / (g.head_dim as f32).sqrt();
-                } else {
-                    let start = kh * head_bytes;
-                    let bytes = &cached_pages[token].key[start..start + head_bytes];
-                    let dot = q
-                        .iter()
-                        .zip(bytes.chunks_exact(2))
-                        .map(|(&a, value)| {
-                            a * bf16::from_bits(u16::from_le_bytes([value[0], value[1]])).to_f32()
-                        })
-                        .sum::<f32>();
-                    *score = dot / (g.head_dim as f32).sqrt();
-                }
+            for (local, score) in scored[qh].iter_mut().enumerate() {
+                let start = (local * g.kv_heads + kh) * head_bytes;
+                let bytes = &keys[start..start + head_bytes];
+                let dot = q
+                    .iter()
+                    .zip(bytes.chunks_exact(2))
+                    .map(|(&a, value)| {
+                        a * bf16::from_bits(u16::from_le_bytes([value[0], value[1]])).to_f32()
+                    })
+                    .sum::<f32>();
+                *score = dot / (g.head_dim as f32).sqrt();
             }
-            softmax(&mut scores);
-            for (token, probability) in scores.into_iter().enumerate() {
-                if token == cached {
-                    for d in 0..g.head_dim {
-                        output[qh * g.head_dim + d] += probability * current_v[kh * g.head_dim + d];
-                    }
-                } else {
-                    let start = kh * head_bytes;
-                    let bytes = &cached_pages[token].value[start..start + head_bytes];
-                    for (d, value) in bytes.chunks_exact(2).enumerate() {
-                        output[qh * g.head_dim + d] += probability
-                            * bf16::from_bits(u16::from_le_bytes([value[0], value[1]])).to_f32();
-                    }
+        }
+        let (positions, mut selected_scores) = if regional.is_some() {
+            (scored_positions, scored)
+        } else {
+            let flat_scores = scored.iter().flatten().copied().collect::<Vec<_>>();
+            let selection = self.kv.select(layer, &query_bytes, &flat_scores)?;
+            let selected = scored
+                .iter()
+                .map(|head| {
+                    selection
+                        .positions
+                        .iter()
+                        .map(|&token| head[token])
+                        .collect()
+                })
+                .collect();
+            (selection.positions, selected)
+        };
+        let values = self.kv.read_values(layer, &positions)?;
+        let mut output = vec![0.0f32; g.query_heads * g.head_dim];
+        for qh in 0..g.query_heads {
+            let kh = qh / (g.query_heads / g.kv_heads);
+            softmax(&mut selected_scores[qh]);
+            for (selected, probability) in selected_scores[qh].iter().copied().enumerate() {
+                let start = (selected * g.kv_heads + kh) * head_bytes;
+                for (d, value) in values[start..start + head_bytes]
+                    .chunks_exact(2)
+                    .enumerate()
+                {
+                    output[qh * g.head_dim + d] += probability
+                        * bf16::from_bits(u16::from_le_bytes([value[0], value[1]])).to_f32();
                 }
             }
         }
@@ -304,7 +325,6 @@ impl NativeCpuDecoder {
     }
 
     fn append_kv_page(&mut self, layer: usize, key: &[f32], value: &[f32]) -> Result<()> {
-        let g = self.spec.attention;
         let encode = |values: &[f32]| {
             values
                 .iter()
@@ -313,24 +333,7 @@ impl NativeCpuDecoder {
         };
         let key = encode(key);
         let value = encode(value);
-        let meta = self
-            .kv_store
-            .append_page(
-                PageGeometry {
-                    layer: layer as u32,
-                    token_start: self.tokens.len() as u64,
-                    tokens: 1,
-                    heads: g.kv_heads as u32,
-                    head_dim: g.head_dim as u32,
-                    tile: g.head_dim as u32,
-                },
-                &key,
-                &value,
-                false,
-            )
-            .context("anexar página KVSLIM CPU")?;
-        self.layer_pages[layer].push(meta.page_id);
-        Ok(())
+        self.kv.append(layer, self.tokens.len(), &key, &value)
     }
 
     fn forward_token(&mut self, token: u32, capture_logits: bool) -> Result<u32> {
@@ -380,8 +383,8 @@ impl NativeCpuDecoder {
             round_vec(&mut value);
             apply_rope(&mut query, g.query_heads, g.head_dim, position, theta);
             apply_rope(&mut key, g.kv_heads, g.head_dim, position, theta);
-            let attention = self.attend(layer, &query, &key, &value)?;
             self.append_kv_page(layer, &key, &value)?;
+            let attention = self.attend(layer, &query)?;
             let projected = self.weights.matvec(
                 &format!("{prefix}.self_attn.o_proj.weight"),
                 hidden,
@@ -458,7 +461,8 @@ impl NativeCausalRuntime for NativeCpuDecoder {
     }
 
     fn kv_report(&self) -> Value {
-        let stats = self.kv_store.stats();
+        let stats = self.kv.storage_metrics();
+        let lod = &self.kv.stats;
         json!({
             "authority": "kvslim-cold-store",
             "format": "exact-bf16",
@@ -469,20 +473,41 @@ impl NativeCausalRuntime for NativeCpuDecoder {
             "cache_misses": stats.cache_misses,
             "hot_bytes": stats.hot_bytes,
             "hot_capacity": stats.hot_capacity,
+            "epsilon": self.kv.config().epsilon,
+            "axis_tokens": self.kv.axis().token_len(),
+            "axis_extents": self.kv.axis().regions().len(),
+            "micro_metadata_bytes": self.kv.axis().micro_metadata_bytes(),
+            "four_bit_index_bytes": self.kv.axis().fingerprint_payload_bytes(),
+            "certificates_met": lod.certificates_met,
+            "dense_fallbacks": lod.exact_fallbacks + lod.micro_dense_fallback_queries,
+            "selected_v_tokens": lod.exact_v_tokens_read_from_cold,
+            "omitted_v_tokens": lod.exact_v_tokens_skipped,
+            "partial_key_reads": stats.partial_key_reads,
+            "partial_value_reads": stats.partial_value_reads,
+            "partial_key_bytes_avoided": stats.partial_key_bytes_avoided,
+            "partial_value_bytes_avoided": stats.partial_value_bytes_avoided,
         })
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self) -> Result<()> {
+        let g = self.spec.attention;
+        self.kv = CanonicalGpuLod::new(
+            AttentionGeometry::new(g.query_heads, g.kv_heads, g.head_dim)?,
+            self.spec.num_hidden_layers,
+            self.kv_config.clone(),
+        )?;
         self.tokens.clear();
         self.last_logits = None;
-        for pages in &mut self.layer_pages {
-            pages.clear();
-        }
+        Ok(())
     }
 }
 
-fn build_runtime(model_dir: &Path, _spec: &ModelSpec) -> Result<Box<dyn NativeCausalRuntime>> {
-    Ok(Box::new(NativeCpuDecoder::load(model_dir)?))
+fn build_runtime(
+    model_dir: &Path,
+    _spec: &ModelSpec,
+    config: &Value,
+) -> Result<Box<dyn NativeCausalRuntime>> {
+    Ok(Box::new(NativeCpuDecoder::load(model_dir, config)?))
 }
 
 pub struct NativeCpuModelAdapter {
@@ -526,7 +551,7 @@ impl ModelAdapter for NativeCpuModelAdapter {
     fn load(&mut self, model_dir: &Path, config: &Value) -> Result<()> {
         self.inspect(model_dir, config)?;
         let spec = ModelSpec::inspect(model_dir)?;
-        self.runtime = Some(build_runtime(model_dir, &spec)?);
+        self.runtime = Some(build_runtime(model_dir, &spec, config)?);
         self.model_dir = Some(model_dir.to_owned());
         Ok(())
     }
@@ -592,7 +617,7 @@ impl ModelAdapter for NativeCpuModelAdapter {
             })
             .collect::<Result<Vec<_>>>()?;
         let runtime = self.runtime.as_mut().context("CPU nativa no cargada")?;
-        runtime.reset();
+        runtime.reset()?;
         for token in tokens {
             runtime.forward_token(token, false)?;
         }

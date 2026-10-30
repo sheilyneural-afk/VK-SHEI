@@ -729,6 +729,55 @@ impl CanonicalGpuLod {
         self.stats.cold_value_read_calls = self.cold.stats().reads;
         Ok(out)
     }
+
+    /// Exact K counterpart of read_values, shared by every compute backend.
+    /// Returned bytes are token-major BF16 and retain per-token verification.
+    pub fn read_keys(&mut self, layer: usize, positions: &[usize]) -> Result<Vec<u8>> {
+        let pages = self.pages.get(layer).context("LOD read layer missing")?;
+        let bytes_per_token = self.geometry.kv_elements_per_token() * 2;
+        let mut out = Vec::with_capacity(
+            positions
+                .len()
+                .checked_mul(bytes_per_token)
+                .context("LOD K length overflow")?,
+        );
+        let mut cursor = 0usize;
+        while cursor < positions.len() {
+            let first = *pages
+                .get(positions[cursor])
+                .context("LOD K token not recorded")?;
+            let mut offsets = vec![first.offset];
+            let mut end = cursor + 1;
+            while end < positions.len() {
+                let next = *pages
+                    .get(positions[end])
+                    .context("LOD K token not recorded")?;
+                if next.page_id != first.page_id {
+                    break;
+                }
+                ensure!(
+                    offsets.last().is_none_or(|&last| next.offset > last),
+                    "LOD selected K positions must be sorted and unique"
+                );
+                offsets.push(next.offset);
+                end += 1;
+            }
+            let data = self.cold.read_key_tokens(first.page_id, &offsets)?;
+            ensure!(
+                data.len() == offsets.len() * bytes_per_token,
+                "canonical ColdStore partial K BF16 dimensions invalid"
+            );
+            let head_bytes = self.geometry.head_dim * 2;
+            for local in 0..offsets.len() {
+                for head in 0..self.geometry.kv_heads {
+                    let address = (head * offsets.len() + local) * head_bytes;
+                    out.extend_from_slice(&data[address..address + head_bytes]);
+                }
+            }
+            cursor = end;
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

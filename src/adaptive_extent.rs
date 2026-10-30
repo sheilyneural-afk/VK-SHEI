@@ -6,7 +6,7 @@
 //! Query-time dimensional views cover extents; they are not physical KV
 //! allocation units. Every view retains exact half-open token ranges.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -114,6 +114,29 @@ pub struct AxisRegion {
 }
 
 impl SemanticExtent {
+    pub fn tokens(&self) -> usize {
+        self.token_end - self.token_start
+    }
+}
+
+/// One node in the logical dimensional hierarchy. Level zero is a semantic
+/// microdimension; upper levels combine contiguous child dimensions with
+/// coverage 1, 2, 4, 16, 256... Microdimensions, not individual tokens, are
+/// the indexed authority. Token ranges remain reversible BF16 addresses only.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct QuadraticDimension {
+    pub id: usize,
+    pub level: usize,
+    pub child_ids: Vec<usize>,
+    pub micro_dimension_count: usize,
+    pub token_start: usize,
+    pub token_end: usize,
+    pub centroid: Vec<f32>,
+    pub minimum: Vec<f32>,
+    pub maximum: Vec<f32>,
+}
+
+impl QuadraticDimension {
     pub fn tokens(&self) -> usize {
         self.token_end - self.token_start
     }
@@ -370,7 +393,8 @@ pub struct ParallelContextAxis {
     previous_signal: Option<Vec<f32>>,
     open: Option<OpenExtent>,
     extents: Vec<SemanticExtent>,
-    token_fingerprints: Vec<Vec<FourBitFingerprint>>,
+    dimension_fingerprints: Vec<Vec<FourBitFingerprint>>,
+    quadratic_levels: Vec<Vec<QuadraticDimension>>,
     lsh: Vec<LshIndex>,
     lsh_queries: usize,
     lsh_candidates: usize,
@@ -416,7 +440,8 @@ impl ParallelContextAxis {
             previous_signal: None,
             open: None,
             extents: Vec::new(),
-            token_fingerprints: Vec::new(),
+            dimension_fingerprints: Vec::new(),
+            quadratic_levels: Vec::new(),
             // One LSH table family per KV head. Mixing heads into a single
             // 16-d average made query routing miss because protected Q only
             // occupies the serving head. 16 directional bits stay dense
@@ -437,12 +462,6 @@ impl ParallelContextAxis {
     /// Returns the extent closed immediately before this token, if any.
     pub fn observe(&mut self, signal: &[f32]) -> Result<Option<SemanticExtent>> {
         self.validate_signal(signal)?;
-        let fingerprints = self.encode_heads(signal);
-        let token = self.token_fingerprints.len();
-        for (head, fingerprint) in fingerprints.iter().enumerate() {
-            self.lsh[head].insert(token, fingerprint);
-        }
-        self.token_fingerprints.push(fingerprints);
         let Some(open) = self.open.as_ref() else {
             self.open = Some(OpenExtent::new(self.next_token, signal));
             self.previous_signal = Some(signal.to_vec());
@@ -610,18 +629,34 @@ impl ParallelContextAxis {
     /// `Vec` bookkeeping are excluded so the value can be compared directly
     /// with the former f32 payload on every platform.
     pub fn fingerprint_payload_bytes(&self) -> usize {
-        self.token_fingerprints
+        let closed = self
+            .dimension_fingerprints
             .iter()
             .flatten()
             .map(FourBitFingerprint::payload_bytes)
-            .sum()
+            .sum::<usize>();
+        closed
+            + self.open.as_ref().map_or(0, |open| {
+                self.encode_heads(&open.centroid())
+                    .iter()
+                    .map(FourBitFingerprint::payload_bytes)
+                    .sum()
+            })
     }
 
     pub fn f32_fingerprint_reference_bytes(&self) -> usize {
-        self.token_fingerprints.len()
+        (self.dimension_fingerprints.len() + usize::from(self.open.is_some()))
             * self.kv_heads
             * self.fingerprint_dimension
             * std::mem::size_of::<f32>()
+    }
+
+    pub fn quadratic_levels(&self) -> &[Vec<QuadraticDimension>] {
+        &self.quadratic_levels
+    }
+
+    pub fn quadratic_dimension_count(&self) -> usize {
+        self.quadratic_levels.iter().map(Vec::len).sum()
     }
 
     /// Select a query-dependent number of reversible coordinates. The count is
@@ -634,68 +669,34 @@ impl ParallelContextAxis {
         query: &[f32],
     ) -> Result<Vec<DimensionalView>> {
         self.validate_signal(query)?;
-        ensure!(
-            !self.token_fingerprints.is_empty(),
-            "catálogo de tokens vacío"
-        );
+        if self.extents.is_empty() {
+            let open = self.open.as_ref().context("catálogo dimensional vacío")?;
+            return Ok(vec![DimensionalView {
+                token_ranges: vec![(open.token_start, self.next_token)],
+                token_count: self.next_token - open.token_start,
+            }]);
+        }
         let query_heads = self.encode_heads(query);
         self.lsh_queries += 1;
-        let mut candidate_tokens = self.candidates_from_heads(&query_heads, 2);
-        if !candidate_tokens.is_empty() {
+        let mut candidates = self.candidates_from_heads(&query_heads, 2);
+        if !candidates.is_empty() {
             self.lsh_probe_two += 1;
         }
-        if candidate_tokens.is_empty() {
-            // A wider probe remains advisory LSH routing. If it also misses,
-            // the canonical certificate continues without heuristic seeds.
-            candidate_tokens = self.candidates_from_heads(&query_heads, 4);
-            if !candidate_tokens.is_empty() {
+        if candidates.is_empty() {
+            candidates = self.candidates_from_heads(&query_heads, 4);
+            if !candidates.is_empty() {
                 self.lsh_probe_four += 1;
             }
         }
-        if candidate_tokens.is_empty() {
+        if candidates.is_empty() {
             self.lsh_misses += 1;
-            // LSH is a prioritizer, not the recall authority. Turning a miss
-            // into the complete catalogue used to seed every logical state
-            // before branch-and-bound, making certified omission impossible.
-            // An empty routing result is safe: the attention certificate will
-            // widen from the mandatory recent state until its error bound
-            // closes.
             return Ok(Vec::new());
         }
-        self.lsh_candidates += candidate_tokens.len();
-        let query_signatures = self.signatures_for_heads(&query_heads);
-        let extent_ids = self
-            .extents
-            .iter()
-            .filter(|extent| {
-                query_signatures
-                    .into_iter()
-                    .zip(extent.lsh_signatures)
-                    .filter(|(query, extent)| (query ^ extent).count_ones() <= 2)
-                    .count()
-                    >= 2
-            })
-            .map(|extent| extent.id)
-            .collect::<BTreeSet<_>>();
-        let candidate_tokens_before_extent_filter = candidate_tokens.clone();
-        let mut scored = candidate_tokens
+        self.lsh_candidates += candidates.len();
+        let mut scored = candidates
             .into_iter()
-            .filter(|token| {
-                extent_ids.is_empty()
-                    || self.extents.iter().any(|extent| {
-                        extent_ids.contains(&extent.id)
-                            && extent.token_start <= *token
-                            && *token < extent.token_end
-                    })
-            })
-            .map(|token| (token, self.token_dot(token, &query_heads)))
+            .map(|dimension| (dimension, self.dimension_dot(dimension, &query_heads)))
             .collect::<Vec<_>>();
-        if scored.is_empty() {
-            scored = candidate_tokens_before_extent_filter
-                .into_iter()
-                .map(|token| (token, self.token_dot(token, &query_heads)))
-                .collect();
-        }
         let maximum = scored
             .iter()
             .map(|(_, score)| *score)
@@ -731,26 +732,31 @@ impl ParallelContextAxis {
         } else {
             (scored.len() as f64).ln()
         };
-        let candidate_count = entropy.exp().ceil().clamp(1.0, scored.len() as f64) as usize;
+        let count = entropy.exp().ceil().clamp(1.0, scored.len() as f64) as usize;
         scored.sort_unstable_by(|left, right| {
             right
                 .1
                 .total_cmp(&left.1)
                 .then_with(|| right.0.cmp(&left.0))
         });
-        let tokens = scored
+        let mut selected = scored
             .into_iter()
-            .take(candidate_count)
-            .map(|(token, _)| token)
+            .take(count)
+            .map(|(id, _)| self.extents[id].clone())
             .collect::<Vec<_>>();
-        self.materialize_token_positions(&tokens)
+        selected.sort_unstable_by_key(|extent| extent.token_start);
+        Ok(selected
+            .into_iter()
+            .map(|extent| DimensionalView {
+                token_ranges: vec![(extent.token_start, extent.token_end)],
+                token_count: extent.tokens(),
+            })
+            .collect())
     }
 
     pub fn materialize_token_positions(&self, positions: &[usize]) -> Result<Vec<DimensionalView>> {
         ensure!(
-            positions
-                .iter()
-                .all(|token| *token < self.token_fingerprints.len()),
+            positions.iter().all(|token| *token < self.next_token),
             "posición token inexistente"
         );
         let mut tokens = positions.to_vec();
@@ -851,11 +857,11 @@ impl ParallelContextAxis {
         combined
     }
 
-    fn token_dot(&self, token: usize, query_heads: &[FourBitFingerprint]) -> f32 {
-        self.token_fingerprints[token]
+    fn dimension_dot(&self, dimension: usize, query_heads: &[FourBitFingerprint]) -> f32 {
+        self.dimension_fingerprints[dimension]
             .iter()
             .zip(query_heads)
-            .map(|(token_head, query_head)| token_head.dot(&query_head.values()))
+            .map(|(dimension_head, query_head)| dimension_head.dot(&query_head.values()))
             .sum()
     }
 
@@ -881,9 +887,51 @@ impl ParallelContextAxis {
             lsh_signatures,
             micro_metadata: DimensionalMicroMetadata::new(validation_4bit, coherence),
         };
+        for (head, fingerprint) in head_fingerprints.iter().enumerate() {
+            self.lsh[head].insert(extent.id, fingerprint);
+        }
+        self.dimension_fingerprints.push(head_fingerprints);
         self.extents.push(extent.clone());
         self.propagate_dimensional_delta(extent.id);
+        self.push_quadratic_microdimension(&extent);
         Some(extent)
+    }
+
+    fn push_quadratic_microdimension(&mut self, extent: &SemanticExtent) {
+        if self.quadratic_levels.is_empty() {
+            self.quadratic_levels.push(Vec::new());
+        }
+        let id = self.quadratic_levels[0].len();
+        self.quadratic_levels[0].push(QuadraticDimension {
+            id,
+            level: 0,
+            child_ids: Vec::new(),
+            micro_dimension_count: 1,
+            token_start: extent.token_start,
+            token_end: extent.token_end,
+            centroid: extent.centroid.clone(),
+            minimum: extent.minimum.clone(),
+            maximum: extent.maximum.clone(),
+        });
+        let mut child_level = 0usize;
+        while let Some(last) = self.quadratic_levels[child_level].last() {
+            // Squared coverage: 1 -> 2 -> 4 -> 16 -> 256...
+            let fanout = last.micro_dimension_count.max(2);
+            let count = self.quadratic_levels[child_level].len();
+            if !count.is_multiple_of(fanout) {
+                break;
+            }
+            let children = self.quadratic_levels[child_level][count - fanout..].to_vec();
+            let next_level = child_level + 1;
+            if self.quadratic_levels.len() == next_level {
+                self.quadratic_levels.push(Vec::new());
+            }
+            let parent_id = self.quadratic_levels[next_level].len();
+            self.quadratic_levels[next_level].push(combine_quadratic_dimensions(
+                parent_id, next_level, &children,
+            ));
+            child_level = next_level;
+        }
     }
 
     /// Connect a newly closed dimension to related dimensions using only
@@ -926,6 +974,47 @@ impl ParallelContextAxis {
             .iter()
             .map(|(_, quality)| *quality)
             .fold(0.0_f32, f32::max);
+    }
+}
+
+fn combine_quadratic_dimensions(
+    id: usize,
+    level: usize,
+    children: &[QuadraticDimension],
+) -> QuadraticDimension {
+    debug_assert!(!children.is_empty());
+    let dimension = children[0].centroid.len();
+    let total_tokens = children
+        .iter()
+        .map(QuadraticDimension::tokens)
+        .sum::<usize>();
+    let mut centroid = vec![0.0_f64; dimension];
+    let mut minimum = children[0].minimum.clone();
+    let mut maximum = children[0].maximum.clone();
+    for child in children {
+        let weight = child.tokens() as f64;
+        for index in 0..dimension {
+            centroid[index] += f64::from(child.centroid[index]) * weight;
+            minimum[index] = minimum[index].min(child.minimum[index]);
+            maximum[index] = maximum[index].max(child.maximum[index]);
+        }
+    }
+    QuadraticDimension {
+        id,
+        level,
+        child_ids: children.iter().map(|child| child.id).collect(),
+        micro_dimension_count: children
+            .iter()
+            .map(|child| child.micro_dimension_count)
+            .sum(),
+        token_start: children[0].token_start,
+        token_end: children.last().expect("children checked").token_end,
+        centroid: centroid
+            .into_iter()
+            .map(|sum| (sum / total_tokens as f64) as f32)
+            .collect(),
+        minimum,
+        maximum,
     }
 }
 
@@ -1286,6 +1375,7 @@ mod tests {
         for _ in 0..8 {
             axis.observe(&serving).unwrap();
         }
+        axis.flush();
         for _ in 0..8 {
             axis.observe(&other).unwrap();
         }
@@ -1297,7 +1387,37 @@ mod tests {
             .flat_map(ParallelContextAxis::expand_token_positions)
             .collect::<Vec<_>>();
         assert!(!tokens.is_empty());
-        assert!(tokens.iter().all(|token| *token < 8));
+        let selected_dimension = &axis.extents()[0];
+        assert!(tokens.iter().all(|token| {
+            selected_dimension.token_start <= *token && *token < selected_dimension.token_end
+        }));
         assert_eq!(axis.lsh_metrics().2, 0);
+    }
+
+    #[test]
+    fn hierarchy_squares_microdimension_coverage_without_indexing_tokens() {
+        let mut axis = ParallelContextAxis::new(
+            2,
+            AxisPolicy {
+                warmup_observations: 1,
+                novelty_sigma: 0.0,
+                open_extent_safety_limit: Some(1),
+            },
+        )
+        .unwrap();
+        for i in 0..256 {
+            axis.observe(&[i as f32 + 1.0, 1.0]).unwrap();
+        }
+        axis.flush();
+        let coverage = axis
+            .quadratic_levels()
+            .iter()
+            .filter_map(|level| level.last())
+            .map(|node| node.micro_dimension_count)
+            .collect::<Vec<_>>();
+        assert!(coverage.starts_with(&[1, 2, 4, 16, 256]));
+        assert!(axis.fingerprint_payload_bytes() < axis.f32_fingerprint_reference_bytes());
+        assert_eq!(axis.quadratic_levels()[4][0].token_start, 0);
+        assert_eq!(axis.quadratic_levels()[4][0].token_end, 256);
     }
 }
