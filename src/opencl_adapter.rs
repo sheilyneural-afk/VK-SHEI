@@ -6,6 +6,7 @@ use anyhow::{Context, Result, ensure};
 use kvslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use serde_json::{Value, json};
 
+use crate::gpu_canonical_lod::CanonicalGpuLodConfig;
 use crate::model_bundle::ModelBundle;
 use crate::opencl_llm::{OpenClLlm, WeightMode};
 
@@ -24,8 +25,8 @@ impl Default for OpenClModelAdapter {
                 backend: "accelerator".into(),
                 supports_prefill: true,
                 supports_decode: true,
-                supports_kv_restore: true,
-                supports_streaming: true,
+                supports_kv_restore: false,
+                supports_streaming: false,
             },
             model_dir: None,
             runtime: None,
@@ -65,8 +66,33 @@ impl ModelAdapter for OpenClModelAdapter {
             .and_then(Value::as_u64)
             .context("model configuration must declare a context limit")?
             as usize;
-        let mut runtime = OpenClLlm::load(model_dir, max_tokens, WeightMode::Resident)
-            .context("load local accelerator model adapter")?;
+        let epsilon = config
+            .get("kvslim_lod_epsilon")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let stage_tokens = config
+            .get("kvslim_stage_tokens")
+            .and_then(Value::as_u64)
+            .map(usize::try_from)
+            .transpose()
+            .context("kvslim_stage_tokens fuera de rango")?
+            .unwrap_or(64);
+        let cold_directory = config
+            .get("kvslim_cold_directory")
+            .or_else(|| config.get("kvslim_cold_dir"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+        let physical_restore = cold_directory.is_some();
+        let lod = CanonicalGpuLodConfig {
+            epsilon,
+            stage_tokens,
+            cold_directory,
+        };
+        let mut runtime =
+            OpenClLlm::load_with_canonical_lod(model_dir, max_tokens, WeightMode::Resident, lod)
+                .context("load exact canonical accelerator model adapter")?;
         let prefill_batch = config
             .get("kvslim_prefill_batch_tokens")
             .and_then(Value::as_u64)
@@ -75,6 +101,55 @@ impl ModelAdapter for OpenClModelAdapter {
             .context("kvslim_prefill_batch_tokens fuera de rango")?
             .unwrap_or_else(|| max_tokens.min(128).max(1));
         runtime.set_batch_prefill_tokens(Some(prefill_batch))?;
+
+        let hot_tokens = config
+            .get("kvslim_hot_v_tokens")
+            .and_then(Value::as_u64)
+            .map(usize::try_from)
+            .transpose()
+            .context("kvslim_hot_v_tokens fuera de rango")?
+            .unwrap_or_else(|| max_tokens.min(512));
+        runtime.set_exact_hot_v_tokens(hot_tokens)?;
+        let replay_tokens = config
+            .get("kvslim_prompt_replay_tokens")
+            .and_then(Value::as_u64)
+            .map(usize::try_from)
+            .transpose()
+            .context("kvslim_prompt_replay_tokens fuera de rango")?
+            .unwrap_or(hot_tokens)
+            .min(hot_tokens);
+        runtime.set_verified_gpu_prompt_replay(replay_tokens)?;
+        let shared_prefix = config
+            .get("kvslim_shared_prefix")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+            && replay_tokens >= 32;
+        runtime.set_verified_gpu_prefix_replay(shared_prefix)?;
+        runtime.set_deferred_cold_commit(
+            config
+                .get("kvslim_deferred_cold_commit")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        )?;
+        runtime.set_exact_hot_fused_attention(
+            config
+                .get("kvslim_exact_hot_fused_attention")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        )?;
+        runtime.set_decode_unroll4(
+            config
+                .get("kvslim_decode_unroll4")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )?;
+        runtime.set_decode_fused_kernels(
+            config
+                .get("kvslim_decode_fused_kernels")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )?;
+        self.capabilities.supports_kv_restore = physical_restore;
         self.model_dir = Some(model_dir.to_owned());
         self.runtime = Some(runtime);
         self.last_logits = None;
@@ -127,59 +202,91 @@ impl ModelAdapter for OpenClModelAdapter {
     }
 
     fn snapshot_kv(&self) -> Result<Vec<u8>> {
+        ensure!(
+            self.capabilities.supports_kv_restore,
+            "physical OpenCL K/V snapshots require kvslim_cold_directory"
+        );
         let runtime = self
             .runtime
             .as_ref()
             .context("OpenCL adapter is not loaded")?;
         serde_json::to_vec(&json!({
-            "schema": "kvslim.runtime.replay-snapshot/v1",
+            "schema": "kvslim.runtime.physical-coldstore-snapshot/v1",
             "model_dir": self.model_dir,
             "tokens": runtime.session_token_ids(),
+            "authority": "canonical-bf16-coldstore",
         }))
-        .context("serialize local accelerator K/V snapshot")
+        .context("serialize physical OpenCL ColdStore snapshot handle")
     }
 
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
-        let envelope: Value =
-            serde_json::from_slice(snapshot).context("parse local accelerator K/V snapshot")?;
+        ensure!(
+            self.capabilities.supports_kv_restore,
+            "physical OpenCL K/V restore requires kvslim_cold_directory"
+        );
+        let envelope: Value = serde_json::from_slice(snapshot)
+            .context("parse physical OpenCL ColdStore snapshot handle")?;
         ensure!(
             envelope.get("schema").and_then(Value::as_str)
-                == Some("kvslim.runtime.replay-snapshot/v1"),
-            "unsupported runtime snapshot schema"
+                == Some("kvslim.runtime.physical-coldstore-snapshot/v1"),
+            "unsupported physical OpenCL snapshot schema"
+        );
+        ensure!(
+            envelope.get("authority").and_then(Value::as_str) == Some("canonical-bf16-coldstore"),
+            "snapshot does not reference canonical BF16 ColdStore authority"
         );
         let expected_dir = envelope
             .get("model_dir")
             .and_then(Value::as_str)
-            .context("local accelerator snapshot missing model identity")?;
+            .context("physical OpenCL snapshot missing model identity")?;
         let current_dir = self
             .model_dir
             .as_deref()
-            .context("local accelerator adapter is not loaded")?;
+            .context("OpenCL adapter is not loaded")?;
         ensure!(
             Path::new(expected_dir) == current_dir,
-            "snapshot model identity mismatch"
+            "physical OpenCL snapshot model identity mismatch"
         );
-        let token_values = envelope
+        let tokens = envelope
             .get("tokens")
             .and_then(Value::as_array)
-            .context("OpenCL snapshot missing token history")?;
-        let tokens: Vec<u32> = token_values
+            .context("physical OpenCL snapshot missing token history")?
             .iter()
             .map(|value| {
                 value
                     .as_u64()
                     .and_then(|token| u32::try_from(token).ok())
-                    .context("invalid token in local accelerator snapshot")
+                    .context("invalid token in physical OpenCL snapshot")
             })
-            .collect::<Result<_>>()?;
+            .collect::<Result<Vec<_>>>()?;
         let runtime = self
             .runtime
             .as_mut()
-            .context("local accelerator adapter is not loaded")?;
-        runtime.reset_session()?;
-        for token in tokens {
-            runtime.forward_token(token, false)?;
+            .context("OpenCL adapter is not loaded")?;
+        if runtime.position() != 0 {
+            runtime.reset_session()?;
         }
+        if !tokens.is_empty() {
+            let receipt = runtime.restore_canonical_session(&tokens)?;
+            ensure!(
+                receipt.tokens == tokens.len(),
+                "physical OpenCL restore returned an incomplete prefix"
+            );
+        }
+        self.last_logits = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unloaded_adapter_does_not_claim_physical_restore() {
+        let adapter = OpenClModelAdapter::default();
+        assert!(!adapter.capabilities().supports_kv_restore);
+        assert!(!adapter.capabilities().supports_streaming);
+        assert!(adapter.snapshot_kv().is_err());
     }
 }

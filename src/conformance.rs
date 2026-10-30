@@ -20,8 +20,12 @@ pub struct AdapterConformanceReport {
     pub load: bool,
     pub prefill: bool,
     pub decode: bool,
+    /// Adapter lifecycle returned a non-empty opaque replay snapshot.
+    /// This does not assert that physical K/V tensor bytes were persisted.
     pub kv_snapshot: bool,
     pub kv_restore: bool,
+    pub snapshot_contract: &'static str,
+    pub physical_kv_persistence_verified: bool,
     pub logits_captured: bool,
     pub status: &'static str,
 }
@@ -117,7 +121,12 @@ pub fn run_adapter_conformance(
     engine
         .decode(probe_tokens[0])
         .context("conformance decode")?;
-    let snapshot = engine.snapshot_kv().context("conformance snapshot")?;
+    // ModelAdapter::snapshot_kv is an opaque logical replay contract. The
+    // current API exposes no physical K/V tensor payload or hydration receipt,
+    // so conformance must not turn round-trip equality into that stronger claim.
+    let snapshot = engine
+        .snapshot_kv()
+        .context("conformance logical replay snapshot")?;
     let logits_captured = engine
         .last_logits()
         .context("conformance logits capture")?
@@ -146,6 +155,8 @@ pub fn run_adapter_conformance(
         decode: true,
         kv_snapshot: true,
         kv_restore: true,
+        snapshot_contract: "opaque-logical-replay-not-physical-kv-proof",
+        physical_kv_persistence_verified: false,
         logits_captured,
         status: "passed",
     })

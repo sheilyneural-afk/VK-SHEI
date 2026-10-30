@@ -119,7 +119,7 @@ pub struct CanonicalGpuLod {
     geometry: AttentionGeometry,
     axis: ParallelContextAxis,
     axis_policy: AxisPolicy,
-    _directory: TempDir,
+    _directory: Option<TempDir>,
     cold: ColdStore,
     pages: Vec<Vec<PageAddress>>,
     value_abs_max: Vec<Vec<f64>>,
@@ -157,13 +157,22 @@ impl CanonicalGpuLod {
             geometry.kv_heads,
             axis_policy.clone(),
         )?;
-        let directory = match config.cold_directory.as_deref() {
-            Some(parent) => Builder::new()
-                .prefix("kvslim-gpu-canonical-")
-                .tempdir_in(parent)?,
-            None => Builder::new().prefix("kvslim-gpu-canonical-").tempdir()?,
+        let (directory, cold) = match config.cold_directory.as_deref() {
+            Some(parent) => {
+                let path = parent.join("pages-exact.kv");
+                let store = if path.exists() {
+                    ColdStore::open(&path, 0)?
+                } else {
+                    ColdStore::create(&path, 0)?
+                };
+                (None, store)
+            }
+            None => {
+                let directory = Builder::new().prefix("kvslim-gpu-canonical-").tempdir()?;
+                let store = ColdStore::create(directory.path().join("pages-exact.kv"), 0)?;
+                (Some(directory), store)
+            }
         };
-        let cold = ColdStore::create(directory.path().join("pages-exact.kv"), 0)?;
         let stage_tokens = config.stage_tokens;
         // Do NOT allocate regional K bounding boxes in strict epsilon-zero
         // mode: it can never omit K/V, so such metadata would waste memory.
@@ -172,7 +181,7 @@ impl CanonicalGpuLod {
         } else {
             None
         };
-        Ok(Self {
+        let mut runtime = Self {
             config,
             geometry,
             axis,
@@ -191,7 +200,94 @@ impl CanonicalGpuLod {
                 shared_original_cpu_algorithms: true,
                 ..CanonicalGpuLodStats::default()
             },
-        })
+        };
+        runtime.restore_catalogue()?;
+        Ok(runtime)
+    }
+
+    fn restore_catalogue(&mut self) -> Result<()> {
+        let metadata = self.cold.metadata().to_vec();
+        if metadata.is_empty() {
+            return Ok(());
+        }
+        let row_bytes = self.geometry.head_dim * 2;
+        let token_bytes = self.geometry.kv_elements_per_token() * 2;
+        for meta in metadata {
+            let layer = usize::try_from(meta.geometry.layer)?;
+            ensure!(layer < self.pages.len(), "persisted KV layer out of range");
+            ensure!(
+                meta.geometry.heads as usize == self.geometry.kv_heads
+                    && meta.geometry.head_dim as usize == self.geometry.head_dim,
+                "persisted KV geometry does not match model"
+            );
+            let start = usize::try_from(meta.geometry.token_start)?;
+            let count = usize::try_from(meta.geometry.tokens)?;
+            ensure!(
+                self.pages[layer].len() == start,
+                "persisted KV pages are not a contiguous causal prefix"
+            );
+            let payload = self.cold.read_page(meta.page_id)?;
+            ensure!(
+                payload.key.len() == count * token_bytes
+                    && payload.value.len() == count * token_bytes,
+                "persisted KV payload shape mismatch"
+            );
+            let mut keys_token_major = vec![0_u8; payload.key.len()];
+            let mut values_token_major = vec![0_u8; payload.value.len()];
+            for head in 0..self.geometry.kv_heads {
+                for token in 0..count {
+                    let source = (head * count + token) * row_bytes;
+                    let destination = (token * self.geometry.kv_heads + head) * row_bytes;
+                    keys_token_major[destination..destination + row_bytes]
+                        .copy_from_slice(&payload.key[source..source + row_bytes]);
+                    values_token_major[destination..destination + row_bytes]
+                        .copy_from_slice(&payload.value[source..source + row_bytes]);
+                }
+            }
+            for token in 0..count {
+                let value = &values_token_major[token * token_bytes..(token + 1) * token_bytes];
+                for head in 0..self.geometry.kv_heads {
+                    for dim in 0..self.geometry.head_dim {
+                        let offset = (head * self.geometry.head_dim + dim) * 2;
+                        let scalar =
+                            bf16::from_bits(u16::from_le_bytes([value[offset], value[offset + 1]]))
+                                .to_f32();
+                        ensure!(scalar.is_finite(), "persisted KV contains nonfinite V");
+                        self.value_abs_max[layer][head] =
+                            self.value_abs_max[layer][head].max(f64::from(scalar.abs()));
+                    }
+                }
+            }
+            if layer == 0 {
+                for token in 0..count {
+                    let key = &keys_token_major[token * token_bytes..(token + 1) * token_bytes];
+                    let signal = key
+                        .chunks_exact(2)
+                        .map(|bits| {
+                            bf16::from_bits(u16::from_le_bytes([bits[0], bits[1]])).to_f32()
+                        })
+                        .collect::<Vec<_>>();
+                    self.axis.observe(&signal)?;
+                }
+            }
+            if let Some(index) = self.micro_regions.as_mut() {
+                index.observe(layer, start, &keys_token_major, &self.axis)?;
+            }
+            self.pages[layer].extend((0..count).map(|offset| PageAddress {
+                page_id: meta.page_id,
+                offset,
+            }));
+        }
+        self.axis.flush();
+        self.stats.four_bit_index_payload_bytes = self.axis.fingerprint_payload_bytes();
+        self.stats.physical_cold_store_pages = self.cold.metadata().len();
+        self.stats.physical_cold_store_bytes = self.cold.stats().committed_bytes;
+        if let Some(index) = self.micro_regions.as_ref() {
+            self.stats.micro_region_box_payload_bytes = index.region_bounds_payload_bytes();
+            self.stats.micro_region_states = index.layer_regions(0);
+            self.stats.micro_fragmentation_fallback = index.disabled_due_to_fragmentation();
+        }
+        Ok(())
     }
 
     pub fn config(&self) -> &CanonicalGpuLodConfig {
@@ -355,6 +451,16 @@ impl CanonicalGpuLod {
         self.value_abs_max[layer] = maxima;
         for vector in axis_vectors {
             self.axis.observe(&vector)?;
+        }
+        // A multi-token append is a prefill lifecycle boundary. Publish the
+        // final open extent now so that the immediately following decode can
+        // route through LSH and the hierarchy. Single-token decode appends stay
+        // open until a real novelty boundary instead of creating one state per
+        // token.
+        if layer == 0 && count > 1 {
+            self.axis.flush();
+            self.last_route_token = None;
+            self.last_seed_positions.clear();
         }
         // Indices reference the SAME original CPU semantic regions
         // and BF16 K that were just saved in the canonical ColdStore.
@@ -891,6 +997,41 @@ mod tests {
         assert!(
             grouped.storage_metrics().committed_bytes
                 < token_pages.storage_metrics().committed_bytes
+        );
+    }
+
+    #[test]
+    fn configured_cold_directory_reopens_exact_prefix_and_axis() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = CanonicalGpuLodConfig {
+            cold_directory: Some(directory.path().to_path_buf()),
+            ..Default::default()
+        };
+        let count = 9usize;
+        let keys = bits(
+            &(0..count * 8)
+                .map(|index| index as f32 * 0.03125)
+                .collect::<Vec<_>>(),
+        );
+        let values = bits(
+            &(0..count * 8)
+                .map(|index| 1.0 - index as f32 * 0.015625)
+                .collect::<Vec<_>>(),
+        );
+        {
+            let mut first = CanonicalGpuLod::new(geom(), 1, config.clone()).unwrap();
+            first.append_batch(0, 0, &keys, &values, 4).unwrap();
+            assert!(!first.axis().extents().is_empty());
+        }
+        let mut reopened = CanonicalGpuLod::new(geom(), 1, config).unwrap();
+        assert_eq!(reopened.layer_tokens(0), count);
+        assert_eq!(reopened.axis().token_len(), count);
+        assert!(!reopened.axis().extents().is_empty());
+        assert_eq!(
+            reopened
+                .read_values(0, &(0..count).collect::<Vec<_>>())
+                .unwrap(),
+            values
         );
     }
 

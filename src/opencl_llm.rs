@@ -1630,6 +1630,18 @@ pub struct GpuWeightVerification {
     pub verification_method: &'static str,
 }
 
+/// Receipt for a physical K/V session restored from the canonical persistent
+/// ColdStore.  No transformer layer or LM head is evaluated during restore.
+#[derive(Clone, Debug, Serialize)]
+pub struct CanonicalSessionRestore {
+    pub tokens: usize,
+    pub layers: usize,
+    pub gpu_key_bytes: usize,
+    pub gpu_hot_value_bytes: usize,
+    pub cold_value_bytes_verified: usize,
+    pub hot_values_restored: bool,
+}
+
 pub struct OpenClLlm {
     engine: GpuEngine,
     spec: ModelSpec,
@@ -1922,6 +1934,17 @@ impl OpenClLlm {
         }
         ensure!(!self.poisoned, "GPU context is poisoned");
         self.batch_prefill_tokens = tokens;
+        // A batch larger than one must amortize each BF16 weight read across
+        // several prompt tokens.  The former default (`reuse=1`) launched a
+        // separate workgroup for every [row, token] pair and therefore read
+        // the complete matrix once per token, despite reporting batched
+        // prefill.  Tile 8 is the smallest parity-validated reuse kernel and
+        // is the conservative portable default.  An explicit later call to
+        // `set_prefill_weight_reuse_tokens` can still select 1/16/32 after
+        // hardware calibration.
+        if tokens.is_some_and(|count| count >= 8) && self.prefill_weight_reuse_tokens == 1 {
+            self.prefill_weight_reuse_tokens = 8;
+        }
         Ok(())
     }
     pub fn batch_prefill_tokens(&self) -> Option<usize> {
@@ -2482,6 +2505,140 @@ impl OpenClLlm {
     pub fn session_token_ids(&self) -> &[u32] {
         &self.session_tokens
     }
+
+    /// Restore a complete causal prefix directly from the persistent canonical
+    /// ColdStore. This performs no transformer forward pass and no LM-head
+    /// calculation. Every persisted page is hash-verified by `read_keys` /
+    /// `read_values` before any logical session state is published.
+    ///
+    /// The caller must provide the exact token IDs associated with the stored
+    /// prefix and must already have validated model/tokenizer identity. The
+    /// runtime additionally requires every model layer and the canonical axis
+    /// to contain exactly that prefix length. A partial/mismatched store fails
+    /// closed. On an upload failure the OpenCL context is poisoned because GPU
+    /// buffers may have been modified partially, while `position` and token
+    /// history remain unchanged.
+    pub fn restore_canonical_session(
+        &mut self,
+        token_ids: &[u32],
+    ) -> Result<CanonicalSessionRestore> {
+        ensure!(!self.poisoned, "GPU runtime poisoned; restart the worker");
+        ensure!(
+            self.position == 0 && self.session_tokens.is_empty(),
+            "canonical GPU restore requires a fresh session"
+        );
+        ensure!(
+            !token_ids.is_empty(),
+            "canonical GPU restore prefix is empty"
+        );
+        ensure!(
+            token_ids.len() < self.max_tokens,
+            "canonical GPU restore must leave capacity for continuation"
+        );
+        let vocab = self.spec.vocab_size.context("missing model vocabulary")?;
+        ensure!(
+            token_ids.iter().all(|&token| (token as usize) < vocab),
+            "canonical GPU restore contains an invalid token ID"
+        );
+        let token_bytes = self
+            .spec
+            .attention
+            .kv_elements_per_token()
+            .checked_mul(BYTES_PER_BF16)
+            .context("canonical GPU restore token geometry overflow")?;
+        let layer_bytes = token_ids
+            .len()
+            .checked_mul(token_bytes)
+            .context("canonical GPU restore layer size overflow")?;
+        let positions = (0..token_ids.len()).collect::<Vec<_>>();
+        let layers = self.spec.num_hidden_layers;
+
+        // Validate and materialize every layer before touching GPU buffers.
+        // This makes missing/corrupt/torn ColdStore pages a non-mutating error.
+        let restored = {
+            let lod = self
+                .lod
+                .as_mut()
+                .context("canonical GPU restore requires persistent LOD/ColdStore")?;
+            ensure!(
+                lod.axis().token_len() == token_ids.len(),
+                "canonical GPU restore axis length does not match token history"
+            );
+            let mut restored = Vec::with_capacity(layers);
+            for layer in 0..layers {
+                ensure!(
+                    lod.layer_tokens(layer) == token_ids.len(),
+                    "canonical GPU restore layer {layer} is not a complete causal prefix"
+                );
+                let keys = lod
+                    .read_keys(layer, &positions)
+                    .with_context(|| format!("verify canonical K pages for layer {layer}"))?;
+                let values = lod
+                    .read_values(layer, &positions)
+                    .with_context(|| format!("verify canonical V pages for layer {layer}"))?;
+                ensure!(
+                    keys.len() == layer_bytes && values.len() == layer_bytes,
+                    "canonical GPU restore layer {layer} byte shape mismatch"
+                );
+                restored.push((keys, values));
+            }
+            restored
+        };
+
+        let restore_hot = self
+            .hot_values
+            .as_ref()
+            .is_some_and(|hot| hot.capacity_tokens >= token_ids.len());
+        let upload = (|| -> Result<()> {
+            for (layer, (keys, values)) in restored.iter().enumerate() {
+                self.engine
+                    .transfer(&mut self.workspace.kv[layer].key, keys)
+                    .with_context(|| format!("upload canonical GPU K layer {layer}"))?;
+                if restore_hot {
+                    let hot = self
+                        .hot_values
+                        .as_mut()
+                        .context("canonical GPU hot tier disappeared during restore")?;
+                    self.engine
+                        .transfer(&mut hot.values[layer], values)
+                        .with_context(|| format!("upload canonical GPU hot V layer {layer}"))?;
+                }
+            }
+            self.engine
+                .queue
+                .finish()
+                .context("canonical GPU session restore barrier")?;
+            Ok(())
+        })();
+        if let Err(error) = upload {
+            self.poisoned = true;
+            return Err(error);
+        }
+
+        if let Some(hot) = self.hot_values.as_mut() {
+            hot.valid_prefix_tokens = if restore_hot { token_ids.len() } else { 0 };
+            hot.prefetched_bytes = if restore_hot { layer_bytes * layers } else { 0 };
+        }
+        self.position = token_ids.len();
+        self.session_tokens.extend_from_slice(token_ids);
+        self.last_verified_prefix_reused_tokens = token_ids.len();
+        self.last_verified_prefix_restored_bytes = layer_bytes
+            .checked_mul(layers)
+            .and_then(|bytes| bytes.checked_mul(if restore_hot { 2 } else { 1 }))
+            .context("canonical GPU restore metric overflow")?;
+        self.last_prompt_replay_hit = false;
+        self.last_prompt_replay_sha_verified = true;
+
+        Ok(CanonicalSessionRestore {
+            tokens: token_ids.len(),
+            layers,
+            gpu_key_bytes: layer_bytes * layers,
+            gpu_hot_value_bytes: if restore_hot { layer_bytes * layers } else { 0 },
+            cold_value_bytes_verified: layer_bytes * layers,
+            hot_values_restored: restore_hot,
+        })
+    }
+
     /// Reuse the loaded BF16 weights for an independent chat request.
     /// All new KV positions overwrite the previous session's prefix.
     /// A poisoned driver context is never silently reused.
@@ -3446,6 +3603,8 @@ impl OpenClLlm {
             0
         };
         let last = if let Some(step) = restored {
+            self.session_tokens.clear();
+            self.session_tokens.extend_from_slice(prompt_ids);
             Some(step)
         } else if let Some(batch_size) = self.batch_prefill_tokens {
             let result = self.prefill_batched(
@@ -3458,7 +3617,12 @@ impl OpenClLlm {
             if result.is_err() {
                 self.poisoned = true;
             }
-            Some(result?)
+            let step = result?;
+            // Batch prefill bypasses `forward_token_internal`, so publish the
+            // exact prompt history explicitly for physical K/V snapshots.
+            self.session_tokens.clear();
+            self.session_tokens.extend_from_slice(prompt_ids);
+            Some(step)
         } else {
             let mut last = None;
             for (i, &id) in prompt_ids.iter().enumerate() {
@@ -6155,6 +6319,47 @@ mod tests {
                     batch
                 );
             }
+        }
+
+        #[test]
+        #[ignore = "requires a physical OpenCL GPU and configured-model BF16 checkpoint"]
+        fn gpu_actual_persistent_coldstore_restores_without_token_replay() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let directory = tempfile::tempdir().unwrap();
+            let config = CanonicalGpuLodConfig {
+                epsilon: 0.0,
+                stage_tokens: 64,
+                cold_directory: Some(directory.path().to_owned()),
+            };
+            let ids = [128000_u32, 9906, 11, 1917, 0, 128001, 128006, 882];
+            {
+                let mut source = OpenClLlm::load_with_canonical_lod(
+                    &model,
+                    32,
+                    WeightMode::Resident,
+                    config.clone(),
+                )
+                .unwrap();
+                source.set_batch_prefill_tokens(Some(8)).unwrap();
+                source.generate(&ids, 1, false).unwrap();
+                assert_eq!(source.position(), ids.len());
+                assert_eq!(source.session_token_ids(), ids);
+            }
+
+            let mut restored =
+                OpenClLlm::load_with_canonical_lod(&model, 32, WeightMode::Resident, config)
+                    .unwrap();
+            restored.set_exact_hot_v_tokens(32).unwrap();
+            let receipt = restored.restore_canonical_session(&ids).unwrap();
+            assert_eq!(receipt.tokens, ids.len());
+            assert_eq!(receipt.layers, restored.spec().num_hidden_layers);
+            assert!(receipt.hot_values_restored);
+            assert_eq!(restored.position(), ids.len());
+            assert_eq!(restored.session_token_ids(), ids);
+            let next = restored.forward_token(123, false).unwrap();
+            assert_eq!(next.position, ids.len());
         }
     }
 

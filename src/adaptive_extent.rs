@@ -8,7 +8,10 @@
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AxisPolicy {
@@ -659,6 +662,96 @@ impl ParallelContextAxis {
         self.quadratic_levels.iter().map(Vec::len).sum()
     }
 
+    /// Best-first traversal of the squared microdimension hierarchy.  Bounds
+    /// come from the original f32 min/max boxes and are used for routing only;
+    /// exact BF16 attention certification remains authoritative downstream.
+    fn hierarchical_candidates(&self, query: &[f32], target: usize) -> Vec<usize> {
+        #[derive(Clone, Copy, Debug)]
+        struct Pending {
+            upper: f32,
+            level: usize,
+            id: usize,
+        }
+        impl PartialEq for Pending {
+            fn eq(&self, other: &Self) -> bool {
+                self.upper.to_bits() == other.upper.to_bits()
+                    && self.level == other.level
+                    && self.id == other.id
+            }
+        }
+        impl Eq for Pending {}
+        impl PartialOrd for Pending {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for Pending {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.upper
+                    .total_cmp(&other.upper)
+                    .then_with(|| self.level.cmp(&other.level))
+                    .then_with(|| self.id.cmp(&other.id))
+            }
+        }
+        fn upper(query: &[f32], node: &QuadraticDimension) -> f32 {
+            query
+                .iter()
+                .zip(node.minimum.iter().zip(&node.maximum))
+                .map(|(q, (minimum, maximum))| {
+                    if *q >= 0.0 {
+                        *q * *maximum
+                    } else {
+                        *q * *minimum
+                    }
+                })
+                .sum()
+        }
+
+        if self.quadratic_levels.is_empty() || self.extents.is_empty() {
+            return Vec::new();
+        }
+        let mut children = self
+            .quadratic_levels
+            .iter()
+            .map(|_| BTreeSet::<usize>::new())
+            .collect::<Vec<_>>();
+        for level in 1..self.quadratic_levels.len() {
+            for node in &self.quadratic_levels[level] {
+                children[level - 1].extend(node.child_ids.iter().copied());
+            }
+        }
+        let mut pending = BinaryHeap::new();
+        for (level, nodes) in self.quadratic_levels.iter().enumerate() {
+            for node in nodes {
+                if level + 1 == self.quadratic_levels.len() || !children[level].contains(&node.id) {
+                    pending.push(Pending {
+                        upper: upper(query, node),
+                        level,
+                        id: node.id,
+                    });
+                }
+            }
+        }
+        let mut leaves = BTreeSet::new();
+        while leaves.len() < target {
+            let Some(next) = pending.pop() else { break };
+            let node = &self.quadratic_levels[next.level][next.id];
+            if next.level == 0 {
+                leaves.insert(node.id);
+            } else {
+                for &child in &node.child_ids {
+                    let child_node = &self.quadratic_levels[next.level - 1][child];
+                    pending.push(Pending {
+                        upper: upper(query, child_node),
+                        level: next.level - 1,
+                        id: child,
+                    });
+                }
+            }
+        }
+        leaves.into_iter().collect()
+    }
+
     /// Select a query-dependent number of reversible coordinates. The count is
     /// derived from the entropy of the compact 4-bit score distribution rather
     /// than from a fixed token/page budget. A concentrated query returns a
@@ -688,6 +781,10 @@ impl ParallelContextAxis {
                 self.lsh_probe_four += 1;
             }
         }
+        let hierarchical = self.hierarchical_candidates(query, candidates.len().max(1));
+        candidates.extend(hierarchical);
+        candidates.sort_unstable();
+        candidates.dedup();
         if candidates.is_empty() {
             self.lsh_misses += 1;
             return Ok(Vec::new());
@@ -946,7 +1043,16 @@ impl ParallelContextAxis {
             self.extents[new_id].micro_metadata.temporal_predecessor = Some(new_id - 1);
         }
         let mut neighbours = Vec::new();
-        for candidate in 0..new_id {
+        // Reuse the per-head LSH catalogue to bound relationship updates.
+        // Scanning every previous centroid on every close made prefill
+        // O(N^2 * D), even though the same index already identifies plausible
+        // semantic neighbours.
+        let heads = self.dimension_fingerprints[new_id].clone();
+        let candidates = self.candidates_from_heads(&heads, 4);
+        for candidate in candidates
+            .into_iter()
+            .filter(|candidate| *candidate < new_id)
+        {
             let quality = cosine_similarity(&new_centroid, &self.extents[candidate].centroid);
             let other_coherence = self.extents[candidate].micro_metadata.coherence;
             if quality >= SEMANTIC_LINK_QUALITY
@@ -1419,5 +1525,8 @@ mod tests {
         assert!(axis.fingerprint_payload_bytes() < axis.f32_fingerprint_reference_bytes());
         assert_eq!(axis.quadratic_levels()[4][0].token_start, 0);
         assert_eq!(axis.quadratic_levels()[4][0].token_end, 256);
+        let routed = axis.hierarchical_candidates(&[256.0, 1.0], 1);
+        assert_eq!(routed.len(), 1);
+        assert!(routed[0] < axis.extents().len());
     }
 }

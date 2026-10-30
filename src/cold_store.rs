@@ -96,6 +96,7 @@ pub struct ColdStore {
     pages: Vec<PageMeta>,
     hot_capacity: usize,
     hot: HashMap<u64, Arc<ColdPagePayload>>,
+    hash_tables: HashMap<u64, Arc<Vec<u64>>>,
     lru: VecDeque<u64>,
     reads: u64,
     hits: u64,
@@ -157,6 +158,7 @@ impl ColdStore {
             pages: Vec::new(),
             hot_capacity,
             hot: HashMap::new(),
+            hash_tables: HashMap::new(),
             lru: VecDeque::new(),
             reads: 0,
             hits: 0,
@@ -567,20 +569,27 @@ impl ColdStore {
     }
 
     fn read_hash_table(
-        &self,
+        &mut self,
         offset: u64,
         tokens: usize,
         expected_checksum: u64,
-    ) -> io::Result<Vec<u64>> {
+    ) -> io::Result<Arc<Vec<u64>>> {
+        if let Some(cached) = self.hash_tables.get(&offset) {
+            return Ok(cached.clone());
+        }
         let mut bytes = vec![0_u8; tokens * 8];
         read_exact_at(&self.file, offset, &mut bytes)?;
         if checksum(&bytes) != expected_checksum {
             return Err(invalid("tabla de hashes por token inválida"));
         }
-        Ok(bytes
-            .chunks_exact(8)
-            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
-            .collect())
+        let hashes = Arc::new(
+            bytes
+                .chunks_exact(8)
+                .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+                .collect::<Vec<u64>>(),
+        );
+        self.hash_tables.insert(offset, hashes.clone());
+        Ok(hashes)
     }
 
     fn page_meta(&self, page_id: u64) -> io::Result<PageMeta> {

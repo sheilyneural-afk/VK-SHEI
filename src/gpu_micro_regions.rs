@@ -452,9 +452,44 @@ impl MicroKeyRegions {
                 })
                 .collect::<Vec<_>>();
             candidates.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            // Maintain the certificate accumulators incrementally. The old
+            // implementation rescanned every region after each insertion,
+            // turning best-first widening into O(R^2).
+            let group = nheads / self.geometry.kv_heads;
+            let references = (0..nheads)
+                .map(|h| {
+                    upper_lower
+                        .iter()
+                        .map(|(_, scores, _)| scores[h].1)
+                        .fold(f64::NEG_INFINITY, f64::max)
+                })
+                .collect::<Vec<_>>();
+            let mut kept_lower = vec![0.0_f64; nheads];
+            let mut omitted_upper = vec![0.0_f64; nheads];
+            for (id, scores, count) in &upper_lower {
+                for h in 0..nheads {
+                    if selected.contains(id) {
+                        kept_lower[h] += (scores[h].0 - references[h]).exp() * *count as f64;
+                    } else {
+                        omitted_upper[h] += (scores[h].1 - references[h]).exp() * *count as f64;
+                    }
+                }
+            }
             for (id, _) in candidates {
                 selected.insert(id);
-                error = self.error_bounds(&upper_lower, &selected, value_abs_max)?;
+                let (_, scores, count) = &upper_lower[id];
+                for h in 0..nheads {
+                    let removed = (scores[h].1 - references[h]).exp() * *count as f64;
+                    omitted_upper[h] = (omitted_upper[h] - removed).max(0.0);
+                    kept_lower[h] += (scores[h].0 - references[h]).exp() * *count as f64;
+                    let denominator = omitted_upper[h] + kept_lower[h];
+                    let fraction = if denominator == 0.0 {
+                        1.0
+                    } else {
+                        omitted_upper[h] / denominator
+                    };
+                    error[h] = 2.0 * value_abs_max[h / group] * fraction;
+                }
                 if error.iter().all(|&v| v <= epsilon) {
                     break;
                 }

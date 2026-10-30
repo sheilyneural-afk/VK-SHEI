@@ -167,6 +167,240 @@ impl RawTensor {
     }
 }
 
+/// Physical encoding for immutable model weights. Quantized variants are
+/// symmetric block formats with one finite positive FP32 scale per block.
+/// This type describes storage only; a backend must still advertise and
+/// implement matching kernels before selecting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeightEncoding {
+    Bf16,
+    Q8Symmetric,
+    Q4Symmetric,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedWeight {
+    encoding: WeightEncoding,
+    shape: Vec<usize>,
+    block_size: usize,
+    data: Arc<[u8]>,
+    scales: Arc<[f32]>,
+}
+
+impl PackedWeight {
+    pub fn from_bf16(
+        shape: Vec<usize>,
+        bytes: impl Into<Arc<[u8]>>,
+    ) -> Result<Self, PortableError> {
+        let elements = checked_elements(&shape)?;
+        let data = bytes.into();
+        if data.len()
+            != elements
+                .checked_mul(2)
+                .ok_or(PortableError::InvalidGeometry(
+                    "BF16 weight byte count overflows",
+                ))?
+        {
+            return Err(PortableError::ShapeMismatch(
+                "BF16 weight payload length differs from shape",
+            ));
+        }
+        Ok(Self {
+            encoding: WeightEncoding::Bf16,
+            shape,
+            block_size: 0,
+            data,
+            scales: Arc::from([]),
+        })
+    }
+
+    pub fn from_quantized_parts(
+        encoding: WeightEncoding,
+        shape: Vec<usize>,
+        block_size: usize,
+        data: impl Into<Arc<[u8]>>,
+        scales: impl Into<Arc<[f32]>>,
+    ) -> Result<Self, PortableError> {
+        if encoding == WeightEncoding::Bf16 {
+            return Err(PortableError::InvalidGeometry(
+                "use from_bf16 for unquantized weights",
+            ));
+        }
+        if block_size == 0 {
+            return Err(PortableError::InvalidGeometry(
+                "quantized weight block size must be positive",
+            ));
+        }
+        let elements = checked_elements(&shape)?;
+        let expected_data = match encoding {
+            WeightEncoding::Q8Symmetric => elements,
+            WeightEncoding::Q4Symmetric => elements.div_ceil(2),
+            WeightEncoding::Bf16 => unreachable!(),
+        };
+        let data = data.into();
+        if data.len() != expected_data {
+            return Err(PortableError::ShapeMismatch(
+                "quantized payload length differs from encoding and shape",
+            ));
+        }
+        let scales = scales.into();
+        if scales.len() != elements.div_ceil(block_size) {
+            return Err(PortableError::ShapeMismatch(
+                "scale count differs from quantized block count",
+            ));
+        }
+        if scales
+            .iter()
+            .any(|scale| !scale.is_finite() || *scale <= 0.0)
+        {
+            return Err(PortableError::NonFinite(
+                "quantized scales must be finite and positive",
+            ));
+        }
+        if encoding == WeightEncoding::Q4Symmetric
+            && elements % 2 == 1
+            && data.last().is_some_and(|byte| byte & 0xf0 != 0)
+        {
+            return Err(PortableError::ShapeMismatch(
+                "unused high Q4 nibble must be zero",
+            ));
+        }
+        Ok(Self {
+            encoding,
+            shape,
+            block_size,
+            data,
+            scales,
+        })
+    }
+
+    pub fn quantize_symmetric(
+        encoding: WeightEncoding,
+        shape: Vec<usize>,
+        block_size: usize,
+        values: &[f32],
+    ) -> Result<Self, PortableError> {
+        if encoding == WeightEncoding::Bf16 {
+            let bytes = values
+                .iter()
+                .flat_map(|value| bf16::from_f32(*value).to_bits().to_le_bytes())
+                .collect::<Vec<_>>();
+            return Self::from_bf16(shape, bytes);
+        }
+        let elements = checked_elements(&shape)?;
+        if values.len() != elements {
+            return Err(PortableError::ShapeMismatch(
+                "source values differ from weight shape",
+            ));
+        }
+        if block_size == 0 {
+            return Err(PortableError::InvalidGeometry(
+                "quantized weight block size must be positive",
+            ));
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(PortableError::NonFinite(
+                "cannot quantize non-finite model weights",
+            ));
+        }
+        let limit = match encoding {
+            WeightEncoding::Q8Symmetric => 127.0,
+            WeightEncoding::Q4Symmetric => 7.0,
+            WeightEncoding::Bf16 => unreachable!(),
+        };
+        let mut scales = Vec::with_capacity(elements.div_ceil(block_size));
+        let mut quantized = Vec::with_capacity(elements);
+        for block in values.chunks(block_size) {
+            let maximum = block.iter().copied().map(f32::abs).fold(0.0, f32::max);
+            let scale = if maximum == 0.0 { 1.0 } else { maximum / limit };
+            scales.push(scale);
+            quantized.extend(
+                block
+                    .iter()
+                    .map(|value| (value / scale).round_ties_even().clamp(-limit, limit) as i8),
+            );
+        }
+        let data = match encoding {
+            WeightEncoding::Q8Symmetric => quantized
+                .into_iter()
+                .map(|value| value as u8)
+                .collect::<Vec<_>>(),
+            WeightEncoding::Q4Symmetric => {
+                let mut packed = vec![0u8; elements.div_ceil(2)];
+                for (index, value) in quantized.into_iter().enumerate() {
+                    packed[index / 2] |= ((value as u8) & 0x0f) << ((index & 1) * 4);
+                }
+                packed
+            }
+            WeightEncoding::Bf16 => unreachable!(),
+        };
+        Self::from_quantized_parts(encoding, shape, block_size, data, scales)
+    }
+
+    pub fn encoding(&self) -> WeightEncoding {
+        self.encoding
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    pub fn packed_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn scales(&self) -> &[f32] {
+        &self.scales
+    }
+
+    pub fn decode_f32(&self) -> Vec<f32> {
+        let elements = self.shape.iter().product();
+        (0..elements).map(|index| self.element_f32(index)).collect()
+    }
+
+    pub fn element_f32(&self, index: usize) -> f32 {
+        match self.encoding {
+            WeightEncoding::Bf16 => {
+                let offset = index * 2;
+                bf16::from_bits(u16::from_le_bytes([
+                    self.data[offset],
+                    self.data[offset + 1],
+                ]))
+                .to_f32()
+            }
+            WeightEncoding::Q8Symmetric => {
+                (self.data[index] as i8) as f32 * self.scales[index / self.block_size]
+            }
+            WeightEncoding::Q4Symmetric => {
+                let nibble = (self.data[index / 2] >> ((index & 1) * 4)) & 0x0f;
+                let signed = if nibble & 0x08 == 0 {
+                    nibble as i8
+                } else {
+                    nibble as i8 - 16
+                };
+                signed as f32 * self.scales[index / self.block_size]
+            }
+        }
+    }
+}
+
+fn checked_elements(shape: &[usize]) -> Result<usize, PortableError> {
+    shape
+        .iter()
+        .try_fold(1usize, |total, &dimension| {
+            (dimension > 0).then_some(total)?.checked_mul(dimension)
+        })
+        .filter(|_| !shape.is_empty())
+        .ok_or(PortableError::InvalidGeometry(
+            "shape empty, zero-sized or overflowing",
+        ))
+}
+
 /// GQA/MQA mapping with arbitrary attention and KV head counts.
 /// This geometry does *not* assume that hidden_size == q_heads * head_dim.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -503,6 +737,64 @@ mod tests {
         cache.append(key, value).unwrap();
         assert_ne!(previous, cache.digest_sha256());
         assert_eq!(cache.tokens(), 2);
+    }
+
+    #[test]
+    fn packed_q8_and_q4_have_verifiable_geometry_and_error() {
+        let values = [-1.0, -0.5, 0.0, 0.5, 1.0, 0.25, -0.25];
+        for encoding in [WeightEncoding::Q8Symmetric, WeightEncoding::Q4Symmetric] {
+            let weight =
+                PackedWeight::quantize_symmetric(encoding, vec![1, values.len()], 4, &values)
+                    .unwrap();
+            assert_eq!(weight.shape(), &[1, values.len()]);
+            assert_eq!(weight.scales().len(), 2);
+            assert!(weight.scales().iter().all(|scale| *scale > 0.0));
+            let decoded = weight.decode_f32();
+            let tolerance = if encoding == WeightEncoding::Q8Symmetric {
+                0.01
+            } else {
+                0.08
+            };
+            assert!(
+                decoded
+                    .iter()
+                    .zip(values)
+                    .all(|(actual, expected)| (actual - expected).abs() <= tolerance)
+            );
+        }
+    }
+
+    #[test]
+    fn packed_weights_reject_malformed_or_nonfinite_parts() {
+        assert!(
+            PackedWeight::from_quantized_parts(
+                WeightEncoding::Q8Symmetric,
+                vec![4],
+                2,
+                vec![0; 3],
+                vec![1.0, 1.0],
+            )
+            .is_err()
+        );
+        assert!(
+            PackedWeight::from_quantized_parts(
+                WeightEncoding::Q4Symmetric,
+                vec![3],
+                2,
+                vec![0, 0xf0],
+                vec![1.0, 1.0],
+            )
+            .is_err()
+        );
+        assert!(
+            PackedWeight::quantize_symmetric(
+                WeightEncoding::Q8Symmetric,
+                vec![1],
+                32,
+                &[f32::NAN],
+            )
+            .is_err()
+        );
     }
 
     #[test]

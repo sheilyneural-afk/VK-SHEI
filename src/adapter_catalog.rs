@@ -229,21 +229,10 @@ pub fn select_for_model(
     let selection = select_adapter(&available, requested_backend, requested_compute)
         .ok_or_else(|| anyhow::anyhow!("no runtime adapter is available by default; select an installed adapter explicitly after capability probing"))?;
 
-    match selection.backend.as_str() {
-        "cpu" => {
-            #[cfg(feature = "torch-backend")]
-            let _ = create_adapter(&selection.adapter_id)?;
-            #[cfg(not(feature = "torch-backend"))]
-            bail!("torch adapter is not compiled");
-        }
-        "accelerator" => {
-            #[cfg(feature = "accelerator-backend")]
-            let _ = create_adapter(&selection.adapter_id)?;
-            #[cfg(not(feature = "accelerator-backend"))]
-            bail!("accelerator adapter is not compiled");
-        }
-        backend => bail!("adapter has no validation policy: {backend}"),
-    }
+    // Validate the concrete selected adapter, not its broad backend label.
+    // Multiple CPU adapters may coexist and the native Rust adapter must not
+    // acquire an accidental LibTorch feature dependency.
+    let _ = create_adapter(&selection.adapter_id)?;
 
     let config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(model_dir.join("config.json"))?)?;

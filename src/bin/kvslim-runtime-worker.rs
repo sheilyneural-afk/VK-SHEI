@@ -262,7 +262,14 @@ impl InferenceExecutor for GpuExecutor {
     type Error = anyhow::Error;
 
     fn execute(&mut self, request: GpuJob, cancel: &AtomicBool) -> Result<GpuAnswer> {
-        self.model.reset_session()?;
+        // Keep the verified BF16 prompt snapshot across turns. Reset only the
+        // active execution state after a completed request; reset_session()
+        // deliberately preserves the bounded SHA-256 verified replay cache.
+        // On the first request the runtime is already fresh, so no reset or
+        // device barrier is necessary.
+        if self.model.position() != 0 {
+            self.model.reset_session()?;
+        }
         let text = render_prompt(
             &self.chat_template,
             &request.messages,
@@ -326,14 +333,14 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "engine":"kvslim-engine",
         "model":state.model_id,
         "model_directory": state.model_dir,
-        "running_backend": "local-accelerator-adapter",
+        "running_backend": "rust-opencl-runtime",
         "device":state.gpu_device,
         "weight_mode":state.weight_mode,
         "load_seconds":state.load_seconds,
         "model_weights":"original_BF16_unchanged",
         "neural_arithmetic":"measured-device-kernels-with-declared-precision",
         "full_llm_layers_computed_on_gpu":true,
-        "kvslim_lod_active":false,
+        "kvslim_lod_active":state.lod_epsilon.is_some(),
         "canonical_cpu_kvslim_lod_components_active":state.lod_epsilon.is_some(),
         "canonical_cpu_lod_modules":["adaptive_extent::ParallelContextAxis",
             "cold_store::ColdStore","attention_certificate::select_by_exact_mass"],
@@ -351,8 +358,8 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "gpu_hot_v_capacity_tokens":state.gpu_hot_v_capacity_tokens,
         "gpu_verified_prompt_replay_max_tokens":state.gpu_verified_prompt_replay_max_tokens,
         "gpu_verified_shared_prefix_enabled":state.gpu_verified_shared_prefix_enabled,
-        "gpu_verified_shared_prefix_policy":"opt-in identical tokenizer ID prefix; SHA256 original BF16 K/V, original CPU ColdStore/4-bit restored; only causal suffix physically executed on GPU",
-        "gpu_verified_prompt_replay_policy":"opt-in: identical tokenizer IDs, RAM-only original BF16 K/V, SHA256 validation before rehydrating original CPU ColdStore and four-bit index, no omitted attention",
+        "gpu_verified_shared_prefix_policy":"enabled when exact canonical KV is configured: identical tokenizer-ID prefix, SHA256 original BF16 K/V, CPU ColdStore/4-bit index restored; only the causal suffix is physically executed",
+        "gpu_verified_prompt_replay_policy":"bounded RAM-only exact replay: identical tokenizer IDs and SHA256 original BF16 K/V required before ColdStore/four-bit rehydration; mismatches recompute full prefill",
         "gpu_micro_hot_v_capacity_tokens":state.gpu_micro_hot_v_capacity_tokens,
         "gpu_micro_hot_policy":"Optional positive epsilon only: GPU resident BF16 V and cached certified token IDs, original CPU ColdStore BF16 commits preserved; full BF16 GPU fallback when no K-region certificate",
         "gpu_decode_unroll4":state.gpu_decode_unroll4,
@@ -394,8 +401,9 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .filter(|value| {
-            value.get("schema").and_then(Value::as_str) == Some("kvslim.calibration_receipt/v1")
-                && value.get("status").and_then(Value::as_str) == Some("measured-basic-execution")
+            value.get("schema").and_then(Value::as_str) == Some("kvslim.calibration_receipt/v2")
+                && value.get("status").and_then(Value::as_str)
+                    == Some("measured-sustained-execution")
         });
     Json(json!({
         "engine":"kvslim-engine",
@@ -406,7 +414,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_model_loaded":true,"gpu_full_llm_inference":true,
         "compute_precision":"FP32 accumulations, BF16 model weights and KV",
         "models_verified":[],
-        "kvslim_lod_active":false,
+        "kvslim_lod_active":state.lod_epsilon.is_some(),
         "canonical_cpu_lod_components_active":state.lod_epsilon.is_some(),
         "canonical_lod_epsilon":state.lod_epsilon,
         "gpu_micro_axis_novelty_sigma":state.gpu_micro_axis_sigma,
@@ -422,8 +430,8 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_hot_v_capacity_tokens":state.gpu_hot_v_capacity_tokens,
         "gpu_verified_prompt_replay_max_tokens":state.gpu_verified_prompt_replay_max_tokens,
         "gpu_verified_shared_prefix_enabled":state.gpu_verified_shared_prefix_enabled,
-        "gpu_verified_shared_prefix_policy":"opt-in identical tokenizer ID prefix; SHA256 original BF16 K/V, original CPU ColdStore/4-bit restored; only causal suffix physically executed on GPU",
-        "gpu_verified_prompt_replay_policy":"opt-in: identical tokenizer IDs, RAM-only original BF16 K/V, SHA256 validation before rehydrating original CPU ColdStore and four-bit index, no omitted attention",
+        "gpu_verified_shared_prefix_policy":"enabled when exact canonical KV is configured: identical tokenizer-ID prefix, SHA256 original BF16 K/V, CPU ColdStore/4-bit index restored; only the causal suffix is physically executed",
+        "gpu_verified_prompt_replay_policy":"bounded RAM-only exact replay: identical tokenizer IDs and SHA256 original BF16 K/V required before ColdStore/four-bit rehydration; mismatches recompute full prefill",
         "gpu_micro_hot_v_capacity_tokens":state.gpu_micro_hot_v_capacity_tokens,
         "gpu_micro_hot_policy":"Optional positive epsilon only: GPU resident BF16 V and cached certified token IDs, original CPU ColdStore BF16 commits preserved; full BF16 GPU fallback when no K-region certificate",
         "gpu_decode_unroll4":state.gpu_decode_unroll4,
@@ -435,7 +443,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_hot_v_policy":"Canonical ColdStore V exact always; bounded BF16 hot tier only at epsilon=0",
         "gpu_prefill_cold_pages":"batched up to 64 BF16 tokens/page using original ColdStore",
         "gpu_prefill_temporary_v_residency":"released after cold seal; no permanent extra GPU V cache",
-         "canonical_lod_scope":"original CPU index/LSH and micro-links, ColdStore and final exact-score mass; new conservative region BF16-box pruning for positive epsilon; full CPU regional branch-and-bound still pending",
+         "canonical_lod_scope":"hierarchical best-first Grid/Chunk/Page selection over original CPU index/LSH and micro-links; ColdStore and conservative BF16-box omitted-mass certificates authorize positive-epsilon pruning; exact epsilon=0 remains dense",
         "parity_with_cpu":null,
         "server_backend":"local accelerator runtime",
         "max_context_tokens":state.max_context_tokens,
@@ -519,7 +527,7 @@ async fn chat(
             "engine":"local-accelerator-runtime",
             "gpu_weight_bytes":generation.gpu_weight_payload_bytes,
             "gpu_device":generation.device_name,
-            "kvslim_lod_active":false,
+            "kvslim_lod_active":generation.canonical_cpu_lod_components_active,
             "canonical_cpu_lod_components_active":generation.canonical_cpu_lod_components_active,
             "canonical_cpu_lod_stats":generation.canonical_cpu_lod_stats,
             "gpu_kv_capacity_bytes":generation.gpu_kv_capacity_bytes,
@@ -580,9 +588,14 @@ async fn main() -> Result<()> {
     let mut max_context = 2048usize;
     let mut timeout_secs = 300u64;
     let mut mode = WeightMode::Resident;
-    // Dense BF16 is the reliable, lower-overhead default.
-    // Canonical LOD/ColdStore remains available explicitly via --gpu-lod.
-    let mut lod: Option<CanonicalGpuLodConfig> = None;
+    // Exact canonical KV is the production default: BF16 pages remain the
+    // authority and enable verified prefix replay between independent turns.
+    // Positive-epsilon pruning is still explicit; --gpu-dense-kv remains the
+    // low-overhead escape hatch for short, stateless workloads.
+    let mut lod: Option<CanonicalGpuLodConfig> = Some(CanonicalGpuLodConfig {
+        epsilon: 0.0,
+        ..CanonicalGpuLodConfig::default()
+    });
     let mut micro_sigma: Option<f32> = None;
     let mut micro_warmup: Option<usize> = None;
     let mut micro_safety_fuse: Option<usize> = None;
@@ -590,16 +603,19 @@ async fn main() -> Result<()> {
     // and verified bit-exact against the previous OpenCL dense/LOD engine.
     // Explicit fallback keeps the conservative execution path available.
     let mut prefill_batch_tokens = Some(128usize);
-    // GPU-only tunables are opt-in. Legacy GPU and CPU remain available.
+    // Safe exact optimizations are enabled coherently. They preserve original
+    // BF16 K/V, retain a bounded verified replay snapshot in host RAM, and
+    // fail closed to physical prefill on a token/digest mismatch. Hardware-
+    // specific GEMV unrolling stays opt-in until calibration proves a win.
     let mut prefill_weight_reuse = 1usize;
-    let mut hot_v_tokens = 0usize;
-    let mut verified_prompt_replay_tokens = 0usize;
-    let mut verified_shared_prefix = false;
+    let mut hot_v_tokens = 512usize;
+    let mut verified_prompt_replay_tokens = 512usize;
+    let mut verified_shared_prefix = true;
     let mut micro_hot_v_tokens = 0usize;
     let mut decode_unroll4 = false;
-    let mut deferred_cold = false;
+    let mut deferred_cold = true;
     let mut fused_decode = false;
-    let mut exact_hot_fused = false;
+    let mut exact_hot_fused = true;
     let mut allow_network = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -741,6 +757,18 @@ async fn main() -> Result<()> {
         (1..=32768).contains(&max_context),
         "invalid GPU max context"
     );
+    hot_v_tokens = hot_v_tokens.min(max_context);
+    verified_prompt_replay_tokens = verified_prompt_replay_tokens.min(hot_v_tokens);
+    if lod.is_none() {
+        // Replay and deferred commit require the exact canonical ColdStore.
+        // An explicit dense route must never advertise or attempt them.
+        verified_prompt_replay_tokens = 0;
+        verified_shared_prefix = false;
+        deferred_cold = false;
+    }
+    if verified_prompt_replay_tokens < 32 {
+        verified_shared_prefix = false;
+    }
     let chat_template = validate_model_bundle(&model)?;
     let model_id = model
         .file_name()

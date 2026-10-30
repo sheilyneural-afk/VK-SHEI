@@ -20,6 +20,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --lib
+      - run: cargo test --locked --bin kvslim-calibrate
       - run: cargo test --locked -p kvslim-adapter-api
 
   adapters:
@@ -57,7 +58,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked --features accelerator-backend --all-targets -- --ignored --nocapture
+      - name: Require a physical model bundle
+        env:
+          KVSLIM_PHYSICAL_MODEL: ${{ vars.KVSLIM_PHYSICAL_MODEL }}
+        run: test -n "$KVSLIM_PHYSICAL_MODEL" && test -d "$KVSLIM_PHYSICAL_MODEL"
+      - name: Physical accelerator tests
+        run: cargo test --locked --features accelerator-backend --all-targets -- --ignored --nocapture
+      - name: Block activation unless multi-step parity passes
+        env:
+          KVSLIM_PHYSICAL_MODEL: ${{ vars.KVSLIM_PHYSICAL_MODEL }}
+        run: cargo run --locked --release --features accelerator-backend --bin kvslim-adapter-parity -- "$KVSLIM_PHYSICAL_MODEL" --decode-steps 8
+      - name: Sustained calibration after parity
+        env:
+          KVSLIM_PHYSICAL_MODEL: ${{ vars.KVSLIM_PHYSICAL_MODEL }}
+        run: cargo run --locked --release --features accelerator-backend --bin kvslim-calibrate -- "$KVSLIM_PHYSICAL_MODEL" --force --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048
 
   load:
     if: github.event_name == 'workflow_dispatch'

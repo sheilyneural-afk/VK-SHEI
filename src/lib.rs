@@ -8,8 +8,10 @@
 pub mod adapter_catalog;
 pub mod adaptive_extent;
 pub mod attention_certificate;
+pub mod calibration_transaction;
 pub mod cold_store;
 pub mod conformance;
+pub mod continuity_contract;
 pub mod conversion_worker;
 #[cfg(feature = "model-bundle")]
 pub mod decoder_layout;

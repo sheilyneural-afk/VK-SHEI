@@ -291,11 +291,8 @@ impl NativeCpuDecoder {
     fn load(model_dir: &Path, config: &Value) -> Result<Self> {
         let bundle = ModelBundle::load(model_dir)?;
         bundle.validate_decoder_layout()?;
+        bundle.ensure_all_tensors_dtype("BF16")?;
         let spec = bundle.spec;
-        ensure!(
-            spec.declared_dtype.as_deref() == Some("bfloat16"),
-            "la CPU nativa requiere pesos BF16"
-        );
         let weights = NativeWeightArchive::open(model_dir, &spec.weight_shards)?;
         let epsilon = config
             .get("kvslim_epsilon")
@@ -677,10 +674,7 @@ impl ModelAdapter for NativeCpuModelAdapter {
     fn inspect(&self, model_dir: &Path, _config: &Value) -> Result<()> {
         let bundle = ModelBundle::load(model_dir)?;
         bundle.validate_decoder_layout()?;
-        ensure!(
-            bundle.spec.declared_dtype.as_deref() == Some("bfloat16"),
-            "CPU nativa requiere BF16"
-        );
+        bundle.ensure_all_tensors_dtype("BF16")?;
         Ok(())
     }
 

@@ -4,10 +4,14 @@
   "backend": "auto",
   "host": "127.0.0.1",
   "port": 8088,
-  "lod_enabled": false,
+  "lod_enabled": true,
   "coldstore_format": "TSKVPG04",
   "binary": {
     "path": "runtime/bin/kvslim-server",
+    "sha256": "REPLACE_WITH_SHA256"
+  },
+  "worker_binary": {
+    "path": "runtime/bin/kvslim-runtime-worker",
     "sha256": "REPLACE_WITH_SHA256"
   },
   "model": {
@@ -29,7 +33,7 @@
     }
   ],
   "limits": {
-    "max_context_tokens": 8192,
+    "max_context_tokens": 32768,
     "max_new_tokens": 512,
     "request_timeout_secs": 300,
     "max_in_flight": 1
