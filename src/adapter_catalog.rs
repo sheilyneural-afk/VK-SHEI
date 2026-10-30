@@ -128,15 +128,25 @@ pub fn host_capabilities() -> HostCapabilities {
 pub fn compiled_adapters() -> Vec<AdapterDescriptor> {
     let mut adapters = Vec::new();
 
+    #[cfg(feature = "native-cpu-backend")]
+    adapters.push(AdapterDescriptor {
+        id: "native-cpu-runtime".to_owned(),
+        backend: "cpu".to_owned(),
+        compute: ComputeKind::Cpu,
+        priority: 200,
+        activation: ActivationPolicy::Default,
+        // This is an architecture registry, not a claim that arbitrary
+        // operators are compatible. inspect() remains the final authority.
+        supported_model_types: Vec::new(),
+    });
+
     #[cfg(feature = "torch-backend")]
     adapters.push(AdapterDescriptor {
-        id: "cpu-runtime".to_owned(),
+        id: "libtorch-cpu-runtime".to_owned(),
         backend: "cpu".to_owned(),
         compute: ComputeKind::Cpu,
         priority: 100,
         activation: ActivationPolicy::Explicit,
-        // Model-family matching is deliberately empty. The concrete adapter
-        // must inspect the downloaded model and prove operator compatibility.
         supported_model_types: Vec::new(),
     });
 
@@ -160,8 +170,8 @@ pub fn adapter_status() -> Vec<AdapterStatus> {
     compiled_adapters()
         .into_iter()
         .map(|descriptor| {
-            let (availability, reason) = match descriptor.backend.as_str() {
-                "accelerator" => {
+            let (availability, reason) = match descriptor.id.as_str() {
+                "accelerator-runtime" => {
                     #[cfg(feature = "accelerator-backend")]
                     {
                         match crate::opencl_backend::OpenClBackend::new() {
@@ -183,23 +193,14 @@ pub fn adapter_status() -> Vec<AdapterStatus> {
                         )
                     }
                 }
-                "cpu" => {
-                    #[cfg(feature = "torch-backend")]
-                    {
-                        (
-                            AdapterAvailability::RuntimeAvailable,
-                            "runtime CPU compilado y disponible".to_owned(),
-                        )
-                    }
-                    #[cfg(not(feature = "torch-backend"))]
-                    {
-                        (
-                            AdapterAvailability::Compiled,
-                            "backend CPU no compilado; el núcleo universal sigue disponible"
-                                .to_owned(),
-                        )
-                    }
-                }
+                "native-cpu-runtime" => (
+                    AdapterAvailability::RuntimeAvailable,
+                    "runtime CPU nativo Rust disponible".to_owned(),
+                ),
+                "libtorch-cpu-runtime" => (
+                    AdapterAvailability::RuntimeAvailable,
+                    "runtime CPU LibTorch disponible".to_owned(),
+                ),
                 _ => (
                     AdapterAvailability::RequiresProbe,
                     "requiere prueba del runtime".to_owned(),
@@ -224,8 +225,7 @@ pub fn select_for_model(
     requested_compute: Option<ComputeKind>,
 ) -> Result<AdapterSelection> {
     let model_dir = model_dir.as_ref();
-    let _spec = crate::model_config::ModelSpec::inspect(model_dir)?;
-    let available = compiled_adapters();
+    let available = compiled_adapters().into_iter().collect::<Vec<_>>();
     let selection = select_adapter(&available, requested_backend, requested_compute)
         .ok_or_else(|| anyhow::anyhow!("no runtime adapter is available by default; select an installed adapter explicitly after capability probing"))?;
 
@@ -260,12 +260,11 @@ pub fn select_available_for_model(
     requested_compute: Option<ComputeKind>,
 ) -> Result<AdapterSelection> {
     let model_dir = model_dir.as_ref();
-    let _spec = crate::model_config::ModelSpec::inspect(model_dir)?;
-    let selection =
-        select_available_adapter(&adapter_status(), requested_backend, requested_compute)
-            .ok_or_else(|| {
-                anyhow::anyhow!("no hay un runtime validado para este equipo y esta solicitud")
-            })?;
+    let statuses = adapter_status().into_iter().collect::<Vec<_>>();
+    let selection = select_available_adapter(&statuses, requested_backend, requested_compute)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no hay un runtime validado para este equipo y esta solicitud")
+        })?;
     match selection.backend.as_str() {
         "cpu" => {
             #[cfg(feature = "torch-backend")]
@@ -295,11 +294,19 @@ pub fn create_adapter(adapter_id: &str) -> Result<Box<dyn ModelAdapter>> {
             #[cfg(not(feature = "accelerator-backend"))]
             bail!("accelerator adapter is not compiled");
         }
-        "cpu-runtime" => {
+        "native-cpu-runtime" => {
+            #[cfg(feature = "native-cpu-backend")]
+            return Ok(Box::new(
+                crate::native_cpu_adapter::NativeCpuModelAdapter::default(),
+            ));
+            #[cfg(not(feature = "native-cpu-backend"))]
+            bail!("native CPU adapter is not compiled");
+        }
+        "libtorch-cpu-runtime" => {
             #[cfg(feature = "torch-backend")]
             return Ok(Box::new(crate::torch_adapter::TorchModelAdapter::default()));
             #[cfg(not(feature = "torch-backend"))]
-            bail!("CPU adapter is not compiled");
+            bail!("LibTorch CPU adapter is not compiled");
         }
         other => bail!("unknown adapter: {other}"),
     }
