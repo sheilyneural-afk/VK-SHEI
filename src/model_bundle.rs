@@ -58,42 +58,8 @@ impl ModelBundle {
         self.tensor_names.contains(name)
     }
 
-    /// Resolves the conventional decoder-only tensor contract from the
-    /// bundle inventory. It deliberately uses names and declared dimensions,
-    /// never a model name or vendor identifier.
     pub fn validate_decoder_layout(&self) -> Result<()> {
-        let required = ["model.embed_tokens.weight", "model.norm.weight"];
-        for name in required {
-            ensure!(
-                self.has_tensor(name),
-                "decoder bundle missing tensor {name}"
-            );
-        }
-        if self.spec.tie_word_embeddings != Some(true) {
-            ensure!(
-                self.has_tensor("lm_head.weight"),
-                "decoder bundle missing tensor lm_head.weight"
-            );
-        }
-        for layer in 0..self.spec.num_hidden_layers {
-            for suffix in [
-                "input_layernorm.weight",
-                "self_attn.q_proj.weight",
-                "self_attn.k_proj.weight",
-                "self_attn.v_proj.weight",
-                "self_attn.o_proj.weight",
-                "post_attention_layernorm.weight",
-                "mlp.gate_proj.weight",
-                "mlp.up_proj.weight",
-                "mlp.down_proj.weight",
-            ] {
-                let name = format!("model.layers.{layer}.{suffix}");
-                ensure!(
-                    self.has_tensor(&name),
-                    "decoder bundle missing tensor {name}"
-                );
-            }
-        }
+        crate::decoder_layout::resolve(self)?;
         Ok(())
     }
 

@@ -11,6 +11,8 @@ pub mod attention_certificate;
 pub mod cold_store;
 pub mod conformance;
 pub mod conversion_worker;
+#[cfg(feature = "model-bundle")]
+pub mod decoder_layout;
 pub mod document_graph;
 pub mod engine;
 pub mod inference_worker;
@@ -22,6 +24,9 @@ pub mod torch_runtime;
 
 #[cfg(feature = "torch-backend")]
 pub mod torch_adapter;
+
+#[cfg(feature = "native-cpu-backend")]
+pub mod native_cpu_adapter;
 
 // Backend-neutral types and Hugging Face metadata inspection.
 pub use kvslim_adapter_api::{
