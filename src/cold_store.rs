@@ -1199,6 +1199,34 @@ mod tests {
     }
 
     #[test]
+    fn committed_header_corruption_is_not_recovered_as_a_torn_tail() {
+        let path = temp_path("header-corrupt");
+        let mut store = ColdStore::create(&path, 0).unwrap();
+        let meta = store
+            .append_page(geometry(0), &[1; 32], &[2; 32], true)
+            .unwrap();
+        drop(store);
+        let file_len = std::fs::metadata(&path).unwrap().len();
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(meta.record_offset + 40)).unwrap();
+        file.write_all(&u32::MAX.to_le_bytes()).unwrap();
+        file.sync_data().unwrap();
+
+        let error = match ColdStore::open(&path, 0) {
+            Ok(_) => panic!("la cabecera comprometida corrupta fue truncada"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), file_len);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn committed_corruption_is_rejected() {
         let path = temp_path("corrupt");
         let mut store = ColdStore::create(&path, 0).unwrap();

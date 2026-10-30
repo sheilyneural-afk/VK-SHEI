@@ -893,17 +893,29 @@ pub fn is_insufficient_evidence_answer(content: &str) -> bool {
 }
 
 pub fn has_substantive_document_answer(content: &str) -> bool {
-    content
+    let mut citation_page_number = false;
+    for token in content
         .split(|character: char| !character.is_alphanumeric())
         .map(str::to_lowercase)
-        .any(|token| {
-            token.len() >= 2
-                && !matches!(
-                    token.as_str(),
-                    "pagina" | "page" | "página" | "sha" | "sha256"
-                )
-                && !token.chars().all(|character| character.is_ascii_digit())
-        })
+        .filter(|token| !token.is_empty())
+    {
+        if citation_page_number {
+            citation_page_number = false;
+            if token.chars().all(|character| character.is_ascii_digit()) {
+                continue;
+            }
+        }
+        if matches!(token.as_str(), "pagina" | "page" | "página") {
+            citation_page_number = true;
+            continue;
+        }
+        if token.chars().all(|character| character.is_ascii_digit())
+            || (token.len() >= 2 && !matches!(token.as_str(), "sha" | "sha256"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1313,5 +1325,17 @@ mod tests {
         let metadata = graph.page_metadata(1).unwrap();
         assert!(metadata.graph_spans[0].numbers.contains("dos"));
         assert!(metadata.graph_spans[0].numbers.contains("mil"));
+    }
+
+    #[test]
+    fn substantive_answer_accepts_numeric_answers_but_not_citations_or_empty_text() {
+        assert!(has_substantive_document_answer("42. [página 3]"));
+        assert!(has_substantive_document_answer("7. [página 3]"));
+        assert!(has_substantive_document_answer(
+            "Dos mil habitantes. [página 1]"
+        ));
+        assert!(!has_substantive_document_answer("[PÁGINA 1]"));
+        assert!(!has_substantive_document_answer("page 27"));
+        assert!(!has_substantive_document_answer(""));
     }
 }
