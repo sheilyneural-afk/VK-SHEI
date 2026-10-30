@@ -60,8 +60,43 @@ impl WeightFile {
             other => bail!("dtype de peso no soportado para {name}: {other:?}"),
         };
         let shape = view.shape().iter().map(|&v| v as i64).collect::<Vec<_>>();
-        Tensor::f_from_data_size(view.data(), &shape, kind)
-            .with_context(|| format!("no se pudo materializar {name}"))
+        let tensor = Tensor::f_from_data_size(view.data(), &shape, kind)
+            .with_context(|| format!("no se pudo materializar {name}"))?;
+        // `f_from_data_size` copies the bytes into a libtorch allocation. The
+        // mapped pages it just read are no longer needed by this tensor, but
+        // they keep counting as process RSS while the shard mapping lives,
+        // which doubled the load peak (~30 GiB for ~15 GiB of BF16 weights).
+        self.release_mapped(view.data());
+        Ok(tensor)
+    }
+
+    /// Drops the resident pages backing `data` (a slice of this read-only
+    /// mapping) once they have been copied. The mapping stays valid: a later
+    /// access simply faults the same bytes back in from the file.
+    fn release_mapped(&self, data: &[u8]) {
+        #[cfg(unix)]
+        {
+            let base = self.mapping.as_ptr() as usize;
+            let start = data.as_ptr() as usize;
+            if data.is_empty() || start < base || start + data.len() > base + self.mapping.len() {
+                return;
+            }
+            // SAFETY: the mapping is private and read-only, so MADV_DONTNEED
+            // cannot discard modified data; it only unmaps clean file pages,
+            // which are re-read from the unchanged file on the next access.
+            // No borrowed slice of these pages outlives this call (the tensor
+            // owns its own copy). memmap2 aligns the range to page bounds.
+            // Failure is harmless (only the RSS optimisation is lost).
+            let _ = unsafe {
+                self.mapping.unchecked_advise_range(
+                    memmap2::UncheckedAdvice::DontNeed,
+                    start - base,
+                    data.len(),
+                )
+            };
+        }
+        #[cfg(not(unix))]
+        let _ = data;
     }
 
     pub fn require_bf16(&self, name: &str, expected: &[i64]) -> Result<Tensor> {
@@ -7312,6 +7347,75 @@ impl MiniCpmLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Resident bytes of the VMA that contains `address`, from smaps.
+    #[cfg(target_os = "linux")]
+    fn mapping_rss_bytes(address: usize) -> u64 {
+        let smaps = fs::read_to_string("/proc/self/smaps").unwrap();
+        let mut inside = false;
+        for line in smaps.lines() {
+            let first = line.split_whitespace().next().unwrap_or("");
+            if let Some((low, high)) = first.split_once('-')
+                && let (Ok(low), Ok(high)) = (
+                    usize::from_str_radix(low, 16),
+                    usize::from_str_radix(high, 16),
+                )
+            {
+                inside = (low..high).contains(&address);
+                continue;
+            }
+            if inside && let Some(rest) = line.strip_prefix("Rss:") {
+                let kib: u64 = rest.trim().trim_end_matches("kB").trim().parse().unwrap();
+                return kib * 1024;
+            }
+        }
+        panic!("no se encontró el mapeo en smaps");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn weight_load_releases_mapped_pages_after_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model.safetensors");
+        let rows = 4096usize;
+        let cols = 2048usize; // 16 MiB of BF16
+        let data: Vec<u8> = (0..rows * cols)
+            .flat_map(|index| half::bf16::from_f32((index % 251) as f32).to_le_bytes())
+            .collect();
+        let header = format!(
+            "{{\"w\":{{\"dtype\":\"BF16\",\"shape\":[{rows},{cols}],\"data_offsets\":[0,{}]}}}}",
+            data.len()
+        );
+        let mut header = header.into_bytes();
+        while header.len() % 8 != 0 {
+            header.push(b' ');
+        }
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&data);
+        fs::write(&path, &bytes).unwrap();
+
+        let weights = WeightFile::open(&path).unwrap();
+        let tensor = weights
+            .require_bf16("w", &[rows as i64, cols as i64])
+            .unwrap();
+        // The copy is intact even though the source pages were dropped.
+        let mut copied = vec![0_u8; data.len()];
+        tensor
+            .flatten(0, -1)
+            .view_dtype(Kind::Int16)
+            .copy_data_u8(&mut copied, data.len() / 2);
+        assert!(copied == data);
+        // Only the header page (and at most one boundary page) may remain.
+        let resident = mapping_rss_bytes(weights.mapping.as_ptr() as usize + header.len() + 8);
+        assert!(
+            resident <= 64 * 1024,
+            "el mmap sigue residente tras copiar: {resident} bytes"
+        );
+        // The mapping stays valid for later reads of the same tensor.
+        let again = weights.tensor("w").unwrap();
+        assert!(again.equal(&tensor));
+    }
 
     #[test]
     fn dense_sdpa_accounting_covers_remainder_chunks_and_all_llama_layers() {
