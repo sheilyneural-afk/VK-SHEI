@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 fn main() -> Result<()> {
@@ -26,6 +27,7 @@ fn main() -> Result<()> {
     enforce_profile_budget(&root, &bundle.root)?;
     let selection = kvslim::adapter_catalog::select_available_for_model(&bundle.root, None, None)?;
     let adapter = kvslim::adapter_catalog::create_adapter(&selection.adapter_id)?;
+    let started = Instant::now();
     let conformance = kvslim::conformance::run_adapter_conformance(
         adapter,
         &bundle.root,
@@ -48,6 +50,8 @@ fn main() -> Result<()> {
         "bundle_sha256": bundle_digest,
         "adapter": selection.adapter_id,
         "checks": ["inspect", "load", "prefill", "decode", "kv_snapshot", "kv_restore"],
+        "conformance": conformance.clone(),
+        "elapsed_millis": started.elapsed().as_millis(),
         "status": "validated-for-local-execution"
     });
     let receipt_path = validation_root.join(format!("{bundle_digest}.json"));
