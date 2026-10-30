@@ -1,4 +1,4 @@
-//! Portable native CPU inference for BF16 Llama-family models.
+//! Portable native CPU inference for decoder bundles with the resolved tensor layout.
 //!
 //! This backend deliberately uses only Rust, mmap, rayon and safetensors. It is
 //! the universal correctness path; architecture-specific SIMD can replace the
@@ -147,7 +147,7 @@ trait NativeCausalRuntime: Send {
     fn reset(&mut self);
 }
 
-struct NativeCpuLlama {
+struct NativeCpuDecoder {
     spec: ModelSpec,
     weights: NativeWeightArchive,
     _kv_directory: tempfile::TempDir,
@@ -213,15 +213,11 @@ fn softmax(values: &mut [f32]) {
     }
 }
 
-impl NativeCpuLlama {
+impl NativeCpuDecoder {
     fn load(model_dir: &Path) -> Result<Self> {
         let bundle = ModelBundle::load(model_dir)?;
         bundle.validate_decoder_layout()?;
         let spec = bundle.spec;
-        ensure!(
-            spec.model_type == "llama",
-            "solo Llama está certificado en CPU nativa"
-        );
         ensure!(
             spec.declared_dtype.as_deref() == Some("bfloat16"),
             "la CPU nativa requiere pesos BF16"
@@ -444,13 +440,13 @@ impl NativeCpuLlama {
     }
 }
 
-impl NativeCausalRuntime for NativeCpuLlama {
+impl NativeCausalRuntime for NativeCpuDecoder {
     fn position(&self) -> usize {
         self.tokens.len()
     }
 
     fn forward_token(&mut self, token: u32, capture_logits: bool) -> Result<u32> {
-        NativeCpuLlama::forward_token(self, token, capture_logits)
+        NativeCpuDecoder::forward_token(self, token, capture_logits)
     }
 
     fn last_logits(&self) -> Option<Vec<f32>> {
@@ -485,13 +481,8 @@ impl NativeCausalRuntime for NativeCpuLlama {
     }
 }
 
-fn build_runtime(model_dir: &Path, spec: &ModelSpec) -> Result<Box<dyn NativeCausalRuntime>> {
-    match spec.model_type.as_str() {
-        "llama" => Ok(Box::new(NativeCpuLlama::load(model_dir)?)),
-        other => {
-            anyhow::bail!("arquitectura {other:?} todavía no tiene runtime CPU nativo registrado")
-        }
-    }
+fn build_runtime(model_dir: &Path, _spec: &ModelSpec) -> Result<Box<dyn NativeCausalRuntime>> {
+    Ok(Box::new(NativeCpuDecoder::load(model_dir)?))
 }
 
 pub struct NativeCpuModelAdapter {
@@ -528,11 +519,6 @@ impl ModelAdapter for NativeCpuModelAdapter {
         ensure!(
             bundle.spec.declared_dtype.as_deref() == Some("bfloat16"),
             "CPU nativa requiere BF16"
-        );
-        ensure!(
-            matches!(bundle.spec.model_type.as_str(), "llama"),
-            "arquitectura {:?} no registrada todavía en CPU nativa",
-            bundle.spec.model_type
         );
         Ok(())
     }
