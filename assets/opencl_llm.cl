@@ -9,7 +9,13 @@ inline float read_bf16(const ushort v) {
 }
 inline ushort write_bf16(const float v) {
     uint bits = as_uint(v);
-    // IEEE round-to-nearest-even bfloat16 (for finite values).
+    // NaN must stay NaN: rounding a NaN with a small payload (0x7f800001)
+    // would carry into +Inf, and an all-ones NaN would wrap to +0. Keep the
+    // sign and upper payload and force the quiet bit. A bit test is used
+    // instead of isnan() so it survives -cl-finite-math-only.
+    if ((bits & 0x7fffffffu) > 0x7f800000u)
+        return (ushort)((bits >> 16u) | 0x0040u);
+    // IEEE round-to-nearest-even bfloat16 (for finite values and infinities).
     bits += 0x7fffu + ((bits >> 16u) & 1u);
     return (ushort)(bits >> 16u);
 }
