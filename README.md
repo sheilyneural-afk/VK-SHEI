@@ -5,6 +5,16 @@ contexto largo, almacenamiento frío verificable y ejecución CPU/iGPU AMD. Este
 README describe el proyecto que está en este repositorio; no es un resumen de
 una sola prueba ni una promesa de soporte universal para cualquier LLM.
 
+**Criterio de validación:** la igualdad bit a bit de logits o KV entre
+CPU LibTorch y GPU OpenCL **no es requisito de aceptación** de la GPU:
+sus kernels, orden de operaciones y redondeos pueden diferir. La comparación
+entre dispositivos es diagnóstica y debe analizar magnitudes de error,
+comportamiento y calidad. Para evaluar LOD se compara cada optimización
+con su ruta densa **en el mismo backend**, con `epsilon=0` o las cotas
+explícitas que correspondan. La integridad de pesos/KV almacenados se
+verifica por separado. Detalle y criterios:
+[validación numérica por backend](docs/CRITERIOS_VALIDACION_CPU_GPU.md).
+
 ## Qué contiene el proyecto
 
 ```text
@@ -45,8 +55,8 @@ una sola prueba ni una promesa de soporte universal para cualquier LLM.
 - Ruta GPU OpenCL experimental para iGPU AMD Phoenix, con atención BF16,
   prefill por lotes, LOD compartido y servidores HTTP separados.
 - Selector HTTP unificado CPU/iGPU/Auto.
-- Auditorías físicas de paridad de logits, KV, hashes, memoria y tiempos en
-  los informes de `docs/`.
+- Auditorías de precisión, comparaciones entre rutas de un mismo backend,
+  diagnósticos entre dispositivos, integridad, memoria y tiempos en `docs/`.
 - Herramientas para inspeccionar modelos, comparar backends y reproducir
   benchmarks.
 
@@ -371,8 +381,9 @@ Las rutas GPU densas también mejoraron: prefill 30,83 a 7,42 s.
 **Paridad:** los mismos IDs y logits BF16 de la ruta GPU anterior.
 Se ha probado un prompt de 375 tokens en tres lotes y se comprobó
 la igualdad completa de logits y SHA lógico KV contra GPU densa.
-CPU LibTorch todavía difiere numéricamente de GPU, aunque puede
-generar los mismos tokens.
+La CPU LibTorch y la GPU OpenCL difirieron numéricamente en los ensayos
+cruzados, aunque generaron los mismos tokens. Esa diferencia por sí sola
+no invalida la GPU: no se exige identidad bit a bit entre backends.
 
 Detalles, límites y comandos: [Prefill GPU optimizado](docs/PREFILL_GPU_OPTIMIZADO_20261029.md).
 El motor CPU original está intacto en el puerto 8099; selector
@@ -393,8 +404,10 @@ CPU/iGPU/Auto en 8288; GPU nueva en 8188.
 
 **Precisión:** GPU LOD con epsilon=0 y GPU densa produjeron los mismos
 tokens y logits BF16 bit a bit en la prueba real de 16 pasos con «Hola».
-Esto NO significa paridad bit a bit frente a LibTorch BF16 CPU: ambas
-rutas GPU aún discrepan numéricamente de esa referencia.
+Esta comparación **GPU densa vs GPU LOD**, bajo el mismo backend y
+`epsilon=0`, es la validación relevante de la optimización en ese ensayo.
+Las diferencias numéricas históricas frente a CPU LibTorch no son
+incumplimiento de una supuesta obligación de paridad entre dispositivos.
 
 **Limitación concreta:** la CPU conserva además el branch-and-bound
 jerárquico de cotas por regiones y prefijos cacheables entre peticiones.
@@ -455,7 +468,9 @@ BF16 completos: 2.161.265.664 bytes, cero diferencias y SHA-256 idéntico.**
 En «Hola», la GPU y el control BF16 CPU generaron ambos los dos IDs
 [61973, 61] con el mismo prompt y pesos, pero los logits y el KV
 NO son idénticos bit a bit: diferencia máxima observada de logits 0,5
-y KV lógico distinto. Más tarde se integraron en GPU los mismos
+y KV lógico distinto. Es una medición diagnóstica entre dos backends,
+no una demostración de fallo de OpenCL ni un requisito de igualdad binaria.
+Más tarde se integraron en GPU los mismos
 módulos de índice 4-bit/LSH, ColdStore BF16 y el certificado final
 que usa CPU; la selección regional branch-and-bound de CPU permanece
 pendiente en GPU. No se ha demostrado aceleración end-to-end frente a
@@ -521,8 +536,8 @@ El crate contiene una biblioteca y varios ejecutables para CPU y GPU:
 - `terrsvusion-native-parity`: comparación de tokens/logits/KV con BF16 denso (torch-backend).
 - terrsvusion-opencl-llm: inferencia completa MiniCPM5 BF16 en GPU mediante Rust/OpenCL.
 - terrsvusion-opencl-server: chat web GPU independiente y API local.
-- terrsvusion-compare-opencl: auditoría de GPU frente al control BF16 CPU
-  (compila las dos features solo para comparar).
+- terrsvusion-compare-opencl: comparación diagnóstica GPU frente a BF16 CPU,
+  sin exigir identidad binaria entre implementaciones (requiere ambas features).
 - terrsvusion-unified-server: selector CPU/iGPU/Auto mediante proxy local Rust;
   no toca pesos ni configuraciones. Feature unified-router.
 - `terrsvusion-torch-chat`: inferencia local desde línea de comandos.

@@ -126,7 +126,7 @@ límites de acceso y políticas explícitas.
 | OpenAI-compatible sin SSE ni tools | Operativo en local |
 | SSE, tools, JSON Schema y autenticación | Pendiente |
 | 32K/100K/131K certificados universalmente | No demostrado |
-| Paridad de logits universal entre dispositivos | No demostrado |
+| Comparación CPU LibTorch vs GPU OpenCL | Diagnóstico numérico, no criterio de igualdad bit a bit entre dispositivos |
 
 ## GPU AMD Phoenix verificada el 29/10/2026
 
@@ -142,7 +142,8 @@ con Rust CPU, con ratios de latencia de 1,2–2,1 según el contexto.
 Más tarde, EL MISMO DÍA, se implementó además una ruta COMPLETA de
 MiniCPM5 BF16 sobre GPU, con todos los operadores neuronales en OpenCL.
 En esa ruta la carga BF16 es exacta bit a bit, pero la aritmética
-no es bit-exacta frente a LibTorch. Después se integraron los MISMOS
+no es bit-exacta frente a LibTorch. Esto no es un fallo por sí mismo:
+la identidad binaria CPU/GPU no es requisito de aceptación. Después se integraron los MISMOS
 módulos Rust originales de CPU para 4-bit/LSH, ColdStore BF16 y
 certificado de masa final; no se ha trasladado aún el branch-and-bound
 regional ni se ha demostrado una aceleración end-to-end. Véase
@@ -164,7 +165,8 @@ docs/IGPU_AMD_PHOENIX_20261029.md.
 6. No alterar la caché histórica sin migración explícita, respaldo y
    verificación del SHA lógico de KV.
 
-Véase también docs/VERIFICACION_20261029.md.
+Véase también docs/VERIFICACION_20261029.md y
+[criterios de validación CPU/GPU](CRITERIOS_VALIDACION_CPU_GPU.md).
 
 
 ## GPU BF16 con prefill paralelo (29/10/2026)
@@ -173,7 +175,7 @@ La copia BF16 V temporal se elimina del espacio GPU después del
 prefill; la autoridad pasa al mismo ColdStore CPU en páginas
 agrupadas (hasta 64 tokens) con hashes individuales verificables.
 Se ha probado paridad exacta del GPU previo en logits BF16 y SHA
-de KV para 375 tokens en tres lotes; no hay garantía de paridad
-bit a bit contra LibTorch CPU. Consulte
+de KV para 375 tokens en tres lotes. La comparación con LibTorch CPU es
+solo diagnóstica; no se exige paridad bit a bit entre backends. Consulte
 docs/PREFILL_GPU_OPTIMIZADO_20261029.md.
 

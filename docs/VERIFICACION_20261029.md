@@ -1,5 +1,11 @@
 # Terrsvusion V3 — informe de verificación (29-10-2026)
 
+**Interpretación vigente (30-10-2026):** las comparaciones CPU/GPU de
+este informe son diagnósticas, no requisitos de igualdad bit a bit.
+La evaluación de LOD GPU se hace contra GPU densa, y la integridad
+de bytes BF16 se verifica independientemente.
+Véase [criterio de validación](CRITERIOS_VALIDACION_CPU_GPU.md).
+
 ## Ubicación y respaldo
 
 Proyecto modificado, exclusivamente:
@@ -162,8 +168,11 @@ La GPU AMD Phoenix ejecutó los 24 bloques MiniCPM5-1B BF16,
 incluidos embedding, RMSNorm, RoPE, proyecciones, atención, SwiGLU,
 MLP, logits y argmax. La ruta es Rust y OpenCL sin LibTorch.
 Generó el mismo par de tokens [61973,61] que el control BF16
-CPU con el mismo prompt Hola. L-infinito de logits frente a
-denso: 0,5, SHA-256 KV distinto: precisión bit-exacta NO demostrada.
+CPU con el mismo prompt Hola. En esa comparación CPU/GPU se midió
+`L∞` de logits de 0,5 y SHA-256 KV diferente. No se observó igualdad
+binaria entre backends, que **no es un requisito** para OpenCL:
+la conservación de los pesos BF16 se verificó por separado y la
+fidelidad LOD se evalúa contra la ruta GPU densa.
 
 Se verificaron TODOS los 2.161.265.664 bytes de los 219 tensores
 BF16 subidos a GPU por readback, con 0 discrepancias.
@@ -188,7 +197,8 @@ docs/IGPU_FULL_LLM_RUST_OPENCL_20261029.md.
 - GPU LOD epsilon=0: prueba física AMD Phoenix comparó GPU densa vs
   GPU con ColdStore durante 16 pasos greedy de «Hola»; todos los
   tokens y logits BF16 de ambos caminos GPU fueron idénticos bit a bit.
-  No se observa paridad absoluta contra la CPU BF16 original.
+  La CPU LibTorch no es un oráculo de identidad binaria para OpenCL;
+  esas diferencias entre dispositivos se conservan como diagnóstico.
 - GPU KV asignado para capacidad 128 tokens con stage8:
   3.145.728 bytes denso vs 1.585.248 bytes GPU LOD.
   Ahorro de capacidad KV 49,6 %, NO VRAM global.

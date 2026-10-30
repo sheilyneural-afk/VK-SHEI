@@ -74,8 +74,9 @@ usa el MISMO algoritmo final para certificar V y las mismas estructuras
 de índice/cold store. El sistema de prefijos persistentes verificados
 entre peticiones del CPU tampoco se ha trasladado aún a GPU.
 
-No se describe esa parte pendiente como implementada ni se declara
-paridad total con el BF16 denso de CPU.
+No se describe esa parte pendiente como implementada. La validación
+numérica del LOD GPU se hace ante la GPU densa del mismo backend;
+la igualdad binaria contra LibTorch CPU no es requisito.
 
 ## Validación de precisión real en la AMD Phoenix
 
@@ -105,8 +106,9 @@ TERRSVUSION_OPENCL_DEVICE=AMD cargo test --locked --offline \
 Importante: esta igualdad es entre rutas **GPU** con los mismos kernels.
 La ruta GPU ya tenía diferencias frente a la referencia BF16 CPU:
 el informe anterior encontró diferencias máximas de logits de 0,5
-y SHA KV distinto. El nuevo LOD epsilon cero no corrige esa
-diferencia aritmética de OpenCL respecto a LibTorch.
+y SHA KV distinto. Es un diagnóstico entre implementaciones: el LOD
+`epsilon=0` no tiene que reproducir el redondeo de LibTorch para ser
+correcto dentro de OpenCL.
 
 ### Epsilon positivo
 
@@ -218,7 +220,9 @@ Se enlaza a 127.0.0.1 y solo acepta backends loopback.
 - KV ColdStore de prefijos entre peticiones: pendiente en GPU.
 - Compresión de pesos a 4 bits sin pérdidas: no declarada.
 - Paridad GPU LOD=0 vs GPU densa: demostrada en 16 pasos de «Hola».
-- Paridad total GPU vs CPU BF16: NO demostrada.
+- Comparación CPU/GPU: diferencias aritméticas registradas; identidad
+  bit a bit entre backends **no exigida**. Véase
+  [criterio de validación](CRITERIOS_VALIDACION_CPU_GPU.md).
 - Speedup end-to-end por LOD: NO demostrado.
 - Compatibilidad con cualquier LLM/GPU: NO demostrada.
 
