@@ -2,6 +2,8 @@
 //! the supported dense BF16 LibTorch CPU model (MiniCPM5 or Llama 3.1 8B).
 //! Same original safetensors, tokenizer, greedy input IDs and generation steps.
 //! Neither the model checkpoint nor the Terrsvusion historical path is changed.
+//! Cross-backend differences are diagnostic, NOT a requirement of bitwise
+//! CPU/GPU equality. GPU LOD fidelity is evaluated against dense GPU.
 
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
@@ -89,7 +91,7 @@ fn main() -> Result<()> {
         "GPU inference completed: tokens={:?}",
         gpu_generation.tokens
     );
-    drop(gpu); // release GPU weights before loading dense BF16 CPU oracle
+    drop(gpu); // release GPU weights before loading the diagnostic LibTorch CPU reference
     let original = TorchModelRuntime::load(&model)?;
     let dense_ids = ids.iter().map(|&id| i64::from(id)).collect::<Vec<_>>();
     let cpu_generation = original.generate_token_ids_dense(&dense_ids, max_tokens, 512)?;
@@ -191,6 +193,9 @@ fn main() -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&json!({
             "comparison":"supported_dense_BF16_LibTorch_CPU_vs_native_Rust_OpenCL_iGPU",
+            "comparison_role":"cross_backend_diagnostic",
+            "cpu_gpu_bitwise_parity_required":false,
+            "interpretation":"CPU/GPU logit and KV differences are measurements, not by themselves proof of incorrect GPU inference",
             "model_family":model_family,
             "same_weights":true,
             "same_tokenizer":true,

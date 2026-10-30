@@ -451,7 +451,7 @@ async fn chat(
         "fallback":route.fallback,
         "cpu_original_unchanged":true,
         "gpu_original_unchanged":true,
-        "precision":"GPU BF16/FP32 kernels differ from original CPU BF16 logits",
+        "precision":"CPU/GPU bitwise equivalence is not required; cross-backend comparisons are diagnostic and GPU LOD is checked against dense GPU",
         "total_router_wall_seconds":started.elapsed().as_secs_f64(),
     });
     Ok((status, Json(result)).into_response())

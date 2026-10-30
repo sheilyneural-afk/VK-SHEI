@@ -82,7 +82,7 @@
       <label for="document">Documento para prefijo KV CPU</label>
       <textarea id="document" placeholder="Solo CPU; no se envía a GPU"></textarea>
     </details>
-    <p class="sub">Los modelos, los pesos y las cachés originales permanecen en sus procesos independientes. La ruta GPU puede generar logits diferentes al motor CPU.</p>
+    <p class="sub">Los modelos, los pesos y las cachés originales permanecen en sus procesos independientes. La GPU puede calcular logits distintos de la CPU por diferencias de aritmética y redondeo. No se exige igualdad bit a bit entre backends: el LOD GPU se valida contra GPU densa.</p>
   </div>
 </main>
 <script>
