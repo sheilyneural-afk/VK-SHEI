@@ -153,6 +153,12 @@ struct NativeCpuDecoder {
     weights: NativeWeightArchive,
     kv: CanonicalGpuLod,
     kv_config: CanonicalGpuLodConfig,
+    hot_keys: Vec<Vec<u8>>,
+    hot_values: Vec<Vec<u8>>,
+    hot_budget_bytes: usize,
+    hot_active: bool,
+    hot_dense_calls: u64,
+    dimensional_calls: u64,
     tokens: Vec<u32>,
     last_logits: Option<Vec<f32>>,
 }
@@ -213,6 +219,74 @@ fn softmax(values: &mut [f32]) {
     }
 }
 
+fn auto_hot_kv_budget() -> usize {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find(|line| line.starts_with("MemAvailable:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<usize>().ok())
+        })
+        .and_then(|kib| kib.checked_mul(1024))
+        .map(|bytes| bytes / 16)
+        .unwrap_or(0)
+}
+
+fn dense_attention_bf16(
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    query: &[f32],
+    keys: &[u8],
+    values: &[u8],
+    tokens: usize,
+) -> Result<Vec<f32>> {
+    let token_bytes = kv_heads * head_dim * 2;
+    ensure!(
+        query.len() == query_heads * head_dim
+            && keys.len() == tokens * token_bytes
+            && values.len() == tokens * token_bytes,
+        "geometría KV caliente incompatible"
+    );
+    let head_bytes = head_dim * 2;
+    let group = query_heads / kv_heads;
+    let scale = (head_dim as f32).sqrt().recip();
+    let mut output = vec![0.0_f32; query_heads * head_dim];
+    output
+        .par_chunks_mut(head_dim)
+        .enumerate()
+        .for_each(|(qh, out)| {
+            let kh = qh / group;
+            let q = &query[qh * head_dim..(qh + 1) * head_dim];
+            let mut scores = (0..tokens)
+                .map(|token| {
+                    let start = token * token_bytes + kh * head_bytes;
+                    q.iter()
+                        .zip(keys[start..start + head_bytes].chunks_exact(2))
+                        .map(|(&a, bits)| {
+                            a * bf16::from_bits(u16::from_le_bytes([bits[0], bits[1]])).to_f32()
+                        })
+                        .sum::<f32>()
+                        * scale
+                })
+                .collect::<Vec<_>>();
+            softmax(&mut scores);
+            for (token, probability) in scores.into_iter().enumerate() {
+                let start = token * token_bytes + kh * head_bytes;
+                for (dimension, bits) in values[start..start + head_bytes]
+                    .chunks_exact(2)
+                    .enumerate()
+                {
+                    out[dimension] += probability
+                        * bf16::from_bits(u16::from_le_bytes([bits[0], bits[1]])).to_f32();
+                }
+            }
+            round_vec(out);
+        });
+    Ok(output)
+}
+
 impl NativeCpuDecoder {
     fn load(model_dir: &Path, config: &Value) -> Result<Self> {
         let bundle = ModelBundle::load(model_dir)?;
@@ -245,11 +319,25 @@ impl NativeCpuDecoder {
             cold_directory: None,
         };
         let kv = CanonicalGpuLod::new(geometry, spec.num_hidden_layers, kv_config.clone())?;
+        let hot_budget_bytes = config
+            .get("native_hot_kv_bytes")
+            .and_then(Value::as_u64)
+            .map(usize::try_from)
+            .transpose()
+            .context("native_hot_kv_bytes fuera de rango")?
+            .unwrap_or_else(auto_hot_kv_budget);
+        let layers = spec.num_hidden_layers;
         Ok(Self {
             spec,
             weights,
             kv,
             kv_config,
+            hot_keys: (0..layers).map(|_| Vec::new()).collect(),
+            hot_values: (0..layers).map(|_| Vec::new()).collect(),
+            hot_budget_bytes,
+            hot_active: hot_budget_bytes > 0,
+            hot_dense_calls: 0,
+            dimensional_calls: 0,
             tokens: Vec::new(),
             last_logits: None,
         })
@@ -259,6 +347,26 @@ impl NativeCpuDecoder {
         let g = self.spec.attention;
         let total = self.kv.layer_tokens(layer);
         ensure!(total > 0, "atención nativa sin KV");
+        if self.hot_active {
+            let token_bytes = g.kv_heads * g.head_dim * 2;
+            ensure!(
+                self.hot_keys[layer].len() == total * token_bytes
+                    && self.hot_values[layer].len() == total * token_bytes,
+                "caché KV caliente incompleta"
+            );
+            self.kv.observe_full_hot_attention(layer, total)?;
+            self.hot_dense_calls = self.hot_dense_calls.saturating_add(1);
+            return dense_attention_bf16(
+                g.query_heads,
+                g.kv_heads,
+                g.head_dim,
+                query,
+                &self.hot_keys[layer],
+                &self.hot_values[layer],
+                total,
+            );
+        }
+        self.dimensional_calls = self.dimensional_calls.saturating_add(1);
         let query_bytes = query
             .iter()
             .flat_map(|&x| bf16::from_f32(x).to_bits().to_le_bytes())
@@ -333,6 +441,22 @@ impl NativeCpuDecoder {
         };
         let key = encode(key);
         let value = encode(value);
+        if self.hot_active {
+            let bytes_per_token_all_layers = (key.len() + value.len())
+                .checked_mul(self.spec.num_hidden_layers)
+                .context("presupuesto KV caliente desbordado")?;
+            let projected = (self.tokens.len() + 1)
+                .checked_mul(bytes_per_token_all_layers)
+                .context("tamaño KV caliente desbordado")?;
+            if projected <= self.hot_budget_bytes {
+                self.hot_keys[layer].extend_from_slice(&key);
+                self.hot_values[layer].extend_from_slice(&value);
+            } else {
+                self.hot_active = false;
+                self.hot_keys.iter_mut().for_each(Vec::clear);
+                self.hot_values.iter_mut().for_each(Vec::clear);
+            }
+        }
         self.kv.append(layer, self.tokens.len(), &key, &value)
     }
 
@@ -473,6 +597,13 @@ impl NativeCausalRuntime for NativeCpuDecoder {
             "cache_misses": stats.cache_misses,
             "hot_bytes": stats.hot_bytes,
             "hot_capacity": stats.hot_capacity,
+            "native_hot_budget_bytes": self.hot_budget_bytes,
+            "native_hot_resident_bytes": self.hot_keys.iter().map(Vec::len).sum::<usize>()
+                + self.hot_values.iter().map(Vec::len).sum::<usize>(),
+            "native_hot_active": self.hot_active,
+            "native_hot_dense_calls": self.hot_dense_calls,
+            "native_dimensional_calls": self.dimensional_calls,
+            "route_selector": "measured-residency-first",
             "epsilon": self.kv.config().epsilon,
             "axis_tokens": self.kv.axis().token_len(),
             "axis_extents": self.kv.axis().regions().len(),
@@ -496,6 +627,11 @@ impl NativeCausalRuntime for NativeCpuDecoder {
             self.spec.num_hidden_layers,
             self.kv_config.clone(),
         )?;
+        self.hot_keys.iter_mut().for_each(Vec::clear);
+        self.hot_values.iter_mut().for_each(Vec::clear);
+        self.hot_active = self.hot_budget_bytes > 0;
+        self.hot_dense_calls = 0;
+        self.dimensional_calls = 0;
         self.tokens.clear();
         self.last_logits = None;
         Ok(())
