@@ -771,6 +771,8 @@ pub struct TerrsvusionKvCache {
     hierarchy_states_loaded: usize,
     hierarchy_widening_rounds: usize,
     hierarchy_k_tokens_avoided: usize,
+    hierarchy_k_events: usize,
+    hierarchy_k_tokens_skippable: usize,
     hierarchy_last_states_initial: usize,
     hierarchy_last_states_loaded: usize,
     hierarchy_last_widening_rounds: usize,
@@ -917,6 +919,8 @@ impl TerrsvusionKvCache {
             hierarchy_states_loaded: 0,
             hierarchy_widening_rounds: 0,
             hierarchy_k_tokens_avoided: 0,
+            hierarchy_k_events: 0,
+            hierarchy_k_tokens_skippable: 0,
             hierarchy_last_states_initial: 0,
             hierarchy_last_states_loaded: 0,
             hierarchy_last_widening_rounds: 0,
@@ -2389,6 +2393,7 @@ impl TerrsvusionKvCache {
             .saturating_add(u128::from(dense_pairs as u64) * 32 * 128);
         let mut max_per_kv = [0.0f64; 8];
         let mut max_per_kv_component = vec![0.0f64; 8 * 128];
+        let mut tail_value_max = [0.0f64; 8];
         for page in pages {
             // A legacy v1 prefix lacked complete 8-KV-head bounds:
             // its first-two-head certificate is NEVER sufficient
@@ -2442,6 +2447,9 @@ impl TerrsvusionKvCache {
                     return Ok(None);
                 }
                 *dst = dst.max(f64::from(maxval));
+            }
+            for (dst, &maxval) in tail_value_max.iter_mut().zip(&bf16_max) {
+                *dst = f64::from(maxval);
             }
             let component_maxima = value
                 .abs()
@@ -2561,6 +2569,23 @@ impl TerrsvusionKvCache {
                     }
                 }
             }
+        }
+        // Measurement only: how many K tokens a best-first regional proof
+        // (the MiniCPM branch-and-bound, renormalized) would let this event
+        // skip. The parity-first Llama path still scores every K token, so
+        // these are reported as `hierarchy_k_tokens_skippable`, never as
+        // avoided work. A failed simulation counts nothing and never aborts
+        // inference.
+        if let Ok(skippable) = llama_regional_k_tokens_skippable(
+            pages,
+            &regional_uppers,
+            &scores_by_head,
+            tail_value_max,
+            tolerance * 0.5,
+        ) {
+            self.hierarchy_k_events += 1;
+            self.hierarchy_k_tokens_skippable =
+                self.hierarchy_k_tokens_skippable.saturating_add(skippable);
         }
         let max_per_query = (0..32)
             .map(|head| max_per_kv[head / (32 / 8)])
@@ -3404,12 +3429,17 @@ impl TerrsvusionKvCache {
                 }
             }
         }
-        self.hierarchy_k_tokens_avoided += pages
+        let avoided_k_tokens = pages
             .iter()
             .flat_map(|page| &page.certificate.regions)
             .filter(|region| !loaded.contains(&region.block_id))
             .map(|region| region.local_end - region.local_start)
             .sum::<usize>();
+        self.hierarchy_k_tokens_avoided += avoided_k_tokens;
+        // In the MiniCPM path the proof is applied, so every skippable K
+        // token is physically avoided.
+        self.hierarchy_k_events += 1;
+        self.hierarchy_k_tokens_skippable += avoided_k_tokens;
         let token_tolerance = (tolerance - region_max_bound).max(0.0);
         let minimum_individual_tolerance =
             exact_oracle_min_tolerance_candidate(&scores_by_head, &value_max_by_head).0;
@@ -3702,6 +3732,115 @@ fn state_score_uppers(
     scale: f64,
 ) -> BTreeMap<usize, [f64; 16]> {
     state_score_uppers_generic::<16, 2>(pages, query_values, scale)
+}
+
+/// Measurement for the parity-first Llama path: replays the best-first
+/// regional K branch-and-bound of the MiniCPM path on exact scores that were
+/// already computed, and returns how many K tokens it would have left
+/// unread under `region_tolerance` (renormalized-omission bound). Nothing is
+/// skipped; geometry it cannot account for completely yields `Ok(0)`.
+fn llama_regional_k_tokens_skippable(
+    pages: &[TerrsvusionPage],
+    regional_uppers: &BTreeMap<usize, [f64; 32]>,
+    scores_by_head: &[Vec<f64>],
+    tail_value_max: [f64; 8],
+    region_tolerance: f64,
+) -> Result<usize> {
+    ensure!(scores_by_head.len() == 32, "scores Llama sin 32 cabezas");
+    let cursor = scores_by_head[0].len();
+    let mut block_scores = BTreeMap::<usize, Vec<Vec<f64>>>::new();
+    let mut block_tokens = BTreeMap::<usize, usize>::new();
+    let mut block_value_max = BTreeMap::<usize, [f64; 8]>::new();
+    let mut paged_tokens = 0usize;
+    for page in pages {
+        let covered = page
+            .certificate
+            .regions
+            .iter()
+            .map(|region| region.local_end.saturating_sub(region.local_start))
+            .sum::<usize>();
+        if page.token_start != paged_tokens || covered != page.tokens {
+            return Ok(0); // tokens outside any region: no sound measurement
+        }
+        paged_tokens += page.tokens;
+        for region in &page.certificate.regions {
+            ensure!(
+                region.value_abs_max_by_kv_head.len() == 8,
+                "región Llama sin máximos V por cabeza"
+            );
+            let start = page.token_start + region.local_start;
+            let end = page.token_start + region.local_end;
+            ensure!(
+                start < end && end <= cursor,
+                "región Llama fuera del cursor"
+            );
+            let scores = block_scores
+                .entry(region.block_id)
+                .or_insert_with(|| vec![Vec::new(); 32]);
+            for (head, head_scores) in scores.iter_mut().enumerate() {
+                head_scores.extend_from_slice(&scores_by_head[head][start..end]);
+            }
+            *block_tokens.entry(region.block_id).or_insert(0) += end - start;
+            let maxima = block_value_max.entry(region.block_id).or_insert([0.0; 8]);
+            for (slot, value) in maxima.iter_mut().enumerate() {
+                *value = value.max(f64::from(region.value_abs_max_by_kv_head[slot]));
+            }
+        }
+    }
+    if block_scores.is_empty() || !regional_uppers.keys().eq(block_scores.keys()) {
+        return Ok(0);
+    }
+    let tail_scores = (paged_tokens < cursor).then(|| {
+        scores_by_head
+            .iter()
+            .map(|head| head[paged_tokens..].to_vec())
+            .collect::<Vec<_>>()
+    });
+    let mut certificate = IncrementalRegionCertificate::<32, 8>::new(
+        regional_uppers,
+        &block_value_max,
+        tail_scores.as_ref(),
+        tail_value_max,
+    )?;
+    let mut candidate_order = block_scores.keys().copied().collect::<Vec<_>>();
+    candidate_order.sort_unstable_by(|left, right| {
+        let upper = |state: &usize| {
+            regional_uppers[state]
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        upper(right).total_cmp(&upper(left))
+    });
+    // Like MiniCPM, the most recent region is always materialized first.
+    let mut loaded = BTreeSet::new();
+    let latest = *block_scores.keys().next_back().expect("bloques no vacíos");
+    certificate.materialize(
+        latest,
+        &block_scores[&latest],
+        regional_uppers,
+        &block_value_max,
+    )?;
+    loaded.insert(latest);
+    let mut next_candidate = 0usize;
+    while !certified(&certificate.bounds(), region_tolerance) && loaded.len() < block_scores.len() {
+        while loaded.contains(&candidate_order[next_candidate]) {
+            next_candidate += 1;
+        }
+        let state = candidate_order[next_candidate];
+        certificate.materialize(
+            state,
+            &block_scores[&state],
+            regional_uppers,
+            &block_value_max,
+        )?;
+        loaded.insert(state);
+    }
+    Ok(block_tokens
+        .iter()
+        .filter(|(state, _)| !loaded.contains(state))
+        .map(|(_, tokens)| *tokens)
+        .sum())
 }
 
 fn state_score_uppers_generic<const Q: usize, const KV: usize>(
@@ -4321,15 +4460,18 @@ impl<const Q: usize, const KV: usize> IncrementalRegionCertificate<Q, KV> {
                 if self.remaining.is_empty() {
                     return 0.0;
                 }
-                let omitted_value_max = self.omitted_value_desc[head / 8]
-                    .get(self.omitted_value_cursor[head / 8])
+                // Query heads per KV head (8 for MiniCPM 16Q/2KV, 4 for
+                // Llama 32Q/8KV); a fixed `/ 8` was only right for MiniCPM.
+                let kv_head = head / (Q / KV);
+                let omitted_value_max = self.omitted_value_desc[kv_head]
+                    .get(self.omitted_value_cursor[kv_head])
                     .map_or(0.0, |(_, value)| *value);
                 let omitted = self.omitted_upper_mass[head];
                 let denominator = self.kept_mass[head] + omitted;
                 if denominator == 0.0 {
                     f64::INFINITY
                 } else {
-                    omitted / denominator * (omitted_value_max + self.kept_value_max[head / 8])
+                    omitted / denominator * (omitted_value_max + self.kept_value_max[kv_head])
                 }
             })
             .collect()
@@ -4883,7 +5025,19 @@ pub struct TorchGeneration {
     pub hierarchy_states_initial: usize,
     pub hierarchy_states_loaded: usize,
     pub hierarchy_widening_rounds: usize,
+    /// K tokens physically left unread by the regional proof. Only the
+    /// MiniCPM path applies the proof; the parity-first Llama path scores the
+    /// complete K history, so this stays 0 there by design.
     pub hierarchy_k_tokens_avoided: usize,
+    /// Attention events where the regional K proof was evaluated (MiniCPM
+    /// applied, Llama measured).
+    #[serde(default)]
+    pub hierarchy_k_events: usize,
+    /// K tokens the regional proof would let skip at the event's tolerance.
+    /// MiniCPM: equal to `hierarchy_k_tokens_avoided`. Llama: measured on the
+    /// exact scores without skipping anything (renormalized-omission bound).
+    #[serde(default)]
+    pub hierarchy_k_tokens_skippable: usize,
     pub hierarchy_last_states_initial: usize,
     pub hierarchy_last_states_loaded: usize,
     pub hierarchy_last_widening_rounds: usize,
@@ -4953,6 +5107,8 @@ pub struct AppliedOmissionReport {
     pub max_divergent_sequence_end: Option<usize>,
     pub certified_v_tokens_omitted: usize,
     pub hierarchy_k_tokens_avoided: usize,
+    #[serde(default)]
+    pub hierarchy_k_tokens_skippable: usize,
     pub canonical_token_ids: Vec<u32>,
     pub applied_token_ids: Vec<u32>,
     pub canonical: TorchGeneration,
@@ -6096,6 +6252,7 @@ impl TorchModelRuntime {
             max_divergent_sequence_end,
             certified_v_tokens_omitted: applied.certified_v_tokens_omitted,
             hierarchy_k_tokens_avoided: applied.hierarchy_k_tokens_avoided,
+            hierarchy_k_tokens_skippable: applied.hierarchy_k_tokens_skippable,
             canonical_token_ids: canonical.token_ids.clone(),
             applied_token_ids: applied.token_ids.clone(),
             canonical,
@@ -6515,6 +6672,8 @@ impl TorchModelRuntime {
                 hierarchy_states_loaded: cache.hierarchy_states_loaded,
                 hierarchy_widening_rounds: cache.hierarchy_widening_rounds,
                 hierarchy_k_tokens_avoided: cache.hierarchy_k_tokens_avoided,
+                hierarchy_k_events: cache.hierarchy_k_events,
+                hierarchy_k_tokens_skippable: cache.hierarchy_k_tokens_skippable,
                 hierarchy_last_states_initial: cache.hierarchy_last_states_initial,
                 hierarchy_last_states_loaded: cache.hierarchy_last_states_loaded,
                 hierarchy_last_widening_rounds: cache.hierarchy_last_widening_rounds,
@@ -8167,6 +8326,13 @@ mod tests {
         assert_eq!(cache.rounding_cell_certified_events, 1);
         assert_eq!(cache.rounding_cell_components_checked, 32 * 128);
         assert_eq!(cache.rounding_cell_components_certified, 32 * 128);
+        // The regional proof is measured on the Llama path: the 15 tokens of
+        // the low-score region could be skipped, but the parity-first path
+        // still scored all 17 K tokens, so nothing is reported as avoided.
+        assert_eq!(page.certificate.regions.len(), 2);
+        assert_eq!(cache.hierarchy_k_events, 1);
+        assert_eq!(cache.hierarchy_k_tokens_skippable, 15);
+        assert_eq!(cache.hierarchy_k_tokens_avoided, 0);
         assert_eq!(cache.attention_v_tokens_avoided, 17 - selected);
         assert_eq!(
             cache.attention_selected_pv_elements,

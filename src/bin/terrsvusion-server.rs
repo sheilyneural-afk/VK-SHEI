@@ -699,6 +699,8 @@ async fn chat(
                 "states_loaded": result.hierarchy_states_loaded,
                 "widening_rounds": result.hierarchy_widening_rounds,
                 "k_tokens_avoided": result.hierarchy_k_tokens_avoided,
+                "k_events": result.hierarchy_k_events,
+                "k_tokens_skippable": result.hierarchy_k_tokens_skippable,
                 "last_states_initial": result.hierarchy_last_states_initial,
                 "last_states_loaded": result.hierarchy_last_states_loaded,
                 "last_widening_rounds": result.hierarchy_last_widening_rounds,
