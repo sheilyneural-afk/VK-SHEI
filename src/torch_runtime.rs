@@ -21,8 +21,7 @@ use crate::adaptive_extent::{AxisPolicy, ParallelContextAxis};
 #[cfg(test)]
 use crate::attention_certificate::omitted_error_bound;
 use crate::attention_certificate::{
-    bf16_rounding_cells_contain_components, certified, select_by_exact_mass,
-    select_v_by_exact_contribution,
+    bf16_rounding_cell_contains, certified, select_by_exact_mass, select_v_by_exact_contribution,
 };
 use crate::cold_store::{ColdStore, ColdStoreStats, PageGeometry, PreparedPage};
 use crate::conversion_worker::{Bf16PageJob, ConversionStats, ConversionWorker, PageShape};
@@ -802,6 +801,8 @@ pub struct TerrsvusionKvCache {
     exact_attention_rejected_v_tokens: usize,
     rounding_cell_checked_events: usize,
     rounding_cell_certified_events: usize,
+    rounding_cell_components_checked: usize,
+    rounding_cell_components_certified: usize,
     suffix_against_committed: bool,
 }
 
@@ -944,6 +945,8 @@ impl TerrsvusionKvCache {
             exact_attention_rejected_v_tokens: 0,
             rounding_cell_checked_events: 0,
             rounding_cell_certified_events: 0,
+            rounding_cell_components_checked: 0,
+            rounding_cell_components_certified: 0,
             suffix_against_committed: false,
         })
     }
@@ -2635,36 +2638,56 @@ impl TerrsvusionKvCache {
             &[sparse_values],
             sequence_tokens,
         );
-        let output_float = output.to_kind(Kind::Float).contiguous();
-        let mut output_components = vec![0.0f32; 32 * 128];
-        output_float.copy_data(&mut output_components, 32 * 128);
-        // Bound FP32 PV accumulation conservatively in addition to the
-        // omitted-contribution box. This does not yet cover every possible
-        // fused-SDPA score/softmax implementation, so the canonical tile
-        // oracle remains mandatory before server promotion.
+        // BF16 rounding-cell diagnostic. Its centre must be the UNROUNDED
+        // candidate: the BF16 SDPA output above is already rounded, so a cell
+        // centred on it says nothing about which side of a midpoint the real
+        // value lies (and practically never passes). Recompute the candidate
+        // in FP32 from the same FP32 score plan that chose the omission:
+        // full-denominator softmax probabilities times the selected BF16 V
+        // (exact in FP32). This is diagnostic only: it never changes the
+        // returned output or the omission decision, and it is relative to the
+        // FP32 score plan, not a proof about the fused BF16 SDPA kernel.
         let unit_roundoff = 2_f64.powi(-24);
         let operations = (chosen.len().saturating_mul(2).saturating_add(64)) as f64;
         let gamma = operations * unit_roundoff / (1.0 - operations * unit_roundoff);
         let selected_set = chosen.iter().copied().collect::<BTreeSet<_>>();
-        let omitted_fraction = scores_by_head
-            .iter()
-            .map(|head_scores| {
-                let maximum = head_scores
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let mut total = 0.0;
-                let mut omitted = 0.0;
-                for (token, score) in head_scores.iter().enumerate() {
-                    let weight = (*score - maximum).exp();
-                    total += weight;
-                    if !selected_set.contains(&token) {
-                        omitted += weight;
-                    }
+        let mut omitted_fraction = Vec::with_capacity(32);
+        let mut kept_probabilities = Vec::with_capacity(32 * chosen.len());
+        for head_scores in &scores_by_head {
+            let maximum = head_scores
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let weights = head_scores
+                .iter()
+                .map(|score| (*score - maximum).exp())
+                .collect::<Vec<_>>();
+            let total = weights.iter().sum::<f64>();
+            let mut omitted = 0.0;
+            for (token, weight) in weights.iter().enumerate() {
+                if !selected_set.contains(&token) {
+                    omitted += weight;
                 }
-                omitted / total
-            })
-            .collect::<Vec<_>>();
+            }
+            omitted_fraction.push(omitted / total);
+            kept_probabilities.extend(chosen.iter().map(|&token| (weights[token] / total) as f32));
+        }
+        let probabilities =
+            Tensor::from_slice(&kept_probabilities).view([1, 32, 1, chosen.len() as i64]);
+        let center = probabilities
+            .matmul(
+                &selected_values
+                    .to_kind(Kind::Float)
+                    .repeat_interleave_self_int(gqa, 1, None),
+            )
+            .contiguous();
+        let mut center_components = vec![0.0f32; 32 * 128];
+        center.copy_data(&mut center_components, 32 * 128);
+        let output_float = output.to_kind(Kind::Float).contiguous();
+        let mut output_components = vec![0.0f32; 32 * 128];
+        output_float.copy_data(&mut output_components, 32 * 128);
+        // Per component: omitted contribution plus conservative FP32
+        // accumulation and probability-rounding error (gamma covers both).
         let rounding_bounds = (0..32)
             .flat_map(|head| {
                 let kv_head = head / 4;
@@ -2672,13 +2695,25 @@ impl TerrsvusionKvCache {
                 let maxima = &max_per_kv_component[kv_head * 128..(kv_head + 1) * 128];
                 maxima
                     .iter()
-                    .map(move |maximum| (fraction + gamma) * *maximum)
+                    .map(move |maximum| (fraction + gamma + unit_roundoff) * *maximum)
             })
             .collect::<Vec<_>>();
+        // A component counts only when its whole interval stays inside one
+        // BF16 cell AND the emitted BF16 candidate is that cell's value.
+        let certified_components = center_components
+            .iter()
+            .zip(&rounding_bounds)
+            .zip(&output_components)
+            .filter(|&((&center, &bound), &emitted)| {
+                bf16_rounding_cell_contains(center, bound)
+                    && half::bf16::from_f32(center).to_bits()
+                        == half::bf16::from_f32(emitted).to_bits()
+            })
+            .count();
         self.rounding_cell_checked_events += 1;
-        let rounding_cell_certified =
-            bf16_rounding_cells_contain_components(&output_components, &rounding_bounds);
-        if rounding_cell_certified {
+        self.rounding_cell_components_checked += center_components.len();
+        self.rounding_cell_components_certified += certified_components;
+        if certified_components == center_components.len() {
             self.rounding_cell_certified_events += 1;
         }
         let omitted = cursor.saturating_sub(chosen.len());
@@ -4875,6 +4910,12 @@ pub struct TorchGeneration {
     pub exact_attention_rejected_v_tokens: usize,
     pub rounding_cell_checked_events: usize,
     pub rounding_cell_certified_events: usize,
+    /// Output components checked by the BF16 rounding-cell diagnostic.
+    #[serde(default)]
+    pub rounding_cell_components_checked: usize,
+    /// Components whose unrounded FP32 interval stays in one BF16 cell.
+    #[serde(default)]
+    pub rounding_cell_components_certified: usize,
     pub applied_mass_tolerance: Option<f64>,
     #[serde(skip_serializing)]
     pub step_logits: Vec<Vec<f32>>,
@@ -6505,6 +6546,8 @@ impl TorchModelRuntime {
                 exact_attention_rejected_v_tokens: cache.exact_attention_rejected_v_tokens,
                 rounding_cell_checked_events: cache.rounding_cell_checked_events,
                 rounding_cell_certified_events: cache.rounding_cell_certified_events,
+                rounding_cell_components_checked: cache.rounding_cell_components_checked,
+                rounding_cell_components_certified: cache.rounding_cell_components_certified,
                 applied_mass_tolerance: cache.applied_mass_tolerance,
                 step_logits: std::mem::take(&mut cache.step_logits),
                 layer_output_traces: std::mem::take(&mut cache.layer_output_traces),
@@ -8122,6 +8165,8 @@ mod tests {
         );
         assert_eq!(cache.rounding_cell_checked_events, 1);
         assert_eq!(cache.rounding_cell_certified_events, 1);
+        assert_eq!(cache.rounding_cell_components_checked, 32 * 128);
+        assert_eq!(cache.rounding_cell_components_certified, 32 * 128);
         assert_eq!(cache.attention_v_tokens_avoided, 17 - selected);
         assert_eq!(
             cache.attention_selected_pv_elements,

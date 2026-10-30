@@ -239,52 +239,73 @@ pub fn bf16_rounding_cells_contain(
 }
 
 /// Component-wise form of [`bf16_rounding_cells_contain`].
+///
+/// `center` must be the *unrounded* value (for example an FP32 accumulation
+/// of the candidate), never an output that was already rounded to BF16: a
+/// BF16 value sits in the middle of its own cell, so centring the interval
+/// on it hides on which side of a midpoint the real value lies.
 pub fn bf16_rounding_cells_contain_components(center: &[f32], error: &[f64]) -> bool {
-    if center.is_empty()
-        || center.len() != error.len()
-        || error.iter().any(|bound| !bound.is_finite() || *bound < 0.0)
-    {
+    !center.is_empty()
+        && center.len() == error.len()
+        && bf16_rounding_cell_count(center, error) == center.len()
+}
+
+/// Number of components whose interval `center ± error` lies strictly inside
+/// a single BF16 round-to-nearest cell. Invalid geometry or a negative or
+/// non-finite bound counts as zero certified components. This is the
+/// per-component diagnostic behind
+/// [`bf16_rounding_cells_contain_components`].
+pub fn bf16_rounding_cell_count(center: &[f32], error: &[f64]) -> usize {
+    if center.len() != error.len() || error.iter().any(|bound| !bound.is_finite() || *bound < 0.0) {
+        return 0;
+    }
+    center
+        .iter()
+        .zip(error)
+        .filter(|&(&value, &error)| bf16_rounding_cell_contains(value, error))
+        .count()
+}
+
+/// Proves that every real value in `value ± error` rounds to the same finite
+/// BF16 value as `value` (strictly inside both midpoints).
+pub fn bf16_rounding_cell_contains(value: f32, error: f64) -> bool {
+    if !value.is_finite() || !error.is_finite() || error < 0.0 {
         return false;
     }
-    center.iter().zip(error).all(|(&value, &error)| {
-        if !value.is_finite() {
+    let rounded = bf16::from_f32(value);
+    let bits = rounded.to_bits();
+    let rounded_value = f64::from(rounded.to_f32());
+    let (previous, next) = if bits == 0 {
+        (
+            -f64::from(bf16::from_bits(1).to_f32()),
+            f64::from(bf16::from_bits(1).to_f32()),
+        )
+    } else if bits == 0x8000 {
+        (
+            f64::from(bf16::from_bits(0x8001).to_f32()),
+            f64::from(bf16::from_bits(1).to_f32()),
+        )
+    } else if bits & 0x8000 == 0 {
+        if bits >= 0x7f7f {
             return false;
         }
-        let rounded = bf16::from_f32(value);
-        let bits = rounded.to_bits();
-        let rounded_value = f64::from(rounded.to_f32());
-        let (previous, next) = if bits == 0 {
-            (
-                -f64::from(bf16::from_bits(1).to_f32()),
-                f64::from(bf16::from_bits(1).to_f32()),
-            )
-        } else if bits == 0x8000 {
-            (
-                f64::from(bf16::from_bits(0x8001).to_f32()),
-                f64::from(bf16::from_bits(1).to_f32()),
-            )
-        } else if bits & 0x8000 == 0 {
-            if bits >= 0x7f7f {
-                return false;
-            }
-            (
-                f64::from(bf16::from_bits(bits - 1).to_f32()),
-                f64::from(bf16::from_bits(bits + 1).to_f32()),
-            )
-        } else {
-            if bits >= 0xff7f {
-                return false;
-            }
-            (
-                f64::from(bf16::from_bits(bits + 1).to_f32()),
-                f64::from(bf16::from_bits(bits - 1).to_f32()),
-            )
-        };
-        let lower_midpoint = (previous + rounded_value) * 0.5;
-        let upper_midpoint = (rounded_value + next) * 0.5;
-        let value = f64::from(value);
-        value - error > lower_midpoint && value + error < upper_midpoint
-    })
+        (
+            f64::from(bf16::from_bits(bits - 1).to_f32()),
+            f64::from(bf16::from_bits(bits + 1).to_f32()),
+        )
+    } else {
+        if bits >= 0xff7f {
+            return false;
+        }
+        (
+            f64::from(bf16::from_bits(bits + 1).to_f32()),
+            f64::from(bf16::from_bits(bits - 1).to_f32()),
+        )
+    };
+    let lower_midpoint = (previous + rounded_value) * 0.5;
+    let upper_midpoint = (rounded_value + next) * 0.5;
+    let value = f64::from(value);
+    value - error > lower_midpoint && value + error < upper_midpoint
 }
 
 #[cfg(test)]
@@ -343,5 +364,36 @@ mod tests {
         assert!(bf16_rounding_cells_contain(&[-1.0], 1, &[0.001]));
         assert!(!bf16_rounding_cells_contain(&[1.0], 1, &[radius]));
         assert!(!bf16_rounding_cells_contain(&[f32::NAN], 1, &[0.0]));
+    }
+
+    #[test]
+    fn bf16_rounding_cell_rejects_unrounded_center_next_to_midpoint() {
+        // Midpoint between BF16 1.0 and its successor 1.0078125.
+        let midpoint = 1.0 + 2_f64.powi(-8);
+        // The true (FP32) value lies just above the midpoint, so dense BF16
+        // rounds it up to 1.0078125. Centring on the already rounded value
+        // (1.0 or 1.0078125) with a 3e-4 bound wrongly "certifies".
+        let unrounded = (midpoint + 1e-4) as f32;
+        assert_eq!(bf16::from_f32(unrounded).to_f32(), 1.0078125);
+        assert!(bf16_rounding_cells_contain_components(&[1.0], &[3e-4]));
+        assert!(!bf16_rounding_cells_contain_components(
+            &[unrounded],
+            &[3e-4]
+        ));
+        // The same bound certifies when the unrounded value is far from any
+        // midpoint.
+        assert!(bf16_rounding_cells_contain_components(&[1.002], &[3e-4]));
+    }
+
+    #[test]
+    fn bf16_rounding_cell_count_reports_partial_components() {
+        let center = [1.002_f32, 0.0, 0.25];
+        let error = [3e-4, 1e-12, 0.0];
+        // Exact zero with a non-subnormal bound cannot stay in its cell.
+        assert_eq!(bf16_rounding_cell_count(&center, &error), 2);
+        assert!(!bf16_rounding_cells_contain_components(&center, &error));
+        assert!(bf16_rounding_cell_contains(0.0, 0.0));
+        assert_eq!(bf16_rounding_cell_count(&center, &error[..2]), 0);
+        assert!(!bf16_rounding_cells_contain_components(&[], &[]));
     }
 }
