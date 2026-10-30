@@ -7,7 +7,8 @@
 //!
 //! BF16 weights are uploaded from the original safetensors bytes unchanged.
 //! GPU intermediates and KV are BF16; FP32 is used for kernel accumulators.
-//! Numerical parity with the dense BF16 LibTorch model MUST be checked.
+//! CPU LibTorch comparisons are numerical diagnostics, not a bitwise GPU parity requirement.
+//! GPU LOD fidelity is validated against dense GPU under the declared error contract.
 //! The historical Terrsvusion KV/LOD optimization is not yet wired to this
 //! experimental engine and is not represented as active.
 //!
