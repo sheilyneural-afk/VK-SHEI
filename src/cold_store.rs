@@ -108,6 +108,10 @@ pub struct ColdStore {
     partial_key_payload_bytes: u64,
     partial_key_bytes_avoided: u64,
     cryptographic_digests_verified: u64,
+    /// Test-only fault injection: the next append writes only this many bytes
+    /// and then fails, as a full disk would.
+    #[cfg(test)]
+    fail_append_after_bytes: Option<usize>,
 }
 
 impl ColdStore {
@@ -165,6 +169,8 @@ impl ColdStore {
             partial_key_payload_bytes: 0,
             partial_key_bytes_avoided: 0,
             cryptographic_digests_verified: 0,
+            #[cfg(test)]
+            fail_append_after_bytes: None,
         }
     }
 
@@ -334,11 +340,21 @@ impl ColdStore {
         if prepared.record.len() as u64 != prepared.meta.record_len {
             return Err(invalid("registro KV preparado con longitud inválida"));
         }
-        let record_offset = self.file.metadata()?.len();
-        self.file.write_all(&prepared.record)?;
-        self.file.flush()?;
-        if durable {
-            self.file.sync_data()?;
+        // The authoritative end of the store is the end of the last committed
+        // record, not the current file length: a previous append that failed
+        // half-way (for example with a full disk) may have left torn bytes.
+        // Writing behind them would make the next reopen hit an invalid
+        // footer and lose every committed page, so the torn tail is removed
+        // first and any failure of this append rolls the file back again.
+        let record_offset = self.committed_end();
+        if self.file.metadata()?.len() != record_offset {
+            self.file.set_len(record_offset)?;
+        }
+        if let Err(error) = self.write_record(&prepared.record, durable) {
+            // Best effort: if the rollback itself fails, the next append
+            // retries it through the committed_end check above.
+            let _ = self.file.set_len(record_offset);
+            return Err(error);
         }
         prepared.meta.record_offset = record_offset;
         prepared.meta.key_hashes_offset += record_offset;
@@ -348,6 +364,30 @@ impl ColdStore {
         let meta = prepared.meta;
         self.pages.push(meta.clone());
         Ok(meta)
+    }
+
+    /// End offset of the last committed record. Records are contiguous from
+    /// offset zero, so this is where the next append must start.
+    fn committed_end(&self) -> u64 {
+        self.pages
+            .last()
+            .map(|meta| meta.record_offset + meta.record_len)
+            .unwrap_or(0)
+    }
+
+    fn write_record(&mut self, record: &[u8], durable: bool) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(limit) = self.fail_append_after_bytes.take() {
+            let written = limit.min(record.len());
+            self.file.write_all(&record[..written])?;
+            return Err(io::Error::other("fallo de escritura simulado"));
+        }
+        self.file.write_all(record)?;
+        self.file.flush()?;
+        if durable {
+            self.file.sync_data()?;
+        }
+        Ok(())
     }
 
     /// Read exactly one page, verify all checksums, and place it in the LRU.
@@ -615,8 +655,10 @@ impl ColdStore {
         }
         // Only bytes after the last commit footer are discarded. Without this
         // recovery step a later append would sit behind an unreadable torn
-        // tail and become unreachable on the next restart.
-        if offset < file_len {
+        // tail and become unreachable on the next restart. A read-only store
+        // cannot (and must not) truncate: its descriptor is opened without
+        // write access, so it simply ignores the bytes after the last footer.
+        if offset < file_len && !self.read_only {
             self.file.set_len(offset)?;
             self.file.sync_data()?;
         }
@@ -1057,6 +1099,91 @@ mod tests {
         drop(reopened);
         let reopened_again = ColdStore::open(&path, 0).unwrap();
         assert_eq!(reopened_again.metadata().len(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_partial_append_followed_by_append_still_reopens() {
+        let path = temp_path("partial-then-append");
+        let mut store = ColdStore::create(&path, 0).unwrap();
+        store
+            .append_page(geometry(0), &[1; 32], &[2; 32], true)
+            .unwrap();
+        // The second append dies half-way through its record (disk full).
+        store.fail_append_after_bytes = Some(HEADER_LEN + 40);
+        assert!(
+            store
+                .append_page(geometry(1), &[3; 32], &[4; 32], true)
+                .is_err()
+        );
+        assert_eq!(store.metadata().len(), 1);
+        // The failed append must not leave torn bytes behind.
+        let committed = store.stats().committed_bytes;
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), committed);
+        // A later append succeeds and keeps the same page id.
+        let meta = store
+            .append_page(geometry(1), &[5; 32], &[6; 32], true)
+            .unwrap();
+        assert_eq!(meta.page_id, 1);
+        assert_eq!(meta.record_offset, committed);
+        drop(store);
+        let mut reopened = ColdStore::open(&path, 0).unwrap();
+        assert_eq!(reopened.metadata().len(), 2);
+        assert_eq!(reopened.read_page(1).unwrap().key, vec![5; 32]);
+        reopened.audit().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn external_torn_tail_before_append_is_discarded() {
+        // Torn bytes written while the store is open (simulated from outside,
+        // e.g. by a crashed earlier writer) must not end up in front of the
+        // next committed record.
+        let path = temp_path("external-torn-then-append");
+        let mut store = ColdStore::create(&path, 0).unwrap();
+        store
+            .append_page(geometry(0), &[1; 32], &[2; 32], true)
+            .unwrap();
+        let torn = ColdStore::prepare_page(1, geometry(1), &[3; 32], &[4; 32]).unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&torn.record[..HEADER_LEN + 40])
+            .unwrap();
+        store
+            .append_page(geometry(1), &[5; 32], &[6; 32], true)
+            .unwrap();
+        drop(store);
+        let mut reopened = ColdStore::open(&path, 0).unwrap();
+        assert_eq!(reopened.metadata().len(), 2);
+        assert_eq!(reopened.read_page(1).unwrap().value, vec![6; 32]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_only_open_ignores_torn_tail_without_truncating() {
+        let path = temp_path("readonly-torn");
+        let mut store = ColdStore::create(&path, 0).unwrap();
+        store
+            .append_page(geometry(0), &[7; 32], &[9; 32], true)
+            .unwrap();
+        drop(store);
+        let torn = ColdStore::prepare_page(1, geometry(1), &[3; 32], &[4; 32]).unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&torn.record[..HEADER_LEN + 40])
+            .unwrap();
+        let len_before = std::fs::metadata(&path).unwrap().len();
+        let mut frozen = ColdStore::open_read_only(&path, 0).unwrap();
+        assert_eq!(frozen.metadata().len(), 1);
+        assert_eq!(frozen.read_key(0).unwrap(), vec![7; 32]);
+        frozen.audit_mapped().unwrap();
+        drop(frozen);
+        // Read-only opening never modifies the published file.
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len_before);
         std::fs::remove_file(path).unwrap();
     }
 
