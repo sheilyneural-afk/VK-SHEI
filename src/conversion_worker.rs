@@ -138,12 +138,13 @@ impl<O: Send + 'static> ConversionWorker<O> {
                             let sequence = job.sequence;
                             let shape = job.shape;
                             let started = Instant::now();
-                            // In unwind-enabled builds, a third-party/backend
-                            // encoder must not kill one worker and silently
-                            // lose its sequence. Losing a sequence while sibling
-                            // workers remain alive would leave the ordered
-                            // consumer blocked forever. The release profile uses
-                            // panic=abort, an explicit process-level limitation.
+                            // A third-party/backend encoder must not kill one
+                            // worker and silently lose its sequence. Losing a
+                            // sequence while sibling workers remain alive would
+                            // leave the ordered consumer blocked forever. Both
+                            // dev and release profiles use panic=unwind
+                            // (Cargo.toml), so this catch is always active; a
+                            // panic=abort build would end the whole process.
                             let encoded = panic::catch_unwind(AssertUnwindSafe(|| encoder(job)))
                                 .unwrap_or_else(|_| {
                                     Err("worker de conversión terminó con panic".to_owned())
