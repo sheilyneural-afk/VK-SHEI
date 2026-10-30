@@ -189,7 +189,7 @@ def main() -> None:
         report["faro_7k_is_not_full_volume"] = True
     if "--skip-http" not in sys.argv:
         report["active_llama_model_ids"] = live_llama_ids()
-    destination = ROOT / "docs/AUDITORIA_LLAMA_FARO_IDS_Y_PLANTILLAS_20261029.json"
+    destination = ROOT / "docs/evidencia/documentos/AUDITORIA_LLAMA_FARO_IDS_Y_PLANTILLAS_20261029.json"
     destination.write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
