@@ -113,6 +113,19 @@ fn main() -> Result<()> {
         "measured_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         "activation": if passed { "eligible-for-reviewed-activation" } else { "fallback-required" }
     });
+    let receipt_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("deploy/local-production/runtime/validation");
+    fs::create_dir_all(&receipt_dir)?;
+    let bundle_id = model
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("bundle directory has no valid identity")?;
+    let receipt_path = receipt_dir.join(format!("adapter-parity-{bundle_id}.json"));
+    let temporary = tempfile::NamedTempFile::new_in(&receipt_dir)?;
+    fs::write(temporary.path(), serde_json::to_vec_pretty(&receipt)?)?;
+    temporary
+        .persist(&receipt_path)
+        .map_err(|error| error.error)?;
     println!("{}", serde_json::to_string_pretty(&receipt)?);
     if !passed {
         bail!("adapter parity failed; exact fallback remains required");

@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tch::{Device, Kind, Tensor};
@@ -194,7 +193,6 @@ pub fn model_weight_file(model_dir: impl AsRef<Path>) -> Result<PathBuf> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatTemplateFamily {
-    PrefixDelimited,
     TemplateDelimited,
 }
 
@@ -5733,40 +5731,18 @@ impl TorchModelRuntime {
         Ok(prompt)
     }
 
-    fn chat_prompt(&self, messages: &[TorchChatMessage], enable_thinking: bool) -> Result<String> {
+    fn chat_prompt(&self, messages: &[TorchChatMessage], _enable_thinking: bool) -> Result<String> {
         match self.model.chat {
-            ChatTemplateFamily::PrefixDelimited => {
-                Self::render_messages_with_thinking(messages, enable_thinking)
-            }
             ChatTemplateFamily::TemplateDelimited => Self::render_template_messages(messages, true),
         }
     }
 
     fn chat_prefix(&self, messages: &[TorchChatMessage]) -> Result<String> {
         match self.model.chat {
-            ChatTemplateFamily::PrefixDelimited => Self::render_message_prefix(messages),
             ChatTemplateFamily::TemplateDelimited => {
                 Self::render_template_messages(messages, false)
             }
         }
-    }
-
-    fn render_message_prefix(messages: &[TorchChatMessage]) -> Result<String> {
-        ensure!(!messages.is_empty(), "prefijo messages vacío");
-        let mut prompt = String::from("<s>");
-        for message in messages {
-            ensure!(
-                matches!(message.role.as_str(), "system" | "user" | "assistant"),
-                "rol no soportado: {}",
-                message.role
-            );
-            prompt.push_str("<|im_start|>");
-            prompt.push_str(&message.role);
-            prompt.push('\n');
-            prompt.push_str(&message.content);
-            prompt.push_str("<|im_end|>\n");
-        }
-        Ok(prompt)
     }
 
     pub fn generate_chat(&self, user: &str, max_tokens: usize) -> Result<TorchGeneration> {
@@ -5787,13 +5763,11 @@ impl TorchModelRuntime {
         self.generate_messages_cancellable(messages, max_tokens, false, &AtomicBool::new(false))
     }
 
-    const DEFAULT_CHAT_SYSTEM: &str = "Eres el asistente de KVSLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. No pidas aclaraciones si ya se entiende.";
     const DEFAULT_TEMPLATE_CHAT_SYSTEM: &str =
         "Responde de forma directa y breve, en el idioma del usuario.";
 
     fn default_system_prompt(&self) -> &'static str {
         match self.model.chat {
-            ChatTemplateFamily::PrefixDelimited => Self::DEFAULT_CHAT_SYSTEM,
             ChatTemplateFamily::TemplateDelimited => Self::DEFAULT_TEMPLATE_CHAT_SYSTEM,
         }
     }
@@ -5816,7 +5790,7 @@ impl TorchModelRuntime {
 
     #[cfg(test)]
     fn prepare_chat_messages(messages: &[TorchChatMessage]) -> Vec<TorchChatMessage> {
-        Self::prepare_chat_messages_with_system(messages, Self::DEFAULT_CHAT_SYSTEM)
+        Self::prepare_chat_messages_with_system(messages, Self::DEFAULT_TEMPLATE_CHAT_SYSTEM)
     }
 
     fn prepare_runtime_chat_messages(
@@ -8122,7 +8096,7 @@ mod tests {
                 lm_head: weight(),
                 rms_eps: 1e-5,
                 eos: vec![1],
-                chat: ChatTemplateFamily::PrefixDelimited,
+                chat: ChatTemplateFamily::TemplateDelimited,
                 query_heads: 1,
                 kv_heads: 1,
                 head_dim: 1,
