@@ -1,5 +1,6 @@
 # Artefactos de compilación de Cargo
 /target/
+/.mcp_trash/
 
 # Almacenes y cachés generados en tiempo de ejecución
 .terrsvusion-prefix-cache/
