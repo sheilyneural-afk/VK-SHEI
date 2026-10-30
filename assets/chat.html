@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KVSLIM chat</title>
+    <style>
+      :root {
+        --bg: #111318;
+        --panel: #1a1d24;
+        --ink: #e8eaef;
+        --muted: #9aa3b2;
+        --line: #2a2f3a;
+        --accent: #6ea8ff;
+        --user: #243044;
+        --assistant: #1f242e;
+        --danger: #ff8a80;
+        --ok: #7dcea0;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--ink);
+        font: 15px/1.45 ui-sans-serif, system-ui, sans-serif;
+      }
+      body {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 280px;
+        min-height: 100%;
+      }
+      @media (max-width: 840px) {
+        body {
+          grid-template-columns: 1fr;
+        }
+        aside {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        min-height: 100%;
+      }
+      header,
+      aside,
+      footer {
+        padding: 16px 20px;
+      }
+      header {
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: baseline;
+      }
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+      }
+      #status {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      #status.ok {
+        color: var(--ok);
+      }
+      #status.bad {
+        color: var(--danger);
+      }
+      #log {
+        flex: 1;
+        overflow: auto;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .bubble {
+        max-width: 46rem;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .bubble.user {
+        align-self: flex-end;
+        background: var(--user);
+      }
+      .bubble.assistant {
+        align-self: flex-start;
+        background: var(--assistant);
+      }
+      .bubble.error {
+        color: var(--danger);
+      }
+      .role {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        display: grid;
+        gap: 8px;
+      }
+      textarea,
+      input,
+      button {
+        font: inherit;
+        color: var(--ink);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        padding: 8px 10px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 72px;
+        resize: vertical;
+      }
+      #document {
+        min-height: 140px;
+        font-size: 12px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      button {
+        background: var(--accent);
+        color: #0b1220;
+        border-color: transparent;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.ghost {
+        background: transparent;
+        color: var(--ink);
+        border-color: var(--line);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: wait;
+      }
+      aside {
+        background: var(--panel);
+        border-left: 1px solid var(--line);
+        overflow: auto;
+      }
+      aside h2 {
+        margin: 0 0 12px;
+        font-size: 13px;
+        color: var(--muted);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin: 10px 0 4px;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .think {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 8px;
+        border-left: 2px solid var(--line);
+        padding-left: 8px;
+      }
+      dl {
+        margin: 0;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 6px 10px;
+        font-size: 13px;
+      }
+      dt {
+        color: var(--muted);
+      }
+      dd {
+        margin: 0;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>KVSLIM <a href="/nativo" style="color:#6ea8ff;font-size:13px;font-weight:500">nativo BF16</a></h1>
+        <div id="status">comprobando motor…</div>
+      </header>
+      <div id="log"></div>
+      <footer>
+        <textarea
+          id="input"
+          placeholder="Pregunta corta. Un libro largo va al recuadro «Documento en KV»."
+        ></textarea>
+        <div class="row">
+          <button id="send" type="button">Enviar</button>
+          <button id="stop" class="ghost" type="button" hidden>Cancelar</button>
+          <button id="clear" class="ghost" type="button">Vaciar</button>
+        </div>
+      </footer>
+    </main>
+    <aside>
+      <h2>Motor</h2>
+      <dl id="engine"></dl>
+      <label for="system">Sistema / prefijo cacheable</label>
+      <textarea id="system"></textarea>
+      <label for="document">Documento en KV (estable entre preguntas)</label>
+      <textarea id="document" placeholder="Pega aquí el libro o escribe «guarda esto en cache» + el texto. Las preguntas van aparte."></textarea>
+      <label for="max">max_tokens (1–512)</label>
+      <input id="max" type="number" min="1" max="512" value="128" />
+      <label class="check" for="history">
+        <input id="history" type="checkbox" />
+        Enviar historial (el 1B copia el hilo si está sucio)
+      </label>
+      <label class="check" for="thinking">
+        <input id="thinking" type="checkbox" />
+        Cadena de pensamiento (necesita más tokens)
+      </label>
+      <h2>Última respuesta</h2>
+      <dl id="metrics"></dl>
+    </aside>
+    <script>
+      const log = document.getElementById("log");
+      const input = document.getElementById("input");
+      const system = document.getElementById("system");
+      const maxTokens = document.getElementById("max");
+      const thinking = document.getElementById("thinking");
+      const history = document.getElementById("history");
+      const documentBox = document.getElementById("document");
+      const send = document.getElementById("send");
+      const stop = document.getElementById("stop");
+      const clear = document.getElementById("clear");
+      const status = document.getElementById("status");
+      const engine = document.getElementById("engine");
+      const metrics = document.getElementById("metrics");
+      const turns = [];
+      let abort = null;
+      system.addEventListener("input", () => {
+        system.dataset.userEdited = "1";
+      });
+
+      function splitThink(text) {
+        const start = text.indexOf("<think>");
+        const end = text.indexOf("</think>");
+        if (start >= 0 && end > start) {
+          return {
+            think: text.slice(start + 7, end).trim(),
+            answer: text.slice(end + 8).trim(),
+          };
+        }
+        if (text.trimStart().startsWith("<think>")) {
+          return { think: text.replace("<think>", "").trim(), answer: "" };
+        }
+        return { think: "", answer: text };
+      }
+
+      function addBubble(role, text, isError) {
+        const node = document.createElement("div");
+        node.className = "bubble " + role + (isError ? " error" : "");
+        const label = document.createElement("span");
+        label.className = "role";
+        label.textContent = role;
+        node.append(label);
+        if (role === "assistant" && !isError) {
+          const parts = splitThink(text);
+          if (parts.think) {
+            const think = document.createElement("div");
+            think.className = "think";
+            think.textContent = parts.think;
+            node.append(think);
+            node.append(
+              document.createTextNode(
+                parts.answer ||
+                  "(sin respuesta visible; sube max_tokens o desactiva el pensamiento)"
+              )
+            );
+          } else {
+            node.append(document.createTextNode(text));
+          }
+        } else {
+          node.append(document.createTextNode(text));
+        }
+        log.append(node);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      function fillDl(el, rows) {
+        el.replaceChildren();
+        for (const [key, value] of rows) {
+          const dt = document.createElement("dt");
+          dt.textContent = key;
+          const dd = document.createElement("dd");
+          dd.textContent = value;
+          el.append(dt, dd);
+        }
+      }
+
+      async function ping() {
+        try {
+          const response = await fetch("/health");
+          const data = await response.json();
+          status.textContent = data.model + " · " + data.compute;
+          status.className = "ok";
+          fillDl(engine, [
+            ["modelo", data.model],
+            ["workers", data.workers],
+            [
+              "timeout s",
+              data.request_timeout_seconds == null
+                ? "ninguno"
+                : data.request_timeout_seconds,
+            ],
+            ["carga s", Number(data.preload.model_load_seconds).toFixed(2)],
+            ["contexto", data.context_limit_tokens],
+          ]);
+          const modelName = String(data.model || "");
+          if (!system.dataset.userEdited) {
+            if (/llama/i.test(modelName)) {
+              system.value =
+                "Eres el asistente de KVSLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. No pidas aclaraciones si ya se entiende.";
+            } else if (/minicpm/i.test(modelName) || !system.value.trim()) {
+              system.value =
+                "Eres el asistente de KVSLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. Si hay texto de referencia, responde solo con datos de ese texto.";
+            }
+          }
+        } catch (error) {
+          status.textContent = "motor no disponible";
+          status.className = "bad";
+        }
+      }
+
+      async function submit() {
+        let text = input.value.trim();
+        if (!text || send.disabled) return;
+        const max = Number(maxTokens.value);
+        if (!(max >= 1 && max <= 512)) {
+          addBubble("assistant", "max_tokens debe estar entre 1 y 512.", true);
+          return;
+        }
+        const cacheCommand = /^\s*guarda(?:\s+esto)?\s+en\s+cache\.?\s*/i;
+        if (text.length >= 1200 || cacheCommand.test(text)) {
+          const stored = text.replace(cacheCommand, "").trim();
+          if (stored.length >= 80) {
+            documentBox.value = stored;
+            addBubble(
+              "user",
+              "(documento → prefijo KV, " + stored.length + " caracteres)"
+            );
+            text =
+              "Confirma en una sola frase que puedes responder preguntas sobre el texto de referencia. No lo reescribas.";
+            input.value = "";
+          }
+        }
+        turns.push({ role: "user", content: text });
+        addBubble("user", text);
+        input.value = "";
+        const messages = [];
+        if (system.value.trim()) {
+          messages.push({ role: "system", content: system.value.trim() });
+        }
+        if (history.checked) {
+          messages.push(...turns);
+        } else {
+          messages.push({ role: "user", content: text });
+        }
+        abort = new AbortController();
+        send.disabled = true;
+        stop.hidden = false;
+        try {
+          const response = await fetch("/v1/chat/completions", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            signal: abort.signal,
+            body: JSON.stringify({
+              messages,
+              max_tokens: max,
+              enable_thinking: thinking.checked,
+              document: documentBox.value.trim() || null,
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error((data.error && data.error.message) || response.statusText);
+          }
+          const content = data.choices[0].message.content || "";
+          turns.push({ role: "assistant", content });
+          addBubble("assistant", content || "(vacío)");
+          const usage = data.usage || {};
+          const prefix = usage.prefix_cache || {};
+          fillDl(metrics, [
+            ["texto", content.slice(0, 48) || "—"],
+            ["prompt tok", usage.prompt_tokens],
+            ["salida tok", usage.completion_tokens],
+            ["prefill s", Number(usage.prefill_seconds || 0).toFixed(3)],
+            ["decode s", Number(usage.decode_seconds || 0).toFixed(3)],
+            ["latencia s", Number(usage.latency_seconds || 0).toFixed(3)],
+            ["prefijo hit", String(prefix.hit)],
+            ["prefijo tok", prefix.tokens],
+            ["copia bytes", prefix.copied_bytes],
+            ["inmutable", String(prefix.immutable)],
+            ["V omitidos", usage.certified_v_tokens_omitted],
+            ["KV sha256", String(usage.kv_sha256 || "").slice(0, 12)],
+          ]);
+        } catch (error) {
+          if (error.name === "AbortError") {
+            addBubble("assistant", "Petición cancelada.", true);
+          } else {
+            addBubble("assistant", String(error.message || error), true);
+          }
+        } finally {
+          send.disabled = false;
+          stop.hidden = true;
+          abort = null;
+          input.focus();
+        }
+      }
+
+      send.addEventListener("click", submit);
+      stop.addEventListener("click", () => abort && abort.abort());
+      clear.addEventListener("click", () => {
+        turns.length = 0;
+        log.replaceChildren();
+        metrics.replaceChildren();
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          submit();
+        }
+      });
+      ping();
+    </script>
+  </body>
+</html>

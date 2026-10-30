@@ -1,0 +1,30 @@
+# Project-local build boundary.
+# This deliberately overrides the machine-wide SHEILY/INICIO Cargo policy so
+# this project never writes build products to an external generated tree.
+[build]
+target-dir = "deploy/local-production/runtime/build-target"
+
+[net]
+retry = 3
+git-fetch-with-cli = true
+
+[registries.crates-io]
+protocol = "sparse"
+
+[profile.dev]
+incremental = true
+
+[profile.test]
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 0
+
+[profile.test.package."*"]
+opt-level = 0
+
+[env]
+CARGO_TARGET_DIR = { value = "deploy/local-production/runtime/build-target", force = true, relative = true }
+TMPDIR = { value = "deploy/local-production/runtime/tmp", force = true, relative = true }
+TMP = { value = "deploy/local-production/runtime/tmp", force = true, relative = true }
+TEMP = { value = "deploy/local-production/runtime/tmp", force = true, relative = true }

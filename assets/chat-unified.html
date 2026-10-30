@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>KVSLIM — CPU / iGPU / Auto</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b1119;--surface:#17212d;--line:#304253;--fg:#edf6ff;--muted:#a6b8cb;--a:#5ddcbb}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.48 system-ui,sans-serif}
+    main{max-width:1000px;margin:auto;padding:20px;display:grid;gap:15px}
+    h1{font-size:23px;margin:0}h2{font-size:15px;margin:0}
+    .sub{font-size:13px;color:var(--muted)}
+    .panel{border:1px solid var(--line);border-radius:16px;background:var(--surface);padding:16px}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    button,select,textarea,input{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:11px}
+    button{cursor:pointer}
+    button.active{background:#174c45;border-color:var(--a);font-weight:700}
+    button.primary{background:var(--a);color:#081c18;border:0;font-weight:750}
+    button:disabled{opacity:.55;cursor:wait}
+    button:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--a)}
+    #conversation{min-height:50vh;display:flex;flex-direction:column;gap:9px;margin:16px 0}
+    .msg{max-width:85%;padding:12px;border-radius:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+    .msg.user{align-self:flex-end;background:#23455b}
+    .msg.assistant{align-self:flex-start;background:#243544}
+    .msg.error{border:1px solid #cd7474;color:#ffd2d2}
+    textarea{width:100%;resize:vertical;min-height:78px}
+    #document{min-height:65px}
+    .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px}
+    .notice{border-left:3px solid #78b3dd;padding:9px 12px;color:var(--muted);font-size:13px}
+    label{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted)}
+    input[type=number]{width:82px}
+    input[type=checkbox]{width:18px;height:18px;accent-color:var(--a)}
+    #status,#routeinfo,#metrics{font-size:13px;color:var(--muted)}
+    .chip{display:inline-block;border:1px solid var(--line);padding:4px 8px;border-radius:8px}
+    .online{color:var(--a)}.offline{color:#e3a2a2}
+    details summary{cursor:pointer;color:var(--muted)}
+    .two{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+    @media(max-width:650px){main{padding:10px}.msg{max-width:97%}.two{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>KVSLIM <span style="color:var(--a)">Universal</span></h1>
+    <p class="sub">Un chat · CPU BF16 original · iGPU Rust/OpenCL con los componentes LOD canónicos · selección Auto</p>
+  </header>
+  <div class="panel">
+    <div class="controls" role="group" aria-label="Modo hardware">
+      <button type="button" data-mode="auto" class="active" aria-pressed="true">Auto</button>
+      <button type="button" data-mode="cpu" aria-pressed="false">CPU original</button>
+      <button type="button" data-mode="gpu" aria-pressed="false">iGPU AMD</button>
+    </div>
+    <p class="notice" id="mode-note">Auto prioriza CPU BF16/LOD; si falla, utiliza la iGPU solo cuando la petición es compatible.</p>
+    <div id="status">Comprobando los motores…</div>
+    <div id="conversation" role="log" aria-live="polite"></div>
+    <textarea id="input" placeholder="Escribe un mensaje…"></textarea>
+    <div class="row">
+      <button type="button" class="primary" id="send">Enviar</button>
+      <button type="button" id="cancel" hidden>Cancelar</button>
+      <button type="button" id="clear">Vaciar este modo</button>
+      <label>Tokens <input id="tokens" type="number" min="1" max="512" value="64"></label>
+    </div>
+    <p id="routeinfo"></p><p id="metrics"></p>
+  </div>
+  <div class="panel">
+    <div class="two">
+      <div><h2>CPU</h2><p class="sub" id="cpu-status">Comprobando…</p>
+        <p class="sub">KVSLIM original: 4 bits, LSH, ColdStore BF16, certificados y branch-and-bound.</p>
+      </div>
+      <div><h2>iGPU</h2><p class="sub" id="gpu-status">Comprobando…</p>
+        <p class="sub">Rust/OpenCL: reutiliza 4-bit/LSH, ColdStore y certificado final; la jerarquía regional CPU todavía no está completamente trasladada.</p>
+      </div>
+    </div>
+    <details>
+      <summary>Opciones avanzadas</summary>
+      <div class="row">
+        <label><input id="history" type="checkbox" checked> Enviar historial de este modo</label>
+        <label><input id="dense" type="checkbox"> CPU BF16 densa (sin LOD)</label>
+      </div>
+      <p class="sub">El modo denso solo puede usarse con CPU. Cada modo conserva su historial separado en esta pestaña.</p>
+      <label for="document">Documento para prefijo KV CPU</label>
+      <textarea id="document" placeholder="Solo CPU; no se envía a GPU"></textarea>
+    </details>
+    <p class="sub">Los modelos, los pesos y las cachés originales permanecen en sus procesos independientes. La GPU puede calcular logits distintos de la CPU por diferencias de aritmética y redondeo. No se exige igualdad bit a bit entre backends: el LOD GPU se valida contra GPU densa.</p>
+  </div>
+</main>
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const notes={
+    auto:"Auto prioriza CPU BF16/LOD; si falla, utiliza GPU únicamente cuando la solicitud sea compatible.",
+    cpu:"CPU original con su LOD completo, ColdStore y caché de prefijos. Nunca cambia a GPU silenciosamente.",
+    gpu:"iGPU AMD con BF16 + OpenCL, usando índice de 4 bits, LSH, ColdStore y certificado exact-mass originales. Su rama jerárquica CPU aún está pendiente."
+  };
+  const histories={auto:[],cpu:[],gpu:[]};
+  const bubbles={auto:[],cpu:[],gpu:[]};
+  let mode="auto",controller=null;
+  function add(role,content,error,source){
+    const record={role,content,error:!!error};
+    bubbles[source].push(record);
+    if(source===mode)draw(record);
+  }
+  function draw(record){
+    const e=document.createElement("div");
+    e.className="msg "+record.role+(record.error?" error":"");
+    e.textContent=record.content;
+    $("conversation").appendChild(e);e.scrollIntoView({block:"end"});
+  }
+  function select(next){
+    mode=next;$("conversation").replaceChildren();
+    for(const x of bubbles[mode]) draw(x);
+    $("mode-note").textContent=notes[mode];
+    document.querySelectorAll("[data-mode]").forEach(b=>{
+      const selected=b.dataset.mode===mode;
+      b.classList.toggle("active",selected);
+      b.setAttribute("aria-pressed",String(selected));
+    });
+    $("routeinfo").textContent="";$("metrics").textContent="";
+    $("dense").disabled=mode==="gpu";
+    $("document").disabled=mode==="gpu";
+  }
+  async function refresh(){
+    try{
+      const result=await fetch("/health",{cache:"no-store"});
+      const data=await result.json();
+      const c=!!data.cpu?.available,g=!!data.gpu?.available;
+      $("status").textContent="Motores activos: "+(c?"CPU ":"")+(g?"iGPU":"")+
+        (c||g?"":"ninguno")+" · Auto prefiere "+String(data.auto_prefer||"cpu").toUpperCase();
+      $("cpu-status").textContent=c?"CPU disponible":"CPU desconectada";
+      $("gpu-status").textContent=g?"GPU disponible":"GPU desconectada";
+      $("cpu-status").className=c?"online":"offline";
+      $("gpu-status").className=g?"online":"offline";
+    }catch(e){$("status").textContent="El router unificado no está disponible";}
+  }
+  async function submit(){
+    if(controller)return;
+    const input=$("input"),text=input.value.trim();
+    if(!text)return;
+    const maximum=Number($("tokens").value);
+    if(!Number.isInteger(maximum)||maximum<1||maximum>512){
+      add("assistant","max_tokens debe estar entre 1 y 512",true,mode);return;
+    }
+    const chosen=mode;
+    const native=mode==="cpu"&&$("dense").checked;
+    const documentText=mode==="gpu"?"":$("document").value.trim();
+    if(native&&documentText){
+      add("assistant","La referencia densa no acepta documentos de prefijo KV.",true,mode);return;
+    }
+    const requestMessages=$("history").checked?histories[chosen].slice():[];
+    requestMessages.push({role:"user",content:text});
+    histories[chosen].push({role:"user",content:text});
+    add("user",text,false,chosen);input.value="";
+    $("send").disabled=true;$("cancel").hidden=false;
+    controller=new AbortController();
+    $("metrics").textContent="Procesando consulta…";
+    try{
+      const body={hardware:chosen,messages:requestMessages,
+        max_tokens:maximum,temperature:0,stream:false,
+        native:native,enable_thinking:false};
+      if(documentText)body.document=documentText;
+      const resp=await fetch("/v1/chat/completions",{
+        method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify(body),signal:controller.signal
+      });
+      const parsed=await resp.json();
+      if(!resp.ok)throw Error(parsed?.error?.message||"HTTP "+resp.status);
+      const answer=String(parsed?.choices?.[0]?.message?.content||"");
+      histories[chosen].push({role:"assistant",content:answer});
+      add("assistant",answer||"(sin texto visible)",false,chosen);
+      if(mode===chosen){
+        const route=parsed.kvslim_route||{},usage=parsed.usage||{};
+        $("routeinfo").textContent="Motor real: "+String(route.selected||"desconocido").toUpperCase()+
+           (route.fallback?" (fallback automático)":"");
+        $("metrics").textContent="Entrada: "+String(usage.prompt_tokens??"—")+
+          " tokens · Salida: "+String(usage.completion_tokens??"—")+
+          " · Latencia: "+Number(usage.latency_seconds||0).toFixed(2)+" s"+
+          (usage.canonical_cpu_lod_components_active?" · GPU LOD canónico activo":"");
+      }
+    }catch(e){
+      add("assistant",e.name==="AbortError"?"Petición cancelada.":
+        "Error: "+String(e.message||e),true,chosen);
+    }finally{
+      controller=null;$("send").disabled=false;$("cancel").hidden=true;
+    }
+  }
+  document.querySelectorAll("[data-mode]").forEach(button=>
+    button.addEventListener("click",()=>select(button.dataset.mode)));
+  $("send").addEventListener("click",submit);
+  $("clear").addEventListener("click",()=>{
+    histories[mode]=[];bubbles[mode]=[];$("conversation").replaceChildren();
+    $("routeinfo").textContent="";$("metrics").textContent="";
+  });
+  $("cancel").addEventListener("click",()=>controller?.abort());
+  $("input").addEventListener("keydown",e=>{
+    if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();submit();}
+  });
+  select("auto");refresh();
+})();
+</script>
+</body>
+</html>
+

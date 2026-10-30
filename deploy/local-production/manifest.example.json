@@ -1,0 +1,44 @@
+{
+  "schema": "kvslim.local_release/v1",
+  "release_id": "REPLACE_WITH_RELEASE_ID",
+  "backend": "auto",
+  "host": "127.0.0.1",
+  "port": 8088,
+  "lod_enabled": false,
+  "coldstore_format": "TSKVPG04",
+  "binary": {
+    "path": "runtime/bin/kvslim-server",
+    "sha256": "REPLACE_WITH_SHA256"
+  },
+  "model": {
+    "relative_path": "runtime/models/REPLACE_WITH_MODEL_DIGEST",
+    "format": "declared-by-adapter",
+    "sha256": "REPLACE_WITH_SHA256",
+    "tokenizer_sha256": "REPLACE_WITH_SHA256"
+  },
+  "artifacts": [
+    {
+      "id": "runtime-adapter-example",
+      "kind": "runtime",
+      "source": "https://origen-autorizado/artefacto",
+      "destination": "runtimes/example/adapter.bin",
+      "version": "REPLACE_WITH_VERSION",
+      "sha256": "REPLACE_WITH_SHA256",
+      "required": false,
+      "license_confirmation_required": true
+    }
+  ],
+  "limits": {
+    "max_context_tokens": 8192,
+    "max_new_tokens": 512,
+    "request_timeout_secs": 300,
+    "max_in_flight": 1
+  },
+  "certification": {
+    "build": "not_run",
+    "tests": "not_run",
+    "model_parity": "not_run",
+    "load": "not_run",
+    "restart_recovery": "not_run"
+  }
+}

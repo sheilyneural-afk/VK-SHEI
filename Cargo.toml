@@ -1,0 +1,167 @@
+[package]
+name = "kvslim"
+version = "0.4.0"
+edition = "2024"
+
+[workspace]
+members = ["crates/kvslim-adapter-api"]
+resolver = "3"
+
+[lib]
+name = "kvslim"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "kvslim-worker"
+required-features = ["torch-backend"]
+path = "src/bin/kvslim-server.rs"
+
+[[bin]]
+name = "kvslim-long-context"
+required-features = ["torch-backend"]
+path = "src/bin/kvslim-long-context.rs"
+
+[[bin]]
+name = "kvslim-torch-chat"
+required-features = ["torch-backend"]
+path = "src/bin/kvslim-torch-chat.rs"
+
+[[bin]]
+name = "kvslim-native-parity"
+required-features = ["torch-backend"]
+path = "src/bin/kvslim-native-parity.rs"
+
+[features]
+# Native Rust functionality builds without PyTorch, LibTorch or a GPU.
+default = []
+# LibTorch CPU runtime and its HTTP/CLI binaries.
+torch-backend = ["dep:tch", "http-server"]
+# Native Rust/OpenCL backend: full BF16 LLM runtime (opencl_llm) plus the
+# isolated attention reference (opencl_backend). Requires an OpenCL device.
+accelerator-backend = ["dep:opencl3", "dep:safetensors", "dep:tokenizers", "http-server"]
+# HTTP-only Rust multiplexer; optional and does not load model weights.
+unified-router = ["dep:reqwest", "http-server"]
+# Release installer: opt-in because the core does not need network access.
+release-installer = ["dep:reqwest"]
+model-import = []
+model-catalog = ["dep:reqwest"]
+# Native gfx1103 hipBLASLt BF16 matrix backend; only enabled explicitly.
+hip-backend = ["accelerator-backend", "dep:libloading"]
+# HTTP binaries are opt-in; the storage/configuration core does not need them.
+http-server = ["dep:axum", "dep:tokio"]
+
+[[bin]]
+name = "kvslim-inspect"
+path = "src/bin/kvslim-inspect.rs"
+
+[[bin]]
+name = "kvslim-adapters"
+path = "src/bin/kvslim-adapters.rs"
+
+[[bin]]
+name = "kvslim-autoconfigure"
+path = "src/bin/kvslim-autoconfigure.rs"
+
+[[bin]]
+name = "kvslim-calibrate"
+path = "src/bin/kvslim-calibrate.rs"
+
+[[bin]]
+name = "kvslim-models"
+path = "src/bin/kvslim-models.rs"
+
+[[bin]]
+name = "kvslim-import-model"
+path = "src/bin/kvslim-import-model.rs"
+required-features = ["model-import"]
+
+[[bin]]
+name = "kvslim-catalog"
+path = "src/bin/kvslim-catalog.rs"
+required-features = ["model-catalog"]
+
+[[bin]]
+name = "kvslim-recommend"
+path = "src/bin/kvslim-recommend.rs"
+required-features = ["model-catalog"]
+
+[[bin]]
+name = "kvslim-auth"
+path = "src/bin/kvslim-auth.rs"
+required-features = ["model-catalog"]
+
+[[bin]]
+name = "kvslim-download-model"
+path = "src/bin/kvslim-download-model.rs"
+required-features = ["model-catalog"]
+
+[[bin]]
+name = "kvslim-validate-model"
+path = "src/bin/kvslim-validate-model.rs"
+
+[[bin]]
+name = "kvslim-igpu-bench"
+path = "src/bin/kvslim-igpu-bench.rs"
+required-features = ["accelerator-backend"]
+
+[[bin]]
+name = "kvslim-accelerator-cli"
+path = "src/bin/kvslim-opencl-llm.rs"
+required-features = ["accelerator-backend"]
+
+[[bin]]
+name = "kvslim-runtime-compare"
+path = "src/bin/kvslim-compare-opencl.rs"
+required-features = ["accelerator-backend", "torch-backend"]
+
+[[bin]]
+name = "kvslim-accelerator-worker"
+path = "src/bin/kvslim-opencl-server.rs"
+required-features = ["accelerator-backend"]
+
+[[bin]]
+name = "kvslim-server"
+path = "src/bin/kvslim-gateway.rs"
+required-features = ["unified-router"]
+
+[[bin]]
+name = "kvslim-unified-server"
+path = "src/bin/kvslim-unified-server.rs"
+required-features = ["unified-router"]
+
+[[bin]]
+name = "kvslim-install-release"
+path = "src/bin/kvslim-install-release.rs"
+required-features = ["release-installer"]
+
+[[bin]]
+name = "kvslim-document-ask"
+path = "src/bin/kvslim-document-ask.rs"
+required-features = ["torch-backend"]
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", optional = true }
+half = { version = "2", features = ["bytemuck", "serde"] }
+memmap2 = "0.9"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+safetensors = { version = "0.3.3", optional = true }
+tokenizers = { version = "0.22", optional = true }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"], optional = true }
+kvslim-adapter-api = { path = "crates/kvslim-adapter-api" }
+tch = { version = "0.18", optional = true }
+opencl3 = { version = "0.12.4", optional = true }
+libloading = {version = "0.8.9", optional = true}
+reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
+hex = "0.4"
+
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
