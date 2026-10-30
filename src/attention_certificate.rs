@@ -208,6 +208,98 @@ pub fn select_v_by_exact_contribution(
     Ok((positions, bounds))
 }
 
+/// Per-token form of [`select_v_by_exact_contribution`].
+///
+/// `token_value_abs_max[head][token]` must be an upper bound of `|V|` for
+/// that token in the KV head serving `head` (for example the maximum of its
+/// region or page). Omitting a set `O` changes head `h` by at most
+/// `sum_{t in O} p_t * max|V_t|`, which is never larger than the global
+/// `fraction(O) * max|V|` bound, so the same tolerance admits more omission
+/// whenever the history mixes large and small values. Tokens are retained
+/// in decreasing order of `p_t * max|V_t|` until the omitted remainder fits
+/// the tolerance. Returns the union of retained positions and, per head, the
+/// bound of the omitted set computed directly (not by subtraction).
+pub fn select_v_by_token_contribution(
+    scores_by_head: &[Vec<f64>],
+    token_value_abs_max: &[Vec<f64>],
+    tolerance: f64,
+) -> Result<(Vec<usize>, Vec<f64>)> {
+    ensure!(
+        !scores_by_head.is_empty() && scores_by_head.len() == token_value_abs_max.len(),
+        "geometría de contribución V incompatible"
+    );
+    ensure!(
+        tolerance.is_finite() && tolerance >= 0.0,
+        "tolerancia V inválida"
+    );
+    let tokens = scores_by_head[0].len();
+    ensure!(tokens > 0, "contribución V sin tokens");
+    ensure!(
+        scores_by_head
+            .iter()
+            .all(|scores| scores.len() == tokens && scores.iter().all(|score| score.is_finite()))
+            && token_value_abs_max.iter().all(|maxima| {
+                maxima.len() == tokens
+                    && maxima
+                        .iter()
+                        .all(|value| value.is_finite() && *value >= 0.0)
+            }),
+        "contribución V no finita"
+    );
+    let mut selected = BTreeSet::new();
+    let mut per_head_weights = Vec::with_capacity(scores_by_head.len());
+    for (scores, maxima) in scores_by_head.iter().zip(token_value_abs_max) {
+        let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let weights = scores
+            .iter()
+            .map(|score| (*score - maximum).exp())
+            .collect::<Vec<_>>();
+        let total = weights.iter().sum::<f64>();
+        let contributions = weights
+            .iter()
+            .zip(maxima)
+            .map(|(weight, value_max)| weight * value_max)
+            .collect::<Vec<_>>();
+        let mut ranked = contributions
+            .iter()
+            .copied()
+            .enumerate()
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by(|left, right| right.1.total_cmp(&left.1));
+        // Suffix sums of the ranked contributions: omitted[i] is what is
+        // left out when the first i ranked tokens are retained.
+        let mut omitted_after = vec![0.0_f64; ranked.len() + 1];
+        for index in (0..ranked.len()).rev() {
+            omitted_after[index] = omitted_after[index + 1] + ranked[index].1;
+        }
+        let keep = (0..=ranked.len())
+            .find(|&kept| omitted_after[kept] / total <= tolerance)
+            .unwrap_or(ranked.len());
+        // Always keep the dominant token so the result is never empty.
+        for (token, _) in ranked.iter().take(keep.max(1)) {
+            selected.insert(*token);
+        }
+        per_head_weights.push((weights, total));
+    }
+    let positions = selected.into_iter().collect::<Vec<_>>();
+    let selected_set = positions.iter().copied().collect::<BTreeSet<_>>();
+    let bounds = per_head_weights
+        .iter()
+        .zip(token_value_abs_max)
+        .map(|((weights, total), maxima)| {
+            weights
+                .iter()
+                .zip(maxima)
+                .enumerate()
+                .filter(|(token, _)| !selected_set.contains(token))
+                .map(|(_, (weight, value_max))| weight * value_max)
+                .sum::<f64>()
+                / total
+        })
+        .collect();
+    Ok((positions, bounds))
+}
+
 /// Proves that every real value in `center ± per_head_error` rounds to the
 /// same finite BF16 value as `center`. The interval must stay strictly inside
 /// the two round-to-nearest midpoints; strictness deliberately rejects exact
@@ -383,6 +475,44 @@ mod tests {
         // The same bound certifies when the unrounded value is far from any
         // midpoint.
         assert!(bf16_rounding_cells_contain_components(&[1.002], &[3e-4]));
+    }
+
+    #[test]
+    fn token_contribution_bound_is_never_looser_and_omits_more() {
+        // One large-|V| token with little mass and many small-|V| tokens.
+        let scores = vec![vec![4.0, 0.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0]];
+        let per_token = vec![vec![1.0, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 8.0]];
+        let global = vec![8.0];
+        let tolerance = 0.05;
+        let (global_kept, global_bounds) =
+            select_v_by_exact_contribution(&scores, &global, tolerance).unwrap();
+        let (token_kept, token_bounds) =
+            select_v_by_token_contribution(&scores, &per_token, tolerance).unwrap();
+        assert!(certified(&token_bounds, tolerance));
+        assert!(certified(&global_bounds, tolerance));
+        assert!(token_kept.len() < global_kept.len());
+        // The large-|V| token cannot be omitted, the small ones can.
+        assert!(token_kept.contains(&7) && token_kept.contains(&0));
+        // Exact bound check against an explicit recomputation.
+        let maximum = 4.0_f64;
+        let weights = scores[0]
+            .iter()
+            .map(|s| (s - maximum).exp())
+            .collect::<Vec<_>>();
+        let total = weights.iter().sum::<f64>();
+        let omitted = (0..8)
+            .filter(|token| !token_kept.contains(token))
+            .map(|token| weights[token] * per_token[0][token])
+            .sum::<f64>()
+            / total;
+        assert!((omitted - token_bounds[0]).abs() <= 1e-15);
+        // With per-token maxima equal to the global maximum the bound is the
+        // same as the global one for the same selection.
+        let uniform = vec![vec![8.0; 8]];
+        let (_, uniform_bounds) =
+            select_v_by_token_contribution(&scores, &uniform, tolerance).unwrap();
+        assert!(uniform_bounds[0] <= tolerance);
+        assert!(select_v_by_token_contribution(&scores, &[vec![1.0; 7]], tolerance).is_err());
     }
 
     #[test]

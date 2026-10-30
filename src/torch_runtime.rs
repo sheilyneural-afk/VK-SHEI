@@ -21,7 +21,7 @@ use crate::adaptive_extent::{AxisPolicy, ParallelContextAxis};
 #[cfg(test)]
 use crate::attention_certificate::omitted_error_bound;
 use crate::attention_certificate::{
-    bf16_rounding_cell_contains, certified, select_by_exact_mass, select_v_by_exact_contribution,
+    bf16_rounding_cell_contains, certified, select_by_exact_mass, select_v_by_token_contribution,
 };
 use crate::cold_store::{ColdStore, ColdStoreStats, PageGeometry, PreparedPage};
 use crate::conversion_worker::{Bf16PageJob, ConversionStats, ConversionWorker, PageShape};
@@ -2767,14 +2767,65 @@ impl TerrsvusionKvCache {
             self.hierarchy_k_tokens_skippable =
                 self.hierarchy_k_tokens_skippable.saturating_add(skippable);
         }
-        let max_per_query = (0..32)
-            .map(|head| max_per_kv[head / (32 / 8)])
+        // Per-token |V| upper bounds per KV head: the maximum of the token's
+        // region when the page's regions cover it completely, otherwise the
+        // page maximum, and the tail maximum for tail tokens. Each is a
+        // bound for that token, so the omission bound stays sound while a
+        // few large-|V| tokens no longer inflate the bound of every token.
+        let mut token_max_by_kv = (0..8)
+            .map(|_| Vec::with_capacity(cursor))
+            .collect::<Vec<Vec<f64>>>();
+        for page in pages {
+            let covered = page
+                .certificate
+                .regions
+                .iter()
+                .map(|region| region.local_end.saturating_sub(region.local_start))
+                .sum::<usize>()
+                == page.tokens
+                && page
+                    .certificate
+                    .regions
+                    .iter()
+                    .all(|region| region.value_abs_max_by_kv_head.len() == 8);
+            if covered {
+                let mut regions = page.certificate.regions.iter().collect::<Vec<_>>();
+                regions.sort_by_key(|region| region.local_start);
+                for region in regions {
+                    for (kv_head, maxima) in token_max_by_kv.iter_mut().enumerate() {
+                        let value = f64::from(region.value_abs_max_by_kv_head[kv_head]);
+                        maxima.extend(std::iter::repeat_n(
+                            value,
+                            region.local_end - region.local_start,
+                        ));
+                    }
+                }
+            } else {
+                for (kv_head, maxima) in token_max_by_kv.iter_mut().enumerate() {
+                    let value = f64::from(page.certificate.value_abs_max_by_kv_head[kv_head]);
+                    maxima.extend(std::iter::repeat_n(value, page.tokens));
+                }
+            }
+        }
+        for (kv_head, maxima) in token_max_by_kv.iter_mut().enumerate() {
+            let remaining = cursor.saturating_sub(maxima.len());
+            maxima.extend(std::iter::repeat_n(tail_value_max[kv_head], remaining));
+        }
+        if token_max_by_kv
+            .iter()
+            .zip(&max_per_kv)
+            .any(|(maxima, global)| maxima.len() != cursor || maxima.iter().any(|v| v > global))
+        {
+            return Ok(None);
+        }
+        let token_max_per_query = (0..32)
+            .map(|head| token_max_by_kv[head / (32 / 8)].clone())
             .collect::<Vec<_>>();
         // Reserve half the requested budget for differences between explicit
         // FP32 score/softmax planning and LibTorch BF16 SDPA.
         let allowed = tolerance * 0.5;
         let (chosen, bounds) =
-            select_v_by_exact_contribution(&scores_by_head, &max_per_query, allowed)?;
+            select_v_by_token_contribution(&scores_by_head, &token_max_per_query, allowed)?;
         ensure!(
             certified(&bounds, allowed),
             "Llama exact-mass certificate failed under conservative threshold"
