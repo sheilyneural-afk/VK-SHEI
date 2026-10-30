@@ -65,8 +65,16 @@ impl ModelAdapter for OpenClModelAdapter {
             .and_then(Value::as_u64)
             .context("model configuration must declare a context limit")?
             as usize;
-        let runtime = OpenClLlm::load(model_dir, max_tokens, WeightMode::Resident)
+        let mut runtime = OpenClLlm::load(model_dir, max_tokens, WeightMode::Resident)
             .context("load local accelerator model adapter")?;
+        let prefill_batch = config
+            .get("kvslim_prefill_batch_tokens")
+            .and_then(Value::as_u64)
+            .map(usize::try_from)
+            .transpose()
+            .context("kvslim_prefill_batch_tokens fuera de rango")?
+            .unwrap_or_else(|| max_tokens.min(128).max(1));
+        runtime.set_batch_prefill_tokens(Some(prefill_batch))?;
         self.model_dir = Some(model_dir.to_owned());
         self.runtime = Some(runtime);
         self.last_logits = None;
@@ -78,13 +86,30 @@ impl ModelAdapter for OpenClModelAdapter {
             .runtime
             .as_mut()
             .context("local accelerator adapter is not loaded")?;
-        for (index, &token) in input.iter().enumerate() {
-            let step = runtime.forward_token(token, index + 1 == input.len())?;
-            if let Some(step) = step.logits {
-                self.last_logits = Some(step);
+        ensure!(!input.is_empty(), "accelerator prefill vacío");
+        if runtime.position() == 0 {
+            let generation = runtime.generate(input, 1, true)?;
+            self.last_logits = generation.steps.last().and_then(|step| step.logits.clone());
+            Ok(json!({
+                "tokens": input.len(),
+                "position": runtime.position(),
+                "mode": "batched-causal",
+                "batch_tokens": generation.gpu_prefill_batch_tokens,
+                "prefill_seconds": generation.prefill_seconds,
+            }))
+        } else {
+            for (index, &token) in input.iter().enumerate() {
+                let step = runtime.forward_token(token, index + 1 == input.len())?;
+                if let Some(step) = step.logits {
+                    self.last_logits = Some(step);
+                }
             }
+            Ok(json!({
+                "tokens": input.len(),
+                "position": runtime.position(),
+                "mode": "incremental-dense",
+            }))
         }
-        Ok(json!({ "tokens": input.len(), "position": runtime.position() }))
     }
 
     fn decode(&mut self, token_id: u32) -> Result<u32> {

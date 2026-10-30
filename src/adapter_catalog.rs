@@ -133,7 +133,7 @@ pub fn compiled_adapters() -> Vec<AdapterDescriptor> {
         id: "native-cpu-runtime".to_owned(),
         backend: "cpu".to_owned(),
         compute: ComputeKind::Cpu,
-        priority: 200,
+        priority: 100,
         activation: ActivationPolicy::Default,
         // This is an architecture registry, not a claim that arbitrary
         // operators are compatible. inspect() remains the final authority.
@@ -145,8 +145,8 @@ pub fn compiled_adapters() -> Vec<AdapterDescriptor> {
         id: "libtorch-cpu-runtime".to_owned(),
         backend: "cpu".to_owned(),
         compute: ComputeKind::Cpu,
-        priority: 100,
-        activation: ActivationPolicy::Explicit,
+        priority: 200,
+        activation: ActivationPolicy::Default,
         supported_model_types: Vec::new(),
     });
 
@@ -155,8 +155,8 @@ pub fn compiled_adapters() -> Vec<AdapterDescriptor> {
         id: "accelerator-runtime".to_owned(),
         backend: "accelerator".to_owned(),
         compute: ComputeKind::Any,
-        priority: 100,
-        activation: ActivationPolicy::Explicit,
+        priority: 300,
+        activation: ActivationPolicy::Default,
         // Do not authorize a family from a hard-coded label. ModelAdapter::inspect
         // is the runtime authority for the actual configuration and operators.
         supported_model_types: Vec::new(),
