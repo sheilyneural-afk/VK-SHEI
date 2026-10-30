@@ -1,0 +1,47 @@
+    Blocking waiting for file lock on build directory
+   Compiling terrsvusion v0.4.0 (/home/yo/Escritorio/terrsvusion-v3-rust-20261028-231043./terravision-v3)
+    Finished `release` profile [optimized] target(s) in 41.47s
+     Running unittests src/lib.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/release/deps/terrsvusion-d512424daf71c478)
+
+running 1 test
+GPU_PREFILL_BATCH_PARITY batch=64 prompt_tokens=375 generated=16 prefill_s=2.191339 batch_count=6 all_GPU_BF16_logits_KV_exact=true
+GPU_PREFILL_BATCH_PARITY batch=96 prompt_tokens=375 generated=16 prefill_s=2.078881 batch_count=4 all_GPU_BF16_logits_KV_exact=true
+GPU_PREFILL_BATCH_PARITY batch=192 prompt_tokens=375 generated=16 prefill_s=2.039936 batch_count=2 all_GPU_BF16_logits_KV_exact=true
+GPU_PREFILL_BATCH_PARITY batch=256 prompt_tokens=375 generated=16 prefill_s=1.989526 batch_count=2 all_GPU_BF16_logits_KV_exact=true
+GPU_PREFILL_BATCH_REAL size=128 prefill_s=1.968630 total_s=3.110308 batches=3 identical_ids=true
+GPU_PREFILL_BATCH_REAL size=192 prefill_s=2.007145 total_s=3.066667 batches=2 identical_ids=true
+GPU_PREFILL_BATCH_REAL size=256 prefill_s=2.405921 total_s=4.570696 batches=2 identical_ids=true
+GPU_PREFILL_BATCH_REAL size=256 prefill_s=2.214653 total_s=3.761380 batches=2 identical_ids=true
+GPU_PREFILL_BATCH_REAL size=192 prefill_s=2.241104 total_s=3.807698 batches=2 identical_ids=true
+GPU_PREFILL_BATCH_REAL size=128 prefill_s=2.305410 total_s=3.850907 batches=3 identical_ids=true
+GPU_PREFILL_BATCH_RELEASE_SUMMARY batch=128 median_prefill_s=2.137020 median_total_s=3.480608 samples=2 original_BF16_KV_logical_SHA_unchanged=true
+GPU_PREFILL_BATCH_RELEASE_SUMMARY batch=192 median_prefill_s=2.124124 median_total_s=3.437183 samples=2 original_BF16_KV_logical_SHA_unchanged=true
+GPU_PREFILL_BATCH_RELEASE_SUMMARY batch=256 median_prefill_s=2.310287 median_total_s=4.166038 samples=2 original_BF16_KV_logical_SHA_unchanged=true
+test opencl_llm::tests::gpu_actual_prefill_64_128_192_256_bit_exact_full_logits_kv_and_speed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 44.56s
+
+     Running unittests src/bin/terrsvusion-igpu-bench.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/release/deps/terrsvusion_igpu_bench-53d194895ba31178)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-inspect.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/release/deps/terrsvusion_inspect-7ad5d14d9b68733e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-llm.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/release/deps/terrsvusion_opencl_llm-8878e310aad60678)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/bin/terrsvusion-opencl-server.rs (/home/yo/.cache/sheily-inicio/generated/cargo-target/release/deps/terrsvusion_opencl_server-3e769a70ee710789)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+

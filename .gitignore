@@ -1,0 +1,17 @@
+# Artefactos de compilación de Cargo
+/target/
+
+# Almacenes y cachés generados en tiempo de ejecución
+.terrsvusion-prefix-cache/
+
+# Parches y temporales
+*.patch
+*.orig
+*.rej
+*.swp
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
