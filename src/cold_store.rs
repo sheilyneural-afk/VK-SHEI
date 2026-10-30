@@ -7,7 +7,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, ErrorKind, Write};
+#[cfg(not(unix))]
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -859,6 +861,14 @@ fn verify_mapped_record(mapping: &[u8], meta: &PageMeta) -> io::Result<()> {
     Ok(())
 }
 
+/// Positional read. On Unix this is a single `pread` loop on the shared
+/// descriptor; elsewhere it falls back to a duplicated descriptor + seek.
+#[cfg(unix)]
+fn read_exact_at(file: &File, offset: u64, output: &mut [u8]) -> io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, output, offset)
+}
+
+#[cfg(not(unix))]
 fn read_exact_at(file: &File, offset: u64, output: &mut [u8]) -> io::Result<()> {
     let mut reader = file.try_clone()?;
     reader.seek(SeekFrom::Start(offset))?;
@@ -917,6 +927,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Seek, SeekFrom};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_path(name: &str) -> PathBuf {
