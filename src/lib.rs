@@ -20,6 +20,7 @@ pub mod engine;
 pub mod inference_worker;
 #[cfg(feature = "torch-backend")]
 pub mod prefill_tch;
+pub mod session_coordinator;
 pub mod session_store;
 pub mod shadow_metrics;
 #[cfg(feature = "torch-backend")]
