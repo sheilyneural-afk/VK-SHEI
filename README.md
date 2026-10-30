@@ -66,6 +66,20 @@ La evidencia de cada punto está en [docs/](docs/README.md).
   de `74a553e`, que libera las páginas del mmap al copiar cada peso, y de
   `b51e3b2`, que añade el K/V residente. No se han vuelto a medir.
 
+## Cambios de corrección posteriores a la auditoría
+
+- El servidor CPU conserva literalmente los mensajes de usuario y sus roles;
+  solo añade el mensaje de sistema cuando no se proporcionó uno.
+- La ruta OpenCL toma los EOS del `generation_config.json` del checkpoint
+  (o de `config.json` si no existe), no de IDs exclusivos de MiniCPM5.
+- El hash del KV lógico incluye todas las cabezas de modelos GQA con 8 KV.
+- El servidor OpenCL arranca con KV BF16 denso y solo activa LOD con
+  `--gpu-lod`, `--lod-epsilon` o `--lod-stage`. También rechaza checkpoints
+  ajenos a la geometría MiniCPM5 de su plantilla de chat.
+
+La integridad del almacenamiento BF16 y las pruebas de regresión se mantienen.
+Las opciones LOD siguen siendo experimentales, sin promesa de aceleración.
+
 ## Compilación
 
 Necesitas Rust estable con soporte para la edición 2024 (comprobado con
@@ -124,9 +138,9 @@ reales están marcadas `#[ignore]`. Usan `TERRSVUSION_OPENCL_DEVICE`,
 | `terrsvusion-igpu-bench` | `opencl-backend` | benchmark de atención aislada |
 | `terrsvusion-unified-server` | `unified-router` | selector CPU/GPU/Auto, puerto 8288 por defecto |
 
-El selector busca la CPU en `http://127.0.0.1:8099` y la GPU en
-`http://127.0.0.1:8188`. Arranca el servidor CPU con `--port 8099` o pasa
-`--cpu-url`.
+El selector busca la CPU en `http://127.0.0.1:8088` y la GPU en
+`http://127.0.0.1:8188`, coincidiendo con los puertos por defecto de ambos
+servidores. Usa `--cpu-url` o `--gpu-url` para configuraciones distintas.
 
 ## Estructura
 

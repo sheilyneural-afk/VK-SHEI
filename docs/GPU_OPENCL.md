@@ -36,7 +36,7 @@ Rutas: `GET /` (UI `assets/chat-gpu.html`), `/health`, `/ready`, `/v1/models`,
 | Parámetro | Valor |
 |---|---|
 | Pesos | residentes en la GPU (`--stream-weights` los sube por capa) |
-| Modo | LOD canónico con epsilon=0 y etapas de 64 tokens (`--lod-epsilon`, `--lod-stage`, `--lod-cold-dir`); `--gpu-dense-kv` usa la ruta densa |
+| Modo | **KV BF16 denso** por defecto. `--gpu-lod` o las opciones `--lod-epsilon`, `--lod-stage`, `--lod-cold-dir` activan la ruta LOD experimental; `--gpu-dense-kv` la desactiva. |
 | Lote de prefill | 128 (`--gpu-prefill-batch`, de 1 a 512; `--gpu-prefill-legacy` lo hace token a token) |
 | Contexto máximo | 2048 tokens (`--max-context-tokens`, de 1 a 32768) |
 | Tiempo límite | 300 s (`--timeout-secs`) |
@@ -94,7 +94,7 @@ Tests físicos relacionados en `opencl_llm.rs`:
 ## Selector unificado (`terrsvusion-unified-server`)
 
 Necesita la feature `unified-router`. Sirve `assets/chat-unified.html` y
-reenvía cada petición a la CPU (por defecto `http://127.0.0.1:8099`), a la GPU
+reenvía cada petición a la CPU (por defecto `http://127.0.0.1:8088`), a la GPU
 (por defecto `http://127.0.0.1:8188`) o al backend que elija en modo Auto.
 Escucha en el puerto 8288 por defecto.
 

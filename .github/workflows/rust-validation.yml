@@ -1,0 +1,21 @@
+name: Rust validation
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core-and-opencl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y ocl-icd-opencl-dev pocl-opencl-icd
+      - run: cargo fmt --all -- --check
+      - run: cargo test --lib
+      - run: cargo test --lib --features opencl-backend
+      - run: cargo check --all-targets --features opencl-backend

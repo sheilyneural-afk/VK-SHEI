@@ -74,6 +74,15 @@ Estado medido:
   **anterior** a `ee6cf6a`, `7f4fe0f` y `6f02a66`, y no se ha repetido.
   Evidencia: [EVIDENCIA_LLAMA_SDPA_V_CERO_20261030.json](evidencia/cpu/EVIDENCIA_LLAMA_SDPA_V_CERO_20261030.json).
 
+Los mensajes de usuario y asistente se envían al tokenizer con su contenido
+original, sin pasar por normalizaciones, traducciones, ampliaciones de
+preguntas ni reescrituras de contenido. La ruta puede añadir un mensaje de
+sistema por defecto cuando la conversación no especifica ninguno.
+
+El digest de comparación del KV BF16 recorre todas las cabezas y dimensiones,
+incluidas las 8 cabezas KV de Llama 3.1 8B. Es una métrica diagnóstica,
+no una prueba automática de igualdad entre bibliotecas.
+
 ## Servidor `terrsvusion-server`
 
 ```bash

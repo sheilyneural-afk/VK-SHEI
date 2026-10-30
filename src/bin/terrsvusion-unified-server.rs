@@ -26,7 +26,7 @@ const INDEX: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/chat-unified.html"
 ));
-const CPU_URL: &str = "http://127.0.0.1:8099";
+const CPU_URL: &str = "http://127.0.0.1:8088";
 const GPU_URL: &str = "http://127.0.0.1:8188";
 const CPU_MODEL: &str = "terrsvusion-rust";
 const DENSE_MODEL: &str = "minicpm-dense-bf16";
@@ -505,7 +505,7 @@ async fn main() -> Result<()> {
             "--help" | "-h" => {
                 println!("Terrsvusion unified Rust CPU/iGPU router");
                 println!(
-                    "--host 127.0.0.1 --port 8288 --cpu-url http://127.0.0.1:8099 --gpu-url http://127.0.0.1:8188 --auto-prefer cpu|gpu --timeout-secs 300"
+                    "--host 127.0.0.1 --port 8288 --cpu-url http://127.0.0.1:8088 --gpu-url http://127.0.0.1:8188 --auto-prefer cpu|gpu --timeout-secs 300"
                 );
                 return Ok(());
             }
@@ -634,7 +634,7 @@ mod tests {
     }
     #[test]
     fn forbids_remote_upstreams() {
-        assert!(parse_upstream("http://127.0.0.1:8099").is_ok());
+        assert!(parse_upstream(CPU_URL).is_ok());
         assert!(parse_upstream("http://8.8.8.8:8099").is_err());
         assert!(parse_upstream("http://localhost:8188/x").is_err());
     }

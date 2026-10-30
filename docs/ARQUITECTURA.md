@@ -83,6 +83,14 @@ En el servicio HTTP la tolerancia no es configurable: la API rechaza
 - Los servidores escuchan en `127.0.0.1` por defecto y no tienen
   autenticación.
 
+## Fidelidad de entrada y parada de generación
+
+Los mensajes de usuario son inmutables hasta su serialización mediante la
+plantilla. El runtime OpenCL lee los identificadores EOS del checkpoint y
+no utiliza IDs exclusivos de MiniCPM5 para Llama 3.1. El servidor GPU tiene
+plantilla MiniCPM5 fija, por lo que valida la geometría y rechaza otros modelos.
+La decodificación GPU densa es la opción por defecto; LOD es explícita.
+
 ## Variables de entorno
 
 | Variable | Uso |

@@ -1271,17 +1271,23 @@ impl TerrsvusionKvCache {
         let mut digest = Sha256::new();
         digest.update(b"terrsvusion-dense-kv-state-v1");
         digest.update((self.sequence_tokens as u64).to_le_bytes());
+        let heads = usize::try_from(self.kv_heads).context("invalid KV heads for digest")?;
+        let dimension = usize::try_from(self.head_dim).context("invalid KV head dimension")?;
+        ensure!(
+            heads > 0 && dimension > 0,
+            "digest with invalid KV geometry"
+        );
         for layer_index in 0..self.layers.len() {
             let pages = self.layers[layer_index].pages.clone();
             let tail = self.layers[layer_index]
                 .tail
                 .as_ref()
                 .map(|(key, value)| (key.shallow_clone(), value.shallow_clone()));
-            // A contiguous [1, 2, tokens, 128] tensor stores every token of
-            // head 0 before head 1. Reproduce that logical layout across page
-            // boundaries instead of hashing page-major physical records.
+            // The logical [1, kv_heads, tokens, head_dim] cache stores
+            // head-major tokens. Cover every KV head and dimension, including
+            // Llama 3.1 8B's eight heads, across physical page boundaries.
             for values in [false, true] {
-                for head in 0..2 {
+                for head in 0..heads {
                     for page in &pages {
                         match &page.storage {
                             PageStorage::Cold {
@@ -1293,7 +1299,12 @@ impl TerrsvusionKvCache {
                                 } else {
                                     self.read_cold_key(*exact_id, *immutable)?
                                 };
-                                let head_bytes = page.tokens * 128 * 2;
+                                let head_bytes = page.tokens * dimension * 2;
+                                let expected = heads * head_bytes;
+                                ensure!(
+                                    bytes.len() == expected,
+                                    "cold KV digest geometry mismatch in layer {layer_index}"
+                                );
                                 let start = head * head_bytes;
                                 digest.update(&bytes[start..start + head_bytes]);
                             }
@@ -5823,147 +5834,6 @@ impl TorchModelRuntime {
         }
     }
 
-    fn sentence_case_if_shouting(text: &str) -> String {
-        let letters = text
-            .chars()
-            .filter(|character| character.is_alphabetic())
-            .collect::<Vec<_>>();
-        let words = text
-            .split_whitespace()
-            .filter(|word| word.chars().any(|character| character.is_alphabetic()))
-            .count();
-        if words < 2
-            || letters.len() < 8
-            || letters.iter().any(|character| character.is_lowercase())
-        {
-            return text.to_owned();
-        }
-        let mut out = String::with_capacity(text.len());
-        let mut capitalize = true;
-        for character in text.chars() {
-            if character.is_alphabetic() {
-                if capitalize {
-                    out.extend(character.to_uppercase());
-                    capitalize = false;
-                } else {
-                    out.extend(character.to_lowercase());
-                }
-            } else {
-                out.push(character);
-            }
-        }
-        out
-    }
-
-    fn spanish_question_word(word: &str) -> Option<&'static str> {
-        match word.to_lowercase().as_str() {
-            "que" | "qué" => Some("Qué"),
-            "cual" | "cuál" => Some("Cuál"),
-            "cuales" | "cuáles" => Some("Cuáles"),
-            "quien" | "quién" => Some("Quién"),
-            "quienes" | "quiénes" => Some("Quiénes"),
-            "como" | "cómo" => Some("Cómo"),
-            "donde" | "dónde" => Some("Dónde"),
-            "cuando" | "cuándo" => Some("Cuándo"),
-            "cuanto" | "cuánto" | "cuanta" | "cuánta" => Some("Cuánto"),
-            "cuantos" | "cuántos" | "cuantas" | "cuántas" => Some("Cuántos"),
-            _ => None,
-        }
-    }
-
-    fn spanish_question_if_informal(text: &str) -> String {
-        let trimmed = text.trim();
-        if trimmed.is_empty() || trimmed.starts_with('¿') {
-            return text.to_owned();
-        }
-        let without_mark = trimmed.trim_end_matches('?').trim_end();
-        let mut parts = without_mark.split_whitespace();
-        let Some(first) = parts.next() else {
-            return text.to_owned();
-        };
-        let second = parts.next();
-        let (replacement, skip_second) = if first.eq_ignore_ascii_case("por")
-            && second.is_some_and(|word| matches!(word.to_lowercase().as_str(), "que" | "qué"))
-        {
-            ("Por qué", true)
-        } else if first.eq_ignore_ascii_case("a")
-            && second.is_some_and(|word| matches!(word.to_lowercase().as_str(), "que" | "qué"))
-        {
-            ("A qué", true)
-        } else if let Some(word) = Self::spanish_question_word(first) {
-            (word, false)
-        } else {
-            return text.to_owned();
-        };
-        let rest = if skip_second {
-            without_mark
-                .split_whitespace()
-                .skip(2)
-                .collect::<Vec<_>>()
-                .join(" ")
-        } else {
-            without_mark
-                .split_whitespace()
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        if rest.is_empty() {
-            format!("¿{replacement}?")
-        } else {
-            format!("¿{replacement} {rest}?")
-        }
-    }
-
-    fn expand_definition_question(text: &str) -> String {
-        let trimmed = text.trim();
-        let topic = trimmed
-            .strip_prefix("¿Qué es ")
-            .or_else(|| trimmed.strip_prefix("¿Qué son "));
-        let Some(topic) = topic else {
-            return text.to_owned();
-        };
-        let topic = topic.trim_end_matches('?').trim();
-        if topic.is_empty() {
-            return text.to_owned();
-        }
-        format!(
-            "Explica de forma concreta qué es {topic}. Da una definición; no repitas la pregunta."
-        )
-    }
-
-    fn expand_short_greeting(text: &str) -> String {
-        let compact = text
-            .trim()
-            .trim_matches(|character: char| matches!(character, '!' | '.' | '¡' | '?' | '¿'))
-            .trim()
-            .to_lowercase();
-        if matches!(
-            compact.as_str(),
-            "hola"
-                | "hello"
-                | "hi"
-                | "hey"
-                | "buenas"
-                | "buenos dias"
-                | "buenas tardes"
-                | "buenas noches"
-        ) {
-            "Saluda en una frase corta y espera la siguiente pregunta.".to_owned()
-        } else {
-            text.to_owned()
-        }
-    }
-
-    fn normalize_user_chat_text(text: &str) -> String {
-        let shouting = Self::sentence_case_if_shouting(text);
-        let greeted = Self::expand_short_greeting(&shouting);
-        if greeted != shouting {
-            return greeted;
-        }
-        Self::expand_definition_question(&Self::spanish_question_if_informal(&shouting))
-    }
-
     fn prepare_chat_messages_with_system(
         messages: &[TorchChatMessage],
         system: &str,
@@ -5975,16 +5845,8 @@ impl TorchModelRuntime {
                 content: system.to_owned(),
             });
         }
-        prepared.extend(messages.iter().map(|message| {
-            if message.role == "user" {
-                TorchChatMessage {
-                    role: message.role.clone(),
-                    content: Self::normalize_user_chat_text(&message.content),
-                }
-            } else {
-                message.clone()
-            }
-        }));
+        // Input text is authoritative: never rewrite messages before tokenization.
+        prepared.extend(messages.iter().cloned());
         prepared
     }
 
@@ -5998,33 +5860,6 @@ impl TorchModelRuntime {
         messages: &[TorchChatMessage],
     ) -> Vec<TorchChatMessage> {
         Self::prepare_chat_messages_with_system(messages, self.default_system_prompt())
-    }
-
-    fn wrap_question_if_reference_text(messages: &mut [TorchChatMessage]) {
-        let has_reference = messages.iter().any(|message| {
-            message.role == "user"
-                && message
-                    .content
-                    .starts_with("Texto de referencia (única fuente")
-        });
-        if !has_reference {
-            return;
-        }
-        let Some(last) = messages.last_mut() else {
-            return;
-        };
-        if last.role != "user"
-            || last
-                .content
-                .starts_with("Texto de referencia (única fuente")
-            || last.content.starts_with("Responde con un dato concreto")
-        {
-            return;
-        }
-        last.content = format!(
-            "Responde con un dato concreto del texto de referencia. No repitas la pregunta. Pregunta: {}",
-            last.content
-        );
     }
 
     fn visible_completion(content: &str, enable_thinking: bool) -> String {
@@ -6043,8 +5878,7 @@ impl TorchModelRuntime {
         messages: &[TorchChatMessage],
         enable_thinking: bool,
     ) -> Result<(Vec<TorchChatMessage>, Vec<i64>)> {
-        let mut messages = self.prepare_runtime_chat_messages(messages);
-        Self::wrap_question_if_reference_text(&mut messages);
+        let messages = self.prepare_runtime_chat_messages(messages);
         let prompt = self.chat_prompt(&messages, enable_thinking)?;
         // The chat template already includes bos `<s>`. Encoding with
         // add_special_tokens would prepend a second BOS and derail chat.
@@ -7918,6 +7752,44 @@ mod tests {
     }
 
     #[test]
+    fn logical_kv_digest_covers_all_llama_heads_and_matches_dense_across_cold_and_tail() {
+        let mut cache = TerrsvusionKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let mut dense = DenseKvCache::with_layers(1);
+        let (cold_key, cold_value) = resident_test_page(&mut cache, 0, 16, 1.0);
+        cache.sequence_tokens = 16;
+        dense.sequence_tokens = 16;
+        dense.layers[0] = Some((cold_key.shallow_clone(), cold_value.shallow_clone()));
+        assert_eq!(
+            cache.logical_state_digest().unwrap(),
+            dense.state_digest().unwrap()
+        );
+
+        let tail_key = Tensor::arange(8 * 128, (Kind::Float, Device::Cpu))
+            .view([1, 8, 1, 128])
+            .to_kind(Kind::BFloat16);
+        let tail_value = (&tail_key + 5.0).to_kind(Kind::BFloat16);
+        cache.layers[0].tail = Some((tail_key.shallow_clone(), tail_value.shallow_clone()));
+        cache.sequence_tokens = 17;
+        dense.layers[0] = Some((
+            Tensor::cat(&[&cold_key, &tail_key], 2),
+            Tensor::cat(&[&cold_value, &tail_value], 2),
+        ));
+        dense.sequence_tokens = 17;
+        let baseline = cache.logical_state_digest().unwrap();
+        assert_eq!(baseline, dense.state_digest().unwrap());
+
+        // A changed BF16 value in the eighth KV head MUST affect the digest.
+        let modified_key = tail_key.copy();
+        let _ = modified_key.narrow(1, 7, 1).fill_(20.0);
+        cache.layers[0].tail = Some((modified_key, tail_value.shallow_clone()));
+        assert_ne!(baseline, cache.logical_state_digest().unwrap());
+        let modified_value = tail_value.copy();
+        let _ = modified_value.narrow(1, 7, 1).fill_(30.0);
+        cache.layers[0].tail = Some((tail_key, modified_value));
+        assert_ne!(baseline, cache.logical_state_digest().unwrap());
+    }
+
+    #[test]
     fn resident_committed_kv_reads_each_cold_page_once_and_matches_cat() {
         let mut cache = TerrsvusionKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
         cache.resident_kv_budget_bytes = 64 << 20;
@@ -8841,44 +8713,52 @@ mod tests {
     }
 
     #[test]
-    fn shouting_user_text_becomes_sentence_case() {
-        assert_eq!(
-            TorchModelRuntime::sentence_case_if_shouting("QUE ES UN COCHE"),
-            "Que es un coche"
-        );
-        assert_eq!(
-            TorchModelRuntime::sentence_case_if_shouting("Qué es un coche"),
-            "Qué es un coche"
-        );
-        assert_eq!(TorchModelRuntime::sentence_case_if_shouting("NASA"), "NASA");
-        let prepared = TorchModelRuntime::prepare_chat_messages(&[TorchChatMessage {
-            role: "user".to_owned(),
-            content: "QUE ES UN COCHE".to_owned(),
-        }]);
-        assert_eq!(prepared[0].role, "system");
-        assert_eq!(
-            prepared[1].content,
-            "Explica de forma concreta qué es un coche. Da una definición; no repitas la pregunta."
-        );
-        assert_eq!(
-            TorchModelRuntime::normalize_user_chat_text("como te llamas?"),
-            "¿Cómo te llamas?"
-        );
-        assert_eq!(
-            TorchModelRuntime::normalize_user_chat_text("que es el amor?"),
-            "Explica de forma concreta qué es el amor. Da una definición; no repitas la pregunta."
-        );
-        assert_eq!(
-            TorchModelRuntime::normalize_user_chat_text("What is a car?"),
-            "What is a car?"
-        );
-        assert_eq!(
-            TorchModelRuntime::normalize_user_chat_text("hola"),
-            "Saluda en una frase corta y espera la siguiente pregunta."
-        );
-        assert_eq!(
-            TorchModelRuntime::normalize_user_chat_text("a que hora llego el tren?"),
-            "¿A qué hora llego el tren?"
+    fn chat_preparation_preserves_user_and_assistant_messages_exactly() {
+        let exact_cases = [
+            "Como dije antes, el código es CEDRO.",
+            "que es lo que pasó ayer?",
+            "QUE ES UN COCHE",
+            "a que hora llego el tren?",
+            "hola",
+            "  Código: a = {x: 3}  ",
+            "Texto de referencia (única fuente): FARO.",
+        ];
+        for content in exact_cases {
+            let originals = vec![
+                TorchChatMessage {
+                    role: "assistant".to_owned(),
+                    content: "He leído el texto anterior".to_owned(),
+                },
+                TorchChatMessage {
+                    role: "user".to_owned(),
+                    content: content.to_owned(),
+                },
+            ];
+            let prepared = TorchModelRuntime::prepare_chat_messages(&originals);
+            assert_eq!(prepared.len(), 3);
+            assert_eq!(prepared[0].role, "system");
+            for (before, after) in originals.iter().zip(prepared.iter().skip(1)) {
+                assert_eq!(before.role, after.role);
+                assert_eq!(before.content, after.content);
+            }
+        }
+        let explicit = vec![
+            TorchChatMessage {
+                role: "system".to_owned(),
+                content: "No cambies nada".to_owned(),
+            },
+            TorchChatMessage {
+                role: "user".to_owned(),
+                content: "¿Qué es CEDRO?".to_owned(),
+            },
+        ];
+        let prepared = TorchModelRuntime::prepare_chat_messages(&explicit);
+        assert_eq!(prepared.len(), explicit.len());
+        assert!(
+            prepared
+                .iter()
+                .zip(&explicit)
+                .all(|(a, b)| a.role == b.role && a.content == b.content)
         );
         assert_eq!(
             TorchModelRuntime::visible_completion(

@@ -23,6 +23,7 @@ use std::{
 use terrsvusion::{
     gpu_canonical_lod::CanonicalGpuLodConfig,
     inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
+    model_config::ModelSpec,
     opencl_llm::{OpenClGeneration, OpenClLlm, WeightMode},
 };
 use tokenizers::Tokenizer;
@@ -527,6 +528,18 @@ async fn chat(
     })))
 }
 
+/// The HTTP chat template is MiniCPM-specific. The OpenCL CLI supports
+/// additional Llama checkpoints, but this server must refuse them before
+/// allocating a GPU context or claiming to provide MiniCPM chat.
+fn validate_gpu_chat_checkpoint(model: &std::path::Path) -> Result<()> {
+    let spec = ModelSpec::inspect(model)?;
+    ensure!(
+        spec.legacy_bf16_geometry_match,
+        "GPU chat server requires a compatible MiniCPM5-1B BF16 checkpoint; use the OpenCL CLI for Llama"
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut model = PathBuf::from("/home/yo/models/MiniCPM5-1B");
@@ -535,9 +548,9 @@ async fn main() -> Result<()> {
     let mut max_context = 2048usize;
     let mut timeout_secs = 300u64;
     let mut mode = WeightMode::Resident;
-    // GPU runs original CPU LOD components by default with epsilon=0:
-    // never omit a BF16 V token without an explicit tolerance request.
-    let mut lod = Some(CanonicalGpuLodConfig::default());
+    // Dense BF16 is the reliable, lower-overhead default.
+    // Canonical LOD/ColdStore remains available explicitly via --gpu-lod.
+    let mut lod: Option<CanonicalGpuLodConfig> = None;
     let mut micro_sigma: Option<f32> = None;
     let mut micro_warmup: Option<usize> = None;
     let mut micro_safety_fuse: Option<usize> = None;
@@ -694,6 +707,9 @@ async fn main() -> Result<()> {
         (1..=32768).contains(&max_context),
         "invalid GPU max context"
     );
+    // This HTTP server hardcodes MiniCPM chat delimiters. The generic OpenCL
+    // CLI may load other Llama-style models, but this server must fail closed.
+    validate_gpu_chat_checkpoint(&model)?;
     let started = Instant::now();
     let mut engine = if let Some(config) = lod {
         OpenClLlm::load_with_canonical_lod(&model, max_context, mode, config)?
@@ -808,6 +824,45 @@ mod tests {
     fn parse(value: Value) -> ChatRequest {
         serde_json::from_value(value).unwrap()
     }
+    #[test]
+    fn gpu_http_chat_rejects_non_minicpm_checkpoint_before_gpu_allocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 1536,
+            "intermediate_size": 4608,
+            "num_hidden_layers": 24,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 2,
+            "head_dim": 128,
+            "vocab_size": 130560,
+            "rope_theta": 5000000,
+            "rms_norm_eps": 1e-6,
+            "tie_word_embeddings": false,
+            "torch_dtype": "bfloat16",
+            "max_position_embeddings": 131072
+        });
+        std::fs::write(
+            tmp.path().join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        assert!(validate_gpu_chat_checkpoint(tmp.path()).is_ok());
+        let mut llama = config;
+        llama["hidden_size"] = json!(4096);
+        llama["num_attention_heads"] = json!(32);
+        llama["num_key_value_heads"] = json!(8);
+        llama["num_hidden_layers"] = json!(32);
+        llama["head_dim"] = json!(128);
+        llama["vocab_size"] = json!(128256);
+        std::fs::write(
+            tmp.path().join("config.json"),
+            serde_json::to_vec(&llama).unwrap(),
+        )
+        .unwrap();
+        assert!(validate_gpu_chat_checkpoint(tmp.path()).is_err());
+    }
+
     #[test]
     fn gpu_browser_request_is_valid() {
         let req = parse(json!({"model":MODEL_ID,

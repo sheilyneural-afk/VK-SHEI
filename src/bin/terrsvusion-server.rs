@@ -521,7 +521,15 @@ async fn execute_model(
         InferenceError::Executor(error) if error.to_string().contains("cancelada") => {
             ApiError(StatusCode::REQUEST_TIMEOUT, error.to_string())
         }
-        InferenceError::Executor(error) => ApiError(StatusCode::BAD_REQUEST, error.to_string()),
+        InferenceError::Executor(error) => {
+            // Validation happens before submission. Executor failures are
+            // server-side failures, not malformed client requests.
+            eprintln!("CPU inference execution failed: {error:#}");
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "inference execution failed".to_owned(),
+            )
+        }
         InferenceError::Cancelled => ApiError(
             StatusCode::REQUEST_TIMEOUT,
             "inferencia cancelada".to_owned(),
