@@ -18,7 +18,11 @@ use rayon::prelude::*;
 use safetensors::{Dtype, SafeTensors};
 use serde_json::{Value, json};
 
-use crate::{model_bundle::ModelBundle, model_config::ModelSpec};
+use crate::{
+    cold_store::{ColdStore, PageGeometry},
+    model_bundle::ModelBundle,
+    model_config::ModelSpec,
+};
 
 struct WeightShard {
     path: PathBuf,
@@ -134,24 +138,21 @@ impl NativeWeightArchive {
     }
 }
 
-#[derive(Default)]
-struct LayerKv {
-    keys: Vec<u16>,
-    values: Vec<u16>,
-}
-
 trait NativeCausalRuntime: Send {
     fn position(&self) -> usize;
     fn forward_token(&mut self, token: u32, capture_logits: bool) -> Result<u32>;
     fn last_logits(&self) -> Option<Vec<f32>>;
     fn session_tokens(&self) -> &[u32];
+    fn kv_report(&self) -> Value;
     fn reset(&mut self);
 }
 
 struct NativeCpuLlama {
     spec: ModelSpec,
     weights: NativeWeightArchive,
-    layers: Vec<LayerKv>,
+    _kv_directory: tempfile::TempDir,
+    kv_store: ColdStore,
+    layer_pages: Vec<Vec<u64>>,
     tokens: Vec<u32>,
     last_logits: Option<Vec<f32>>,
 }
@@ -226,48 +227,65 @@ impl NativeCpuLlama {
             "la CPU nativa requiere pesos BF16"
         );
         let weights = NativeWeightArchive::open(model_dir, &spec.weight_shards)?;
-        let layers = (0..spec.num_hidden_layers)
-            .map(|_| LayerKv::default())
-            .collect();
+        let kv_directory = tempfile::Builder::new()
+            .prefix("kvslim-native-cpu-")
+            .tempdir()
+            .context("crear directorio KVSLIM CPU")?;
+        let kv_store = ColdStore::create(kv_directory.path().join("session.tskv"), 64 << 20)
+            .context("crear ColdStore KVSLIM CPU")?;
+        let layer_pages = (0..spec.num_hidden_layers).map(|_| Vec::new()).collect();
         Ok(Self {
             spec,
             weights,
-            layers,
+            _kv_directory: kv_directory,
+            kv_store,
+            layer_pages,
             tokens: Vec::new(),
             last_logits: None,
         })
     }
 
     fn attend(
-        &self,
+        &mut self,
         layer: usize,
         query: &[f32],
         current_k: &[f32],
         current_v: &[f32],
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>> {
         let g = self.spec.attention;
-        let cached = self.tokens.len();
+        let cached_pages = self.layer_pages[layer]
+            .iter()
+            .map(|&page_id| {
+                self.kv_store
+                    .read_page(page_id)
+                    .with_context(|| format!("leer página KVSLIM {page_id}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let cached = cached_pages.len();
         let total = cached + 1;
-        let kv_width = g.kv_heads * g.head_dim;
+        let head_bytes = g.head_dim * 2;
         let mut output = vec![0.0f32; g.query_heads * g.head_dim];
         for qh in 0..g.query_heads {
             let kh = qh / (g.query_heads / g.kv_heads);
             let q = &query[qh * g.head_dim..(qh + 1) * g.head_dim];
             let mut scores = vec![0.0; total];
             for (token, score) in scores.iter_mut().enumerate() {
-                let key: Vec<f32>;
-                let k = if token == cached {
-                    &current_k[kh * g.head_dim..(kh + 1) * g.head_dim]
+                if token == cached {
+                    let key = &current_k[kh * g.head_dim..(kh + 1) * g.head_dim];
+                    *score = q.iter().zip(key).map(|(&a, &b)| a * b).sum::<f32>()
+                        / (g.head_dim as f32).sqrt();
                 } else {
-                    let start = token * kv_width + kh * g.head_dim;
-                    key = self.layers[layer].keys[start..start + g.head_dim]
+                    let start = kh * head_bytes;
+                    let bytes = &cached_pages[token].key[start..start + head_bytes];
+                    let dot = q
                         .iter()
-                        .map(|&v| bf16::from_bits(v).to_f32())
-                        .collect();
-                    &key
-                };
-                *score =
-                    q.iter().zip(k).map(|(&a, &b)| a * b).sum::<f32>() / (g.head_dim as f32).sqrt();
+                        .zip(bytes.chunks_exact(2))
+                        .map(|(&a, value)| {
+                            a * bf16::from_bits(u16::from_le_bytes([value[0], value[1]])).to_f32()
+                        })
+                        .sum::<f32>();
+                    *score = dot / (g.head_dim as f32).sqrt();
+                }
             }
             softmax(&mut scores);
             for (token, probability) in scores.into_iter().enumerate() {
@@ -276,16 +294,47 @@ impl NativeCpuLlama {
                         output[qh * g.head_dim + d] += probability * current_v[kh * g.head_dim + d];
                     }
                 } else {
-                    let start = token * kv_width + kh * g.head_dim;
-                    for d in 0..g.head_dim {
+                    let start = kh * head_bytes;
+                    let bytes = &cached_pages[token].value[start..start + head_bytes];
+                    for (d, value) in bytes.chunks_exact(2).enumerate() {
                         output[qh * g.head_dim + d] += probability
-                            * bf16::from_bits(self.layers[layer].values[start + d]).to_f32();
+                            * bf16::from_bits(u16::from_le_bytes([value[0], value[1]])).to_f32();
                     }
                 }
             }
         }
         round_vec(&mut output);
-        output
+        Ok(output)
+    }
+
+    fn append_kv_page(&mut self, layer: usize, key: &[f32], value: &[f32]) -> Result<()> {
+        let g = self.spec.attention;
+        let encode = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|&value| bf16::from_f32(value).to_bits().to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let key = encode(key);
+        let value = encode(value);
+        let meta = self
+            .kv_store
+            .append_page(
+                PageGeometry {
+                    layer: layer as u32,
+                    token_start: self.tokens.len() as u64,
+                    tokens: 1,
+                    heads: g.kv_heads as u32,
+                    head_dim: g.head_dim as u32,
+                    tile: g.head_dim as u32,
+                },
+                &key,
+                &value,
+                false,
+            )
+            .context("anexar página KVSLIM CPU")?;
+        self.layer_pages[layer].push(meta.page_id);
+        Ok(())
     }
 
     fn forward_token(&mut self, token: u32, capture_logits: bool) -> Result<u32> {
@@ -335,13 +384,8 @@ impl NativeCpuLlama {
             round_vec(&mut value);
             apply_rope(&mut query, g.query_heads, g.head_dim, position, theta);
             apply_rope(&mut key, g.kv_heads, g.head_dim, position, theta);
-            let attention = self.attend(layer, &query, &key, &value);
-            self.layers[layer]
-                .keys
-                .extend(key.iter().map(|&v| bf16::from_f32(v).to_bits()));
-            self.layers[layer]
-                .values
-                .extend(value.iter().map(|&v| bf16::from_f32(v).to_bits()));
+            let attention = self.attend(layer, &query, &key, &value)?;
+            self.append_kv_page(layer, &key, &value)?;
             let projected = self.weights.matvec(
                 &format!("{prefix}.self_attn.o_proj.weight"),
                 hidden,
@@ -417,12 +461,26 @@ impl NativeCausalRuntime for NativeCpuLlama {
         &self.tokens
     }
 
+    fn kv_report(&self) -> Value {
+        let stats = self.kv_store.stats();
+        json!({
+            "authority": "kvslim-cold-store",
+            "format": "exact-bf16",
+            "pages": stats.pages,
+            "committed_bytes": stats.committed_bytes,
+            "reads": stats.reads,
+            "cache_hits": stats.cache_hits,
+            "cache_misses": stats.cache_misses,
+            "hot_bytes": stats.hot_bytes,
+            "hot_capacity": stats.hot_capacity,
+        })
+    }
+
     fn reset(&mut self) {
         self.tokens.clear();
         self.last_logits = None;
-        for layer in &mut self.layers {
-            layer.keys.clear();
-            layer.values.clear();
+        for pages in &mut self.layer_pages {
+            pages.clear();
         }
     }
 }
@@ -493,7 +551,11 @@ impl ModelAdapter for NativeCpuModelAdapter {
         for (index, &token) in input.iter().enumerate() {
             runtime.forward_token(token, index + 1 == input.len())?;
         }
-        Ok(json!({"tokens": input.len(), "position": runtime.position()}))
+        Ok(json!({
+            "tokens": input.len(),
+            "position": runtime.position(),
+            "kv": runtime.kv_report(),
+        }))
     }
 
     fn decode(&mut self, token_id: u32) -> Result<u32> {

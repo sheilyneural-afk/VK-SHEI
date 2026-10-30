@@ -20,6 +20,7 @@ struct CalibrationReceipt {
     prefill_micros: u128,
     decode_micros: u128,
     kv_snapshot_bytes: usize,
+    kv_report: Value,
     peak_rss_bytes: Option<u64>,
     context_samples: Vec<ContextSample>,
     checks: Vec<&'static str>,
@@ -88,6 +89,10 @@ fn main() -> Result<()> {
     let result = engine.prefill(&[0])?;
     let prefill_micros = prefill_start.elapsed().as_micros();
     ensure!(result.is_object(), "prefill no estructurado");
+    let kv_report = result
+        .get("kv")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({"authority": "adapter-managed"}));
     let decode_start = Instant::now();
     let _ = engine.decode(0)?;
     let decode_micros = decode_start.elapsed().as_micros();
@@ -143,6 +148,7 @@ fn main() -> Result<()> {
         prefill_micros,
         decode_micros,
         kv_snapshot_bytes: snapshot.len(),
+        kv_report,
         peak_rss_bytes: peak_rss_bytes(),
         context_samples,
         checks: vec![
