@@ -126,6 +126,11 @@ path = "src/bin/kvslim-runtime-compare.rs"
 required-features = ["accelerator-backend", "torch-backend"]
 
 [[bin]]
+name = "kvslim-adapter-parity"
+path = "src/bin/kvslim-adapter-parity.rs"
+required-features = ["accelerator-backend", "torch-backend"]
+
+[[bin]]
 name = "kvslim-runtime-worker"
 path = "src/bin/kvslim-runtime-worker.rs"
 required-features = ["accelerator-backend"]
