@@ -130,6 +130,12 @@ pub trait ModelAdapter: Send {
     fn load(&mut self, model_dir: &Path, config: &Value) -> Result<()>;
     fn prefill(&mut self, input: &[u32]) -> Result<Value>;
     fn decode(&mut self, token_id: u32) -> Result<u32>;
+    /// Returns the last full-vocabulary logits produced by this runtime when
+    /// the adapter captured them. `None` is an explicit statement that this
+    /// adapter did not capture logits; it is never treated as parity.
+    fn last_logits(&self) -> Result<Option<Vec<f32>>> {
+        Ok(None)
+    }
     fn snapshot_kv(&self) -> Result<Vec<u8>>;
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()>;
 }

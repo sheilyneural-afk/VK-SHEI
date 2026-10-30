@@ -13,6 +13,7 @@ pub struct OpenClModelAdapter {
     capabilities: AdapterCapabilities,
     model_dir: Option<PathBuf>,
     runtime: Option<OpenClLlm>,
+    last_logits: Option<Vec<f32>>,
 }
 
 impl Default for OpenClModelAdapter {
@@ -28,6 +29,7 @@ impl Default for OpenClModelAdapter {
             },
             model_dir: None,
             runtime: None,
+            last_logits: None,
         }
     }
 }
@@ -64,6 +66,7 @@ impl ModelAdapter for OpenClModelAdapter {
             .context("load OpenCL model adapter")?;
         self.model_dir = Some(model_dir.to_owned());
         self.runtime = Some(runtime);
+        self.last_logits = None;
         Ok(())
     }
 
@@ -72,8 +75,11 @@ impl ModelAdapter for OpenClModelAdapter {
             .runtime
             .as_mut()
             .context("OpenCL adapter is not loaded")?;
-        for &token in input {
-            runtime.forward_token(token, false)?;
+        for (index, &token) in input.iter().enumerate() {
+            let step = runtime.forward_token(token, index + 1 == input.len())?;
+            if let Some(step) = step.logits {
+                self.last_logits = Some(step);
+            }
         }
         Ok(json!({ "tokens": input.len(), "position": runtime.position() }))
     }
@@ -83,7 +89,13 @@ impl ModelAdapter for OpenClModelAdapter {
             .runtime
             .as_mut()
             .context("OpenCL adapter is not loaded")?;
-        Ok(runtime.forward_token(token_id, false)?.argmax_token)
+        let step = runtime.forward_token(token_id, true)?;
+        self.last_logits = step.logits;
+        Ok(step.argmax_token)
+    }
+
+    fn last_logits(&self) -> Result<Option<Vec<f32>>> {
+        Ok(self.last_logits.clone())
     }
 
     fn snapshot_kv(&self) -> Result<Vec<u8>> {

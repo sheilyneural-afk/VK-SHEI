@@ -88,6 +88,16 @@ impl KvslimEngine {
             .context("KVSLIM KV snapshot failed")
     }
 
+    pub fn last_logits(&self) -> Result<Option<Vec<f32>>> {
+        ensure!(
+            self.state == EngineState::Loaded,
+            "KVSLIM engine is not loaded"
+        );
+        self.adapter
+            .last_logits()
+            .context("KVSLIM logits capture failed")
+    }
+
     pub fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
         ensure!(
             self.state == EngineState::Loaded,

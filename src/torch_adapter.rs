@@ -19,6 +19,7 @@ pub struct TorchModelAdapter {
     model_dir: Option<PathBuf>,
     runtime: Option<TorchModelRuntime>,
     session_tokens: Vec<i64>,
+    last_logits: Option<Vec<f32>>,
 }
 
 impl Default for TorchModelAdapter {
@@ -35,6 +36,7 @@ impl Default for TorchModelAdapter {
             model_dir: None,
             runtime: None,
             session_tokens: Vec::new(),
+            last_logits: None,
         }
     }
 }
@@ -55,6 +57,7 @@ impl ModelAdapter for TorchModelAdapter {
             Some(TorchModelRuntime::load(model_dir).context("load LibTorch model adapter")?);
         self.model_dir = Some(model_dir.to_owned());
         self.session_tokens.clear();
+        self.last_logits = None;
         Ok(())
     }
 
@@ -74,11 +77,16 @@ impl ModelAdapter for TorchModelAdapter {
             .context("Torch adapter is not loaded")?;
         self.session_tokens.push(i64::from(token_id));
         let generation = runtime.generate_token_ids_dense(&self.session_tokens, 1, 512)?;
+        self.last_logits = generation.step_logits.first().cloned();
         generation
             .token_ids
             .first()
             .copied()
             .context("Torch adapter produced no token")
+    }
+
+    fn last_logits(&self) -> Result<Option<Vec<f32>>> {
+        Ok(self.last_logits.clone())
     }
 
     fn snapshot_kv(&self) -> Result<Vec<u8>> {

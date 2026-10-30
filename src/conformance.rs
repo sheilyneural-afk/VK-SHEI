@@ -22,7 +22,47 @@ pub struct AdapterConformanceReport {
     pub decode: bool,
     pub kv_snapshot: bool,
     pub kv_restore: bool,
+    pub logits_captured: bool,
     pub status: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LogitParityReport {
+    pub compared: usize,
+    pub exact: bool,
+    pub within_tolerance: bool,
+    pub max_abs_difference: f32,
+}
+
+/// Compares logits produced by two real adapter executions. Missing vectors
+/// are rejected by the caller; an absent capture must never become a passing
+/// parity result.
+pub fn compare_logits(
+    reference: &[f32],
+    candidate: &[f32],
+    tolerance: f32,
+) -> Result<LogitParityReport> {
+    ensure!(!reference.is_empty(), "reference logits are empty");
+    ensure!(!candidate.is_empty(), "candidate logits are empty");
+    ensure!(
+        reference.len() == candidate.len(),
+        "logit vocabularies differ"
+    );
+    ensure!(
+        tolerance.is_finite() && tolerance >= 0.0,
+        "invalid logit tolerance"
+    );
+    let max_abs_difference = reference
+        .iter()
+        .zip(candidate)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0_f32, f32::max);
+    Ok(LogitParityReport {
+        compared: reference.len(),
+        exact: reference == candidate,
+        within_tolerance: max_abs_difference <= tolerance,
+        max_abs_difference,
+    })
 }
 
 /// Runs the same lifecycle and KV contract for any concrete adapter.
@@ -78,6 +118,10 @@ pub fn run_adapter_conformance(
         .decode(probe_tokens[0])
         .context("conformance decode")?;
     let snapshot = engine.snapshot_kv().context("conformance snapshot")?;
+    let logits_captured = engine
+        .last_logits()
+        .context("conformance logits capture")?
+        .is_some_and(|logits| !logits.is_empty());
     ensure!(
         !snapshot.is_empty(),
         "adapter returned an empty KV snapshot"
@@ -102,6 +146,20 @@ pub fn run_adapter_conformance(
         decode: true,
         kv_snapshot: true,
         kv_restore: true,
+        logits_captured,
         status: "passed",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_logits;
+
+    #[test]
+    fn logit_parity_reports_exact_and_tolerance_separately() {
+        let report = compare_logits(&[1.0, 2.0], &[1.0, 2.0001], 0.001).unwrap();
+        assert!(!report.exact);
+        assert!(report.within_tolerance);
+        assert!(report.max_abs_difference > 0.0);
+    }
 }
