@@ -29,7 +29,9 @@ Después de optimizar el sello frío y fusionar QKV y SwiGLU:
   otras limitaciones del kernel y del sistema siguen presentes.
 - Todos los logits BF16 del ejemplo 375+16 y todo el KV (K GPU,
   V en ColdStore) coinciden con la ruta previa de GPU.
-- No existe paridad bit a bit completa contra el BF16 LibTorch CPU.
+- La comparación diagnóstica con BF16 LibTorch CPU produjo diferencias
+  numéricas. No se exige identidad bit a bit entre backends; la prueba
+  de equivalencia de esta optimización es frente a la ruta GPU previa.
 
 ## Cuantificación de CPU frente a GPU con modelo cargado en memoria
 

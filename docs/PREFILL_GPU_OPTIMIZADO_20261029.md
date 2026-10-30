@@ -58,7 +58,13 @@ Las pruebas físicas AMD confirmaron:
 3. Documento (375 tokens) en 3 lotes: el prefill por lotes conserva SHA lógico KV y logits BF16 respecto al motor GPU denso anterior; GPU LOD con paginado coincide bit a bit con la GPU densa.
 4. Aritmética, fotosíntesis y documento mantienen los mismos tokens generados que las antiguas rutas GPU.
 
-No se afirma paridad numérica GPU contra CPU LibTorch BF16: el comparador anterior midió hasta 0,625 de diferencia entre logits a lo largo de 16 pasos, con SHA KV diferente. Tampoco se certifican 32K/100K en esta ruta.
+La comparación diagnóstica entre GPU OpenCL y CPU LibTorch BF16 midió hasta
+0,625 de diferencia de logits en 16 pasos y SHA KV diferente. Esa medición
+no representa un requisito incumplido de identidad bit a bit CPU/GPU.
+La garantía de este cambio de prefill corresponde a la comparación
+**GPU anterior vs GPU optimizada** en las entradas medidas. Tampoco se
+certifican 32K/100K en esta ruta. Véanse
+[criterios de validación](CRITERIOS_VALIDACION_CPU_GPU.md).
 
 ## Arranque recomendado y vuelta atrás
 

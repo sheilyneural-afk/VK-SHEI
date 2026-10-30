@@ -109,9 +109,13 @@ elementos BF16 K/V divergentes en la comparación de los dos pasos,
 con diferencia máxima KV 0,41552734375. Los dos tokens elegidos
 continuaron siendo idénticos.
 
-Por tanto, no se puede afirmar paridad exacta de logits o KV entre
-el backend Rust/OpenCL y BF16 LibTorch. La precisión de almacenamiento
-de pesos se ha demostrado por separado.
+Los logits y el KV no fueron idénticos entre Rust/OpenCL y LibTorch.
+Esta diferencia **no implica por sí sola un fallo de la GPU**: la igualdad
+bit a bit entre backends no es requisito, debido a sus operaciones y
+redondeos distintos. La magnitud y el efecto sobre la calidad siguen
+siendo parte de la validación numérica; la integridad de los pesos
+BF16 se demostró por separado. Véase
+[criterios de validación CPU/GPU](CRITERIOS_VALIDACION_CPU_GPU.md).
 
 ### Prueba de respuesta más larga
 
@@ -250,8 +254,10 @@ TERRSVUSION_OPENCL_DEVICE=AMD cargo run --locked \
    backends GPU no están certificados.
 3. Existe prefill GPU por lotes de hasta 512 posiciones, pero 30K/100K/131K
    no son aún prácticos ni están certificados en esta ruta.
-4. La GPU calcula FP32 y redondea intermedios BF16: la paridad de
-   logits/KV con LibTorch BF16 NO es exacta.
+4. La GPU calcula y redondea intermedios de forma distinta a LibTorch:
+   la comparación CPU/GPU mostró diferencias de logits/KV. No es un
+   requisito de identidad bit a bit; faltan ensayos más amplios de
+   precisión y calidad para caracterizar la ruta.
 5. No hay aún kernels GPU para la compresión/LOD original, atención
    fusionada eficiente, SIMD avanzado, paginación de KV por contexto
    largo ni herramientas OpenAI API avanzadas.
@@ -300,14 +306,16 @@ Inferencia mínima real, ID 128000, una posición y una salida:
 | Inferencia | 1,953 s | 0,419 s |
 | L-infinito logits | \- | 0,0625 frente a OpenCL |
 
-La paridad de token en este único caso NO demuestra paridad de logits.
-Solo 66.165 de 128.256 logits fueron bit a bit iguales. Hubo 31.299
+La coincidencia del token en este único caso NO implica igualdad de logits;
+esta última no es obligatoria entre CPU y GPU, aunque sus diferencias deben
+medirse e investigarse si son relevantes. Solo 66.165 de 128.256 logits fueron bit a bit iguales. Hubo 31.299
 elementos KV BF16 diferentes y `L∞ KV=0,015625`. Dos componentes V ya
 difieren en la capa 0 y posición 0 (`4,768e-7`), donde RoPE es identidad;
 esto localiza la primera divergencia en el orden/redondeo de proyección,
 no en el nuevo escalado de posiciones. El modo streaming tampoco es más
-rápido que LibTorch en esta geometría mínima. No se autoriza todavía el
-servidor Llama OpenCL ni se extrapola esta prueba a contexto largo.
+rápido que LibTorch en esta geometría mínima. La cobertura de esta etapa no bastaba por sí sola para autorizar el
+servidor Llama OpenCL ni para extrapolar resultados a contexto largo;
+esto no establece una obligación de paridad binaria con CPU.
 
 El comparador acepta ahora `--gpu-prefill-batch N` y registra el número
 físico de lotes. Con la plantilla Llama real para `Hola` (30 IDs), streaming,

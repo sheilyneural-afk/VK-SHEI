@@ -173,9 +173,11 @@ epsilon 0 o al backup anterior.
    y no garantiza exactitud de logits del Transformer completo.
 4. Todavía no es el port completo del branch-and-bound regional
    CPU ni la reutilización persistente de prefijos.
-5. La paridad exacta entre CPU LibTorch y GPU OpenCL no está
-   demostrada, aunque la GPU epsilon 0 conserva sus logits de
-   referencia en las pruebas anteriores.
+5. La comparación CPU LibTorch vs GPU OpenCL es diagnóstica:
+   la igualdad bit a bit entre backends no es requisito. En cambio,
+   GPU con `epsilon=0` conservó sus logits respecto a la GPU densa
+   en las pruebas anteriores; una tolerancia positiva requiere
+   comprobar el contrato de error de la optimización.
 
 ## Evidencias
 

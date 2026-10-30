@@ -45,7 +45,8 @@ un modelo comercial Radeon 780M ni la cantidad de RAM libre para otros usos.
 - El ejecutor comprueba que GPU sea CL_DEVICE_TYPE_GPU y little-endian
   antes de usar la ruta rápida; fallará explícitamente si no lo es.
 - GPU tiene aritmética FP32 y referencia CPU acumula FP64.
-  No se promete paridad bit a bit frente a kernels BF16 de LibTorch.
+  No se exige igualdad bit a bit con LibTorch; la referencia CPU es
+  un control diagnóstico para medir diferencias numéricas.
 - KV de distintos dtypes en un mismo lote todavía no se acepta
   en el backend OpenCL; se devuelve un error explícito.
 - El backend GPU NO es el ejecutor completo de MiniCPM5-1B: no ejecuta
