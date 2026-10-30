@@ -4382,6 +4382,41 @@ struct DeterministicSuffixDrafter {
     states: Vec<SuffixAutomatonState>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DraftVerification {
+    accepted_tokens: usize,
+    rejection_target: Option<i64>,
+    stop_reached: bool,
+}
+
+fn verify_draft(
+    draft: &[i64],
+    expected_tokens: &[i64],
+    eos_tokens: &[i64],
+) -> Result<DraftVerification> {
+    ensure!(
+        draft.len() == expected_tokens.len(),
+        "longitud de verificación especulativa inválida"
+    );
+    let mut verification = DraftVerification {
+        accepted_tokens: 0,
+        rejection_target: None,
+        stop_reached: false,
+    };
+    for (&candidate, &expected) in draft.iter().zip(expected_tokens) {
+        if eos_tokens.contains(&expected) {
+            verification.stop_reached = true;
+            break;
+        }
+        if candidate != expected {
+            verification.rejection_target = Some(expected);
+            break;
+        }
+        verification.accepted_tokens += 1;
+    }
+    Ok(verification)
+}
+
 impl DeterministicSuffixDrafter {
     fn build(tokens: &[i64]) -> Self {
         let mut states = vec![SuffixAutomatonState::default()];
@@ -6580,42 +6615,38 @@ impl TorchModelRuntime {
                 cache.end_multitoken_verification();
                 let verified = verified_result?;
                 speculative_target_forward_calls += 1;
-                let mut accepted = 0_usize;
-                let mut rejection_target = None;
-                let mut stop_reached = false;
-                for (index, candidate) in draft.iter().copied().enumerate() {
-                    let expected = if index == 0 {
-                        token
-                    } else {
+                let mut expected_tokens = Vec::with_capacity(draft.len());
+                expected_tokens.push(token);
+                for index in 1..draft.len() {
+                    expected_tokens.push(
                         verified
                             .select(1, index as i64 - 1)
                             .argmax(-1, false)
-                            .int64_value(&[0])
-                    };
-                    if self.model.is_eos(expected) {
-                        stop_reached = true;
-                        break;
-                    }
-                    if candidate != expected {
-                        rejection_target = Some(expected);
-                        break;
-                    }
-                    accepted += 1;
+                            .int64_value(&[0]),
+                    );
                 }
+                let verification = verify_draft(&draft, &expected_tokens, &self.model.eos)?;
+                let accepted = verification.accepted_tokens;
                 speculative_accepted_tokens += accepted;
                 generated.extend(draft[..accepted].iter().map(|candidate| *candidate as u32));
                 speculation_policy.record_round(draft.len(), accepted);
-                if stop_reached {
+                if verification.stop_reached {
                     cache.rollback_unsealed_to(checkpoint + accepted)?;
                     break;
                 }
                 if accepted == draft.len() {
+                    if generated.len() == max_tokens {
+                        cache.rollback_unsealed_to(checkpoint + accepted - 1)?;
+                        break;
+                    }
                     logits = verified;
                     continue;
                 }
                 speculative_rejected_rounds += 1;
                 cache.rollback_unsealed_to(checkpoint + accepted)?;
-                let expected = rejection_target.context("rechazo sin token objetivo")?;
+                let expected = verification
+                    .rejection_target
+                    .context("rechazo sin token objetivo")?;
                 if generated.len() >= max_tokens {
                     break;
                 }
@@ -6985,26 +7016,29 @@ impl TorchModelRuntime {
                 let checkpoint = cache.sequence_tokens();
                 let verified = self.model.forward_with_cache(&draft, &mut cache)?;
                 target_forward_calls += 1;
-                let mut accepted = 0_usize;
-                let mut rejection_target = None;
-                for (index, candidate) in draft.iter().copied().enumerate() {
-                    let expected = if index == 0 {
-                        target_token
-                    } else {
+                let mut expected_tokens = Vec::with_capacity(draft.len());
+                expected_tokens.push(target_token);
+                for index in 1..draft.len() {
+                    expected_tokens.push(
                         verified
                             .select(1, index as i64 - 1)
                             .argmax(-1, false)
-                            .int64_value(&[0])
-                    };
-                    if candidate != expected {
-                        rejection_target = Some(expected);
-                        break;
-                    }
-                    accepted += 1;
+                            .int64_value(&[0]),
+                    );
                 }
+                let verification = verify_draft(&draft, &expected_tokens, &self.model.eos)?;
+                let accepted = verification.accepted_tokens;
                 accepted_draft_tokens += accepted;
                 generated.extend(draft[..accepted].iter().map(|token| *token as u32));
+                if verification.stop_reached {
+                    cache.truncate_to(checkpoint + accepted)?;
+                    break;
+                }
                 if accepted == draft.len() {
+                    if generated.len() == max_tokens {
+                        cache.truncate_to(checkpoint + accepted - 1)?;
+                        break;
+                    }
                     logits = verified;
                     current_k = (current_k * 2).min(8);
                     continue;
@@ -7012,7 +7046,9 @@ impl TorchModelRuntime {
                 rejected_rounds += 1;
                 cache.truncate_to(checkpoint + accepted)?;
                 current_k = (current_k / 2).max(2);
-                let expected = rejection_target.context("rechazo sin token objetivo")?;
+                let expected = verification
+                    .rejection_target
+                    .context("rechazo sin token objetivo")?;
                 if self.model.is_eos(expected) || generated.len() >= max_tokens {
                     break;
                 }
@@ -7138,33 +7174,38 @@ impl TorchModelRuntime {
                 cache.end_multitoken_verification();
                 let verified = verified_result?;
                 target_forward_calls += 1;
-                let mut accepted = 0_usize;
-                let mut rejection_target = None;
-                for (index, candidate) in draft.iter().copied().enumerate() {
-                    let expected = if index == 0 {
-                        target_token
-                    } else {
+                let mut expected_tokens = Vec::with_capacity(draft.len());
+                expected_tokens.push(target_token);
+                for index in 1..draft.len() {
+                    expected_tokens.push(
                         verified
                             .select(1, index as i64 - 1)
                             .argmax(-1, false)
-                            .int64_value(&[0])
-                    };
-                    if candidate != expected {
-                        rejection_target = Some(expected);
-                        break;
-                    }
-                    accepted += 1;
+                            .int64_value(&[0]),
+                    );
                 }
+                let verification = verify_draft(&draft, &expected_tokens, &self.model.eos)?;
+                let accepted = verification.accepted_tokens;
                 accepted_draft_tokens += accepted;
                 generated.extend(draft[..accepted].iter().map(|token| *token as u32));
                 policy.record_round(draft.len(), accepted);
+                if verification.stop_reached {
+                    cache.rollback_unsealed_to(checkpoint + accepted)?;
+                    break;
+                }
                 if accepted == draft.len() {
+                    if generated.len() == max_tokens {
+                        cache.rollback_unsealed_to(checkpoint + accepted - 1)?;
+                        break;
+                    }
                     logits = verified;
                     continue;
                 }
                 rejected_rounds += 1;
                 cache.rollback_unsealed_to(checkpoint + accepted)?;
-                let expected = rejection_target.context("rechazo frío sin token objetivo")?;
+                let expected = verification
+                    .rejection_target
+                    .context("rechazo frío sin token objetivo")?;
                 if self.model.is_eos(expected) || generated.len() >= max_tokens {
                     break;
                 }
@@ -8220,6 +8261,35 @@ mod tests {
         let terminal = DeterministicSuffixDrafter::build(&[1, 2, 3]);
         assert_eq!(terminal.draft(&[1], 2, 8), vec![2, 3]);
         assert_eq!(terminal.draft(&[99], 100, 8), vec![100]);
+    }
+
+    #[test]
+    fn speculative_verification_stops_before_eos_and_reports_rejections() {
+        assert_eq!(
+            verify_draft(&[10, 11, 12], &[10, 1, 1], &[1]).unwrap(),
+            DraftVerification {
+                accepted_tokens: 1,
+                rejection_target: None,
+                stop_reached: true,
+            }
+        );
+        assert_eq!(
+            verify_draft(&[10, 11, 12], &[10, 13, 14], &[1]).unwrap(),
+            DraftVerification {
+                accepted_tokens: 1,
+                rejection_target: Some(13),
+                stop_reached: false,
+            }
+        );
+        assert_eq!(
+            verify_draft(&[10, 11], &[10, 11], &[1]).unwrap(),
+            DraftVerification {
+                accepted_tokens: 2,
+                rejection_target: None,
+                stop_reached: false,
+            }
+        );
+        assert!(verify_draft(&[10], &[], &[1]).is_err());
     }
 
     #[test]
