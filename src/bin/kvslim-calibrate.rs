@@ -107,32 +107,31 @@ fn main() -> Result<()> {
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok());
     let mut tokens_total = 1usize;
-    while !skip_context_sweep {
-        let Some(limit) = max_context else {
-            break;
-        };
-        if tokens_total >= limit {
-            break;
-        }
-        let target = tokens_total.saturating_mul(2).min(limit);
-        let tokens_added = target - tokens_total;
-        let input = vec![0u32; tokens_added];
-        let start = Instant::now();
-        let result = engine.prefill(&input);
-        match result {
-            Ok(value) if value.is_object() => {
-                tokens_total = target;
-                let snapshot = engine.snapshot_kv()?;
-                context_samples.push(ContextSample {
-                    tokens_added,
-                    tokens_total,
-                    prefill_micros: start.elapsed().as_micros(),
-                    snapshot_bytes: snapshot.len(),
-                    peak_rss_bytes: peak_rss_bytes(),
-                    status: "stable",
-                });
+    if !skip_context_sweep {
+        while let Some(limit) = max_context {
+            if tokens_total >= limit {
+                break;
             }
-            _ => break,
+            let target = tokens_total.saturating_mul(2).min(limit);
+            let tokens_added = target - tokens_total;
+            let input = vec![0u32; tokens_added];
+            let start = Instant::now();
+            let result = engine.prefill(&input);
+            match result {
+                Ok(value) if value.is_object() => {
+                    tokens_total = target;
+                    let snapshot = engine.snapshot_kv()?;
+                    context_samples.push(ContextSample {
+                        tokens_added,
+                        tokens_total,
+                        prefill_micros: start.elapsed().as_micros(),
+                        snapshot_bytes: snapshot.len(),
+                        peak_rss_bytes: peak_rss_bytes(),
+                        status: "stable",
+                    });
+                }
+                _ => break,
+            }
         }
     }
     let receipt = CalibrationReceipt {

@@ -242,12 +242,12 @@ impl ModelSpec {
             && self.attention.kv_heads == 8
             && self.attention.head_dim == 128
             && self.vocab_size == Some(128_256)
-            && rope.is_some_and(|rope| {
+            && (rope.is_none_or(|rope| {
                 rope.factor == 8.0
                     && rope.low_freq_factor == 1.0
                     && rope.high_freq_factor == 4.0
                     && rope.original_max_position_embeddings == 8192
-            })
+            }))
             && self.tokenizer_json_present
             && !self.weight_shards.is_empty()
     }
@@ -280,7 +280,7 @@ impl ModelSpec {
                 Ok(())
             }
             _ => anyhow::bail!(
-                "runtime CPU limitado a configured-model BF16 (KVSLIM KV) o configured-model BF16 (KV denso); '{}' solo puede inspeccionarse",
+                "runtime CPU no tiene un decoder compatible con la arquitectura declarada '{}'; el bundle solo puede inspeccionarse",
                 self.model_type
             ),
         }

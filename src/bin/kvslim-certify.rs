@@ -39,10 +39,10 @@ fn main() -> Result<()> {
         }
     }
 
-    if let Some(path) = &model {
-        if !path.is_dir() {
-            bail!("model path is not a directory: {}", path.display());
-        }
+    if let Some(path) = &model
+        && !path.is_dir()
+    {
+        bail!("model path is not a directory: {}", path.display());
     }
 
     let host = kvslim::adapter_catalog::host_capabilities();
