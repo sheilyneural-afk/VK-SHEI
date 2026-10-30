@@ -62,15 +62,17 @@ impl ModelBundle {
     /// bundle inventory. It deliberately uses names and declared dimensions,
     /// never a model name or vendor identifier.
     pub fn validate_decoder_layout(&self) -> Result<()> {
-        let required = [
-            "model.embed_tokens.weight",
-            "model.norm.weight",
-            "lm_head.weight",
-        ];
+        let required = ["model.embed_tokens.weight", "model.norm.weight"];
         for name in required {
             ensure!(
                 self.has_tensor(name),
                 "decoder bundle missing tensor {name}"
+            );
+        }
+        if self.spec.tie_word_embeddings != Some(true) {
+            ensure!(
+                self.has_tensor("lm_head.weight"),
+                "decoder bundle missing tensor lm_head.weight"
             );
         }
         for layer in 0..self.spec.num_hidden_layers {

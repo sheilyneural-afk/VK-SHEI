@@ -66,7 +66,7 @@ impl ModelAdapter for OpenClModelAdapter {
             .context("model configuration must declare a context limit")?
             as usize;
         let runtime = OpenClLlm::load(model_dir, max_tokens, WeightMode::Resident)
-            .context("load OpenCL model adapter")?;
+            .context("load local accelerator model adapter")?;
         self.model_dir = Some(model_dir.to_owned());
         self.runtime = Some(runtime);
         self.last_logits = None;
@@ -77,7 +77,7 @@ impl ModelAdapter for OpenClModelAdapter {
         let runtime = self
             .runtime
             .as_mut()
-            .context("OpenCL adapter is not loaded")?;
+            .context("local accelerator adapter is not loaded")?;
         for (index, &token) in input.iter().enumerate() {
             let step = runtime.forward_token(token, index + 1 == input.len())?;
             if let Some(step) = step.logits {
@@ -91,7 +91,7 @@ impl ModelAdapter for OpenClModelAdapter {
         let runtime = self
             .runtime
             .as_mut()
-            .context("OpenCL adapter is not loaded")?;
+            .context("local accelerator adapter is not loaded")?;
         let step = runtime.forward_token(token_id, true)?;
         self.last_logits = step.logits;
         Ok(step.argmax_token)
@@ -111,12 +111,12 @@ impl ModelAdapter for OpenClModelAdapter {
             "model_dir": self.model_dir,
             "tokens": runtime.session_token_ids(),
         }))
-        .context("serialize OpenCL K/V snapshot")
+        .context("serialize local accelerator K/V snapshot")
     }
 
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
         let envelope: Value =
-            serde_json::from_slice(snapshot).context("parse OpenCL K/V snapshot")?;
+            serde_json::from_slice(snapshot).context("parse local accelerator K/V snapshot")?;
         ensure!(
             envelope.get("schema").and_then(Value::as_str)
                 == Some("kvslim.runtime.replay-snapshot/v1"),
@@ -125,11 +125,11 @@ impl ModelAdapter for OpenClModelAdapter {
         let expected_dir = envelope
             .get("model_dir")
             .and_then(Value::as_str)
-            .context("OpenCL snapshot missing model identity")?;
+            .context("local accelerator snapshot missing model identity")?;
         let current_dir = self
             .model_dir
             .as_deref()
-            .context("OpenCL adapter is not loaded")?;
+            .context("local accelerator adapter is not loaded")?;
         ensure!(
             Path::new(expected_dir) == current_dir,
             "snapshot model identity mismatch"
@@ -144,13 +144,13 @@ impl ModelAdapter for OpenClModelAdapter {
                 value
                     .as_u64()
                     .and_then(|token| u32::try_from(token).ok())
-                    .context("invalid token in OpenCL snapshot")
+                    .context("invalid token in local accelerator snapshot")
             })
             .collect::<Result<_>>()?;
         let runtime = self
             .runtime
             .as_mut()
-            .context("OpenCL adapter is not loaded")?;
+            .context("local accelerator adapter is not loaded")?;
         runtime.reset_session()?;
         for token in tokens {
             runtime.forward_token(token, false)?;
