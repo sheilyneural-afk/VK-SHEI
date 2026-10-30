@@ -29,6 +29,7 @@ use opencl3::{
 };
 use safetensors::{Dtype, SafeTensors, tensor::TensorView};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -1642,6 +1643,17 @@ pub struct CanonicalSessionRestore {
     pub hot_values_restored: bool,
 }
 
+fn digest_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn digest_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("read digest input {}", path.display()))?;
+    Ok(digest_bytes(&bytes))
+}
+
 pub struct OpenClLlm {
     engine: GpuEngine,
     spec: ModelSpec,
@@ -1687,6 +1699,10 @@ pub struct OpenClLlm {
     last_prefill_temporary_v_bytes: usize,
     pub model_load_seconds: f64,
     pub gpu_weight_payload_bytes: usize,
+    /// Stable digests bound to physical cache receipts.
+    pub model_digest: String,
+    pub tokenizer_digest: String,
+    pub architecture_digest: String,
 }
 
 impl OpenClLlm {
@@ -1740,7 +1756,18 @@ impl OpenClLlm {
             "GPU LLM max_tokens must be 1..=32768 until long context validated"
         );
         let started = Instant::now();
-        let spec = ModelSpec::inspect(model_dir.as_ref())?;
+        let model_dir = model_dir.as_ref();
+        let spec = ModelSpec::inspect(model_dir)?;
+        let architecture_digest =
+            digest_bytes(&serde_json::to_vec(&spec).context("serialize model architecture")?);
+        let tokenizer_digest = digest_file(&model_dir.join("tokenizer.json"))?;
+        let mut model_hasher = Sha256::new();
+        for shard in &spec.weight_shards {
+            let bytes = fs::read(model_dir.join(shard))
+                .with_context(|| format!("read model shard {shard}"))?;
+            model_hasher.update(bytes);
+        }
+        let model_digest = format!("{:x}", model_hasher.finalize());
         ensure!(
             spec.model_type == "llama",
             "only bias-free LlamaForCausalLM supported"
@@ -1873,6 +1900,9 @@ impl OpenClLlm {
             last_prefill_temporary_v_bytes: 0,
             model_load_seconds: started.elapsed().as_secs_f64(),
             gpu_weight_payload_bytes,
+            model_digest,
+            tokenizer_digest,
+            architecture_digest,
         })
     }
 
