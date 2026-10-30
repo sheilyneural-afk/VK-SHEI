@@ -2,6 +2,7 @@
 name = "kvslim"
 version = "0.4.0"
 edition = "2024"
+autobins = false
 
 [workspace]
 members = ["crates/kvslim-adapter-api"]
@@ -13,7 +14,7 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [[bin]]
-name = "kvslim-worker"
+name = "kvslim-cpu-worker"
 required-features = ["torch-backend"]
 path = "src/bin/kvslim-server.rs"
 
@@ -23,9 +24,9 @@ required-features = ["torch-backend"]
 path = "src/bin/kvslim-long-context.rs"
 
 [[bin]]
-name = "kvslim-torch-chat"
+name = "kvslim-chat"
 required-features = ["torch-backend"]
-path = "src/bin/kvslim-torch-chat.rs"
+path = "src/bin/kvslim-chat.rs"
 
 [[bin]]
 name = "kvslim-native-parity"
@@ -36,10 +37,13 @@ path = "src/bin/kvslim-native-parity.rs"
 # Native Rust functionality builds without PyTorch, LibTorch or a GPU.
 default = []
 # LibTorch CPU runtime and its HTTP/CLI binaries.
-torch-backend = ["dep:tch", "http-server"]
-# Native Rust/OpenCL backend: full BF16 LLM runtime (opencl_llm) plus the
-# isolated attention reference (opencl_backend). Requires an OpenCL device.
-accelerator-backend = ["dep:opencl3", "dep:safetensors", "dep:tokenizers", "http-server"]
+torch-backend = ["dep:tch", "model-bundle", "http-server"]
+# Native accelerator runtime and isolated attention reference. Concrete device
+# libraries are implementation details selected behind the adapter boundary.
+accelerator-backend = ["dep:opencl3", "model-bundle", "dep:minijinja", "http-server"]
+model-bundle = ["dep:safetensors", "dep:tokenizers"]
+# Physical adapter conformance is opt-in and never part of the portable suite.
+physical-conformance = ["accelerator-backend"]
 # HTTP-only Rust multiplexer; optional and does not load model weights.
 unified-router = ["dep:reqwest", "http-server"]
 # Release installer: opt-in because the core does not need network access.
@@ -66,6 +70,10 @@ path = "src/bin/kvslim-autoconfigure.rs"
 [[bin]]
 name = "kvslim-calibrate"
 path = "src/bin/kvslim-calibrate.rs"
+
+[[bin]]
+name = "kvslim-certify"
+path = "src/bin/kvslim-certify.rs"
 
 [[bin]]
 name = "kvslim-models"
@@ -101,33 +109,28 @@ name = "kvslim-validate-model"
 path = "src/bin/kvslim-validate-model.rs"
 
 [[bin]]
-name = "kvslim-igpu-bench"
-path = "src/bin/kvslim-igpu-bench.rs"
+name = "kvslim-attention-bench"
+path = "src/bin/kvslim-attention-bench.rs"
 required-features = ["accelerator-backend"]
 
 [[bin]]
-name = "kvslim-accelerator-cli"
-path = "src/bin/kvslim-opencl-llm.rs"
+name = "kvslim-runtime-cli"
+path = "src/bin/kvslim-runtime-cli.rs"
 required-features = ["accelerator-backend"]
 
 [[bin]]
 name = "kvslim-runtime-compare"
-path = "src/bin/kvslim-compare-opencl.rs"
+path = "src/bin/kvslim-runtime-compare.rs"
 required-features = ["accelerator-backend", "torch-backend"]
 
 [[bin]]
-name = "kvslim-accelerator-worker"
-path = "src/bin/kvslim-opencl-server.rs"
+name = "kvslim-runtime-worker"
+path = "src/bin/kvslim-runtime-worker.rs"
 required-features = ["accelerator-backend"]
 
 [[bin]]
 name = "kvslim-server"
 path = "src/bin/kvslim-gateway.rs"
-required-features = ["unified-router"]
-
-[[bin]]
-name = "kvslim-unified-server"
-path = "src/bin/kvslim-unified-server.rs"
 required-features = ["unified-router"]
 
 [[bin]]
@@ -140,6 +143,10 @@ name = "kvslim-document-ask"
 path = "src/bin/kvslim-document-ask.rs"
 required-features = ["torch-backend"]
 
+[[bin]]
+name = "kvslim-document"
+path = "src/bin/kvslim-document.rs"
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", optional = true }
@@ -151,6 +158,7 @@ serde_json = "1"
 sha2 = "0.10"
 safetensors = { version = "0.3.3", optional = true }
 tokenizers = { version = "0.22", optional = true }
+minijinja = { version = "2", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"], optional = true }
 kvslim-adapter-api = { path = "crates/kvslim-adapter-api" }

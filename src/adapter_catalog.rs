@@ -91,7 +91,7 @@ fn accelerator_capabilities() -> Vec<AcceleratorCapabilities> {
     if let Ok(runtime) = crate::opencl_backend::OpenClBackend::new() {
         let info = runtime.device_info();
         accelerators.push(AcceleratorCapabilities {
-            backend: "opencl".into(),
+            backend: "accelerator".into(),
             name: info.name.clone(),
             vendor: Some(info.vendor.clone()),
             memory_bytes: Some(info.reported_global_memory_bytes),
@@ -130,8 +130,8 @@ pub fn compiled_adapters() -> Vec<AdapterDescriptor> {
 
     #[cfg(feature = "torch-backend")]
     adapters.push(AdapterDescriptor {
-        id: "torch-runtime".to_owned(),
-        backend: "torch".to_owned(),
+        id: "cpu-runtime".to_owned(),
+        backend: "cpu".to_owned(),
         compute: ComputeKind::Cpu,
         priority: 100,
         activation: ActivationPolicy::Explicit,
@@ -142,8 +142,8 @@ pub fn compiled_adapters() -> Vec<AdapterDescriptor> {
 
     #[cfg(feature = "accelerator-backend")]
     adapters.push(AdapterDescriptor {
-        id: "opencl-runtime".to_owned(),
-        backend: "opencl".to_owned(),
+        id: "accelerator-runtime".to_owned(),
+        backend: "accelerator".to_owned(),
         compute: ComputeKind::Any,
         priority: 100,
         activation: ActivationPolicy::Explicit,
@@ -161,17 +161,17 @@ pub fn adapter_status() -> Vec<AdapterStatus> {
         .into_iter()
         .map(|descriptor| {
             let (availability, reason) = match descriptor.backend.as_str() {
-                "opencl" => {
+                "accelerator" => {
                     #[cfg(feature = "accelerator-backend")]
                     {
                         match crate::opencl_backend::OpenClBackend::new() {
                             Ok(_) => (
                                 AdapterAvailability::RuntimeAvailable,
-                                "dispositivo OpenCL detectado".to_owned(),
+                                "acelerador detectado".to_owned(),
                             ),
                             Err(error) => (
                                 AdapterAvailability::RuntimeUnavailable,
-                                format!("OpenCL no disponible: {error}"),
+                                format!("acelerador no disponible: {error}"),
                             ),
                         }
                     }
@@ -183,7 +183,7 @@ pub fn adapter_status() -> Vec<AdapterStatus> {
                         )
                     }
                 }
-                "torch" => (
+                "cpu" => (
                     AdapterAvailability::RequiresProbe,
                     "requiere validar el runtime local".to_owned(),
                 ),
@@ -210,27 +210,32 @@ pub fn select_for_model(
     requested_backend: Option<&str>,
     requested_compute: Option<ComputeKind>,
 ) -> Result<AdapterSelection> {
-    let spec = crate::model_config::ModelSpec::inspect(model_dir)?;
+    let model_dir = model_dir.as_ref();
+    let _spec = crate::model_config::ModelSpec::inspect(model_dir)?;
     let available = compiled_adapters();
     let selection = select_adapter(&available, requested_backend, requested_compute)
         .ok_or_else(|| anyhow::anyhow!("no runtime adapter is available by default; select an installed adapter explicitly after capability probing"))?;
 
     match selection.backend.as_str() {
-        "torch" => {
+        "cpu" => {
             #[cfg(feature = "torch-backend")]
-            spec.ensure_torch_runtime_compatible()?;
+            let _ = create_adapter(&selection.adapter_id)?;
             #[cfg(not(feature = "torch-backend"))]
             bail!("torch adapter is not compiled");
         }
-        "opencl" => {
+        "accelerator" => {
             #[cfg(feature = "accelerator-backend")]
-            let _ = &spec;
+            let _ = create_adapter(&selection.adapter_id)?;
             #[cfg(not(feature = "accelerator-backend"))]
-            bail!("OpenCL adapter is not compiled");
+            bail!("accelerator adapter is not compiled");
         }
         backend => bail!("adapter has no validation policy: {backend}"),
     }
 
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(model_dir.join("config.json"))?)?;
+    let adapter = create_adapter(&selection.adapter_id)?;
+    adapter.inspect(model_dir, &config)?;
     Ok(selection)
 }
 
@@ -241,42 +246,47 @@ pub fn select_available_for_model(
     requested_backend: Option<&str>,
     requested_compute: Option<ComputeKind>,
 ) -> Result<AdapterSelection> {
-    let spec = crate::model_config::ModelSpec::inspect(model_dir)?;
+    let model_dir = model_dir.as_ref();
+    let _spec = crate::model_config::ModelSpec::inspect(model_dir)?;
     let selection =
         select_available_adapter(&adapter_status(), requested_backend, requested_compute)
             .ok_or_else(|| {
                 anyhow::anyhow!("no hay un runtime validado para este equipo y esta solicitud")
             })?;
     match selection.backend.as_str() {
-        "torch" => {
+        "cpu" => {
             #[cfg(feature = "torch-backend")]
-            spec.ensure_torch_runtime_compatible()?;
+            let _ = create_adapter(&selection.adapter_id)?;
         }
-        "opencl" => {
+        "accelerator" => {
             #[cfg(feature = "accelerator-backend")]
-            let _ = &spec;
+            let _ = create_adapter(&selection.adapter_id)?;
         }
         backend => bail!("adapter has no validation policy: {backend}"),
     }
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(model_dir.join("config.json"))?)?;
+    let adapter = create_adapter(&selection.adapter_id)?;
+    adapter.inspect(model_dir, &config)?;
     Ok(selection)
 }
 
 /// Construct only an adapter whose implementation is compiled in this binary.
 pub fn create_adapter(adapter_id: &str) -> Result<Box<dyn ModelAdapter>> {
     match adapter_id {
-        "opencl-runtime" => {
+        "accelerator-runtime" => {
             #[cfg(feature = "accelerator-backend")]
             return Ok(Box::new(
                 crate::opencl_adapter::OpenClModelAdapter::default(),
             ));
             #[cfg(not(feature = "accelerator-backend"))]
-            bail!("OpenCL adapter is not compiled");
+            bail!("accelerator adapter is not compiled");
         }
-        "torch-runtime" => {
+        "cpu-runtime" => {
             #[cfg(feature = "torch-backend")]
             return Ok(Box::new(crate::torch_adapter::TorchModelAdapter::default()));
             #[cfg(not(feature = "torch-backend"))]
-            bail!("Torch adapter is not compiled");
+            bail!("CPU adapter is not compiled");
         }
         other => bail!("unknown adapter: {other}"),
     }

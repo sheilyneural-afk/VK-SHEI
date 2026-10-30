@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
-//! Experimental full-model MiniCPM5-1B BF16 GPU server.
-//! This is a SEPARATE server from the historically verified BF16 CPU service.
-//! No PyTorch or LibTorch needed: Rust + OpenCL GPU executes all transformer
+//! Local model runtime worker behind the backend-neutral KVSLIM gateway.
+//! This worker is an independent local runtime behind the KVSLIM gateway.
+//! No PyTorch or LibTorch needed: Rust + local runtime executes all transformer
 //! neural arithmetic, retaining original BF16 weights and BF16 KV in device RAM.
 
 use anyhow::{Context, Result, bail, ensure};
@@ -12,6 +12,13 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use kvslim::{
+    gpu_canonical_lod::CanonicalGpuLodConfig,
+    inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
+    model_config::ModelSpec,
+    opencl_llm::{OpenClGeneration, OpenClLlm, WeightMode},
+};
+use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -20,18 +27,13 @@ use std::{
     sync::atomic::AtomicBool,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use terrsvusion::{
-    gpu_canonical_lod::CanonicalGpuLodConfig,
-    inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
-    model_config::ModelSpec,
-    opencl_llm::{OpenClGeneration, OpenClLlm, WeightMode},
-};
 use tokenizers::Tokenizer;
 
-const MODEL_ID: &str = "terrsvusion-opencl-bf16";
 const MAX_BODY_BYTES: usize = 1_048_576;
-const CHAT_GPU_HTML: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/chat-gpu.html"));
+const CHAT_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/chat-runtime.html"
+));
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct ChatMessage {
@@ -97,18 +99,18 @@ fn invalid(code: StatusCode, message: impl Into<String>) -> ApiError {
     ApiError(code, message.into())
 }
 
-fn validate(request: &ChatRequest) -> Result<usize, ApiError> {
+fn validate(request: &ChatRequest, served_model: &str) -> Result<usize, ApiError> {
     if request.messages.is_empty() {
         return Err(invalid(
             StatusCode::BAD_REQUEST,
             "messages must not be empty",
         ));
     }
-    let model = request.model.as_deref().unwrap_or(MODEL_ID);
-    if model != MODEL_ID {
+    let model = request.model.as_deref().unwrap_or(served_model);
+    if model != served_model {
         return Err(invalid(
             StatusCode::NOT_FOUND,
-            format!("model {model} not served by OpenCL GPU; use {MODEL_ID}"),
+            format!("model {model} is not served by this local runtime; use {served_model}"),
         ));
     }
     let supported_roles = ["system", "user", "assistant"];
@@ -119,13 +121,13 @@ fn validate(request: &ChatRequest) -> Result<usize, ApiError> {
     {
         return Err(invalid(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "GPU chat supports only system/user/assistant text messages",
+            "runtime chat supports only system/user/assistant text messages",
         ));
     }
     if request.native {
         return Err(invalid(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "native=true belongs to the separate BF16 dense CPU server",
+            "native=true is not supported by this runtime contract",
         ));
     }
     if request.document.as_ref().is_some_and(|d| !d.is_empty()) {
@@ -210,28 +212,30 @@ fn validate(request: &ChatRequest) -> Result<usize, ApiError> {
     Ok(max_tokens)
 }
 
-fn render_prompt(messages: &[ChatMessage], thinking: bool) -> Result<String> {
+fn render_prompt(
+    template_source: &str,
+    messages: &[ChatMessage],
+    thinking: bool,
+) -> Result<String> {
     ensure!(!messages.is_empty(), "no messages");
-    let mut prompt = String::from("<s>");
-    for msg in messages {
-        ensure!(
-            matches!(msg.role.as_str(), "system" | "user" | "assistant"),
-            "unsupported role: {}",
-            msg.role
-        );
-        prompt.push_str("<|im_start|>");
-        prompt.push_str(&msg.role);
-        prompt.push('\n');
-        prompt.push_str(&msg.content);
-        prompt.push_str("<|im_end|>\n");
-    }
-    prompt.push_str("<|im_start|>assistant\n");
-    if thinking {
-        prompt.push_str("<think>\n");
-    } else {
-        prompt.push_str("<think>\n\n</think>\n\n");
-    }
-    Ok(prompt)
+    let mut env = Environment::new();
+    env.add_template("chat", template_source)
+        .context("invalid model chat template")?;
+    let rendered = env.get_template("chat")?.render(context! {
+        messages => messages.iter().map(|message| json!({
+            "role": message.role,
+            "content": message.content,
+        })).collect::<Vec<_>>(),
+        add_generation_prompt => true,
+        enable_thinking => thinking,
+        bos_token => "",
+        eos_token => "",
+    })?;
+    ensure!(
+        !rendered.is_empty(),
+        "model chat template rendered an empty prompt"
+    );
+    Ok(rendered)
 }
 
 #[derive(Clone)]
@@ -249,6 +253,7 @@ struct GpuAnswer {
 struct GpuExecutor {
     model: OpenClLlm,
     tokenizer: Tokenizer,
+    chat_template: String,
 }
 
 impl InferenceExecutor for GpuExecutor {
@@ -258,7 +263,11 @@ impl InferenceExecutor for GpuExecutor {
 
     fn execute(&mut self, request: GpuJob, cancel: &AtomicBool) -> Result<GpuAnswer> {
         self.model.reset_session()?;
-        let text = render_prompt(&request.messages, request.enable_thinking)?;
+        let text = render_prompt(
+            &self.chat_template,
+            &request.messages,
+            request.enable_thinking,
+        )?;
         let input = self
             .tokenizer
             .encode(text.as_str(), false)
@@ -282,6 +291,7 @@ impl InferenceExecutor for GpuExecutor {
 #[derive(Clone)]
 struct AppState {
     worker: InferenceWorker<GpuJob, GpuAnswer, anyhow::Error>,
+    model_id: String,
     model_dir: String,
     gpu_device: String,
     load_seconds: f64,
@@ -307,13 +317,14 @@ struct AppState {
 }
 
 async fn index() -> Html<&'static str> {
-    Html(CHAT_GPU_HTML)
+    Html(CHAT_HTML)
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status":"ready",
-        "engine":MODEL_ID,
+        "engine":"kvslim-engine",
+        "model":state.model_id,
         "model_directory": state.model_dir,
         "running_backend": "physical_OpenCL_GPU_Rust",
         "device":state.gpu_device,
@@ -322,8 +333,8 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "model_weights":"original_BF16_unchanged",
         "neural_arithmetic":"OpenCL_GPU_FP32_accumulation_BF16_intermediates",
         "full_llm_layers_computed_on_gpu":true,
-        "historical_terravision_lod_active":false,
-        "canonical_cpu_terravision_lod_components_active":state.lod_epsilon.is_some(),
+        "kvslim_lod_active":false,
+        "canonical_cpu_kvslim_lod_components_active":state.lod_epsilon.is_some(),
         "canonical_cpu_lod_modules":["adaptive_extent::ParallelContextAxis",
             "cold_store::ColdStore","attention_certificate::select_by_exact_mass"],
         "gpu_lod_epsilon":state.lod_epsilon,
@@ -364,19 +375,38 @@ async fn ready(State(_state): State<AppState>) -> Json<Value> {
     Json(json!({"status":"ready","workers":1,"model_loaded":true}))
 }
 
-async fn models() -> Json<Value> {
+async fn models(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"object":"list","data":[
-        {"id":MODEL_ID,"object":"model","created":0,"owned_by":"terrsvusion-local-gpu"}
+        {"id":state.model_id,"object":"model","created":0,"owned_by":"kvslim-local-runtime"}
     ]}))
 }
 
 async fn capabilities(State(state): State<AppState>) -> Json<Value> {
+    let model_path = std::path::Path::new(&state.model_dir);
+    let model_digest = model_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    let calibration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("deploy/local-production/runtime/calibration")
+        .join(format!("{model_digest}.json"));
+    let calibration = std::fs::read(&calibration_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|value| {
+            value.get("schema").and_then(Value::as_str) == Some("kvslim.calibration_receipt/v1")
+                && value.get("status").and_then(Value::as_str) == Some("measured-basic-execution")
+        });
     Json(json!({
-        "model":MODEL_ID,"gpu_device":state.gpu_device,
+        "engine":"kvslim-engine",
+        "model_checkpoint":state.model_dir,
+        "model_digest":model_digest,
+        "calibration":calibration,
+        "model":state.model_id,"gpu_device":state.gpu_device,
         "gpu_model_loaded":true,"gpu_full_llm_inference":true,
         "compute_precision":"FP32 accumulations, BF16 model weights and KV",
-        "models_verified":["MiniCPM5-1B BF16 single shard"],
-        "historical_terravision_lod_active":false,
+        "models_verified":[],
+        "kvslim_lod_active":false,
         "canonical_cpu_lod_components_active":state.lod_epsilon.is_some(),
         "canonical_lod_epsilon":state.lod_epsilon,
         "gpu_micro_axis_novelty_sigma":state.gpu_micro_axis_sigma,
@@ -406,9 +436,8 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_prefill_cold_pages":"batched up to 64 BF16 tokens/page using original ColdStore",
         "gpu_prefill_temporary_v_residency":"released after cold seal; no permanent extra GPU V cache",
          "canonical_lod_scope":"original CPU index/LSH and micro-links, ColdStore and final exact-score mass; new conservative region BF16-box pruning for positive epsilon; full CPU regional branch-and-bound still pending",
-        "parity_with_cpu_BF16":{"same_token_ids_in_Hola_2step":true,
-            "logits_bit_exact":false,"kv_sha_bit_exact":false},
-        "server_backend":"Rust+OpenCL physical GPU, no PyTorch",
+        "parity_with_cpu":null,
+        "server_backend":"local accelerator runtime",
         "max_context_tokens":state.max_context_tokens,
         "max_output_tokens":512,
         "API":{"OpenAI_compatible_subset":true,"stream":false,
@@ -420,7 +449,7 @@ async fn chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let max_tokens = validate(&request)?;
+    let max_tokens = validate(&request, &state.model_id)?;
     let response = state
         .worker
         .try_submit(GpuJob {
@@ -431,11 +460,11 @@ async fn chat(
         .map_err(|err| match err {
             SubmitError::QueueFull => invalid(
                 StatusCode::TOO_MANY_REQUESTS,
-                "OpenCL GPU worker queue is full",
+                "local runtime worker queue is full",
             ),
             SubmitError::WorkerStopped => invalid(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "OpenCL GPU worker is unavailable",
+                "local runtime worker is unavailable",
             ),
         })?;
     let result = tokio::time::timeout(state.timeout, response)
@@ -443,7 +472,7 @@ async fn chat(
         .map_err(|_| {
             invalid(
                 StatusCode::GATEWAY_TIMEOUT,
-                "OpenCL GPU inference request deadline expired",
+                "local runtime inference request deadline expired",
             )
         })?
         .map_err(|err| match err {
@@ -458,9 +487,10 @@ async fn chat(
                 }
             }
             InferenceError::Cancelled => invalid(StatusCode::REQUEST_TIMEOUT, "cancelled"),
-            InferenceError::ExecutorPanicked | InferenceError::WorkerStopped => {
-                invalid(StatusCode::SERVICE_UNAVAILABLE, "OpenCL worker stopped")
-            }
+            InferenceError::ExecutorPanicked | InferenceError::WorkerStopped => invalid(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "local runtime worker stopped",
+            ),
         })?;
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -473,10 +503,10 @@ async fn chat(
         "stop"
     };
     Ok(Json(json!({
-        "id":format!("chatcmpl-terrsvusion-igpu-{created}"),
+        "id":format!("chatcmpl-kvslim-igpu-{created}"),
         "object":"chat.completion",
         "created":created,
-        "model":MODEL_ID,
+        "model":state.model_id,
         "choices":[{"index":0,"message":{"role":"assistant","content":result.text},
             "finish_reason":finish_reason}],
         "usage":{
@@ -489,7 +519,7 @@ async fn chat(
             "engine":"Rust_OpenCL_Full_BF16",
             "gpu_weight_bytes":generation.gpu_weight_payload_bytes,
             "gpu_device":generation.device_name,
-            "historical_terravision_lod_active":false,
+            "kvslim_lod_active":false,
             "canonical_cpu_lod_components_active":generation.canonical_cpu_lod_components_active,
             "canonical_cpu_lod_stats":generation.canonical_cpu_lod_stats,
             "gpu_kv_capacity_bytes":generation.gpu_kv_capacity_bytes,
@@ -528,21 +558,23 @@ async fn chat(
     })))
 }
 
-/// The HTTP chat template is MiniCPM-specific. The OpenCL CLI supports
-/// additional Llama checkpoints, but this server must refuse them before
-/// allocating a GPU context or claiming to provide MiniCPM chat.
-fn validate_gpu_chat_checkpoint(model: &std::path::Path) -> Result<()> {
-    let spec = ModelSpec::inspect(model)?;
-    ensure!(
-        spec.legacy_bf16_geometry_match,
-        "GPU chat server requires a compatible MiniCPM5-1B BF16 checkpoint; use the OpenCL CLI for Llama"
-    );
-    Ok(())
+fn validate_model_bundle(model: &std::path::Path) -> Result<String> {
+    let _spec = ModelSpec::inspect(model)?;
+    let config: Value = serde_json::from_slice(
+        &std::fs::read(model.join("tokenizer_config.json"))
+            .context("tokenizer_config.json is required for message rendering")?,
+    )?;
+    let template = config
+        .get("chat_template")
+        .and_then(Value::as_str)
+        .context("tokenizer_config.json has no chat_template")?;
+    ensure!(!template.trim().is_empty(), "model chat_template is empty");
+    Ok(template.to_owned())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut model = PathBuf::from("/home/yo/models/MiniCPM5-1B");
+    let mut model = PathBuf::from("deploy/local-production/runtime/models/active");
     let mut host = String::from("127.0.0.1");
     let mut port = 8188u16;
     let mut max_context = 2048usize;
@@ -556,7 +588,7 @@ async fn main() -> Result<()> {
     let mut micro_safety_fuse: Option<usize> = None;
     // AMD Phoenix: 128-token layer-major causal BF16 prefill benchmarked
     // and verified bit-exact against the previous OpenCL dense/LOD engine.
-    // Explicit --gpu-prefill-legacy preserves the original fallback path.
+    // Explicit fallback keeps the conservative execution path available.
     let mut prefill_batch_tokens = Some(128usize);
     // GPU-only tunables are opt-in. Legacy GPU and CPU remain available.
     let mut prefill_weight_reuse = 1usize;
@@ -593,7 +625,7 @@ async fn main() -> Result<()> {
                         .parse()?,
                 );
             }
-            "--gpu-prefill-legacy" => {
+            "--gpu-prefill-fallback" => {
                 prefill_batch_tokens = None;
             }
             "--gpu-prefill-weight-reuse" => {
@@ -690,11 +722,13 @@ async fn main() -> Result<()> {
             }
             "--allow-network" => allow_network = true,
             "--help" | "-h" => {
-                println!("Terrsvusion OpenCL GPU chat (experimental, BF16 MiniCPM5 only)");
+                println!("KVSLIM local runtime worker (local model runtime)");
                 println!(
-                    "--model DIR --host 127.0.0.1 --port 8188 --max-context-tokens 2048 --timeout-secs 300 --resident|--stream-weights --gpu-lod|--gpu-dense-kv --lod-epsilon 0 --lod-stage 64 --gpu-prefill-batch 128|--gpu-prefill-legacy --gpu-prefill-weight-reuse 8 --gpu-hot-v-tokens 512 --gpu-decode-unroll4|--gpu-decode-original --gpu-deferred-cold|--gpu-immediate-cold --gpu-fused-decode|--gpu-unfused-decode"
+                    "--model DIR --host 127.0.0.1 --port 8188 --max-context-tokens 2048 --timeout-secs 300 --resident|--stream-weights --gpu-lod|--gpu-dense-kv --lod-epsilon 0 --lod-stage 64 --gpu-prefill-batch 128|--gpu-prefill-fallback --gpu-prefill-weight-reuse 8 --gpu-hot-v-tokens 512 --gpu-decode-unroll4|--gpu-decode-original --gpu-deferred-cold|--gpu-immediate-cold --gpu-fused-decode|--gpu-unfused-decode"
                 );
-                println!("No auth. Bind loopback only unless --allow-network explicitly passed.");
+                println!(
+                    "No direct authentication: bind loopback only; use the authenticated gateway for clients."
+                );
                 return Ok(());
             }
             other => bail!("unrecognized option {other}"),
@@ -707,9 +741,12 @@ async fn main() -> Result<()> {
         (1..=32768).contains(&max_context),
         "invalid GPU max context"
     );
-    // This HTTP server hardcodes MiniCPM chat delimiters. The generic OpenCL
-    // CLI may load other Llama-style models, but this server must fail closed.
-    validate_gpu_chat_checkpoint(&model)?;
+    let chat_template = validate_model_bundle(&model)?;
+    let model_id = model
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("model path must have a stable directory name")?
+        .to_owned();
     let started = Instant::now();
     let mut engine = if let Some(config) = lod {
         OpenClLlm::load_with_canonical_lod(&model, max_context, mode, config)?
@@ -717,7 +754,7 @@ async fn main() -> Result<()> {
         OpenClLlm::load(&model, max_context, mode)?
     };
     if micro_sigma.is_some() || micro_warmup.is_some() || micro_safety_fuse.is_some() {
-        let mut policy = terrsvusion::adaptive_extent::AxisPolicy::default();
+        let mut policy = kvslim::adaptive_extent::AxisPolicy::default();
         if let Some(value) = micro_sigma {
             policy.novelty_sigma = value;
         }
@@ -766,11 +803,13 @@ async fn main() -> Result<()> {
         GpuExecutor {
             model: engine,
             tokenizer,
+            chat_template,
         },
         4,
     )?;
     let state = AppState {
         worker,
+        model_id,
         model_dir: model.display().to_string(),
         gpu_device,
         load_seconds: started.elapsed().as_secs_f64(),
@@ -809,7 +848,7 @@ async fn main() -> Result<()> {
         .route("/v1/chat/completions", post(chat))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
-    println!("Terrsvusion GPU Rust/OpenCL listo en http://{addr}");
+    println!("KVSLIM local runtime listo en http://{addr}");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -825,7 +864,7 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
     #[test]
-    fn gpu_http_chat_rejects_non_minicpm_checkpoint_before_gpu_allocation() {
+    fn runtime_accepts_supported_architectures_when_template_is_declared() {
         let tmp = tempfile::tempdir().unwrap();
         let config = serde_json::json!({
             "model_type": "llama",
@@ -847,7 +886,12 @@ mod tests {
             serde_json::to_vec(&config).unwrap(),
         )
         .unwrap();
-        assert!(validate_gpu_chat_checkpoint(tmp.path()).is_ok());
+        std::fs::write(
+            tmp.path().join("tokenizer_config.json"),
+            r#"{"chat_template":"{{ messages[0]['content'] }}"}"#,
+        )
+        .unwrap();
+        assert!(validate_model_bundle(tmp.path()).is_ok());
         let mut llama = config;
         llama["hidden_size"] = json!(4096);
         llama["num_attention_heads"] = json!(32);
@@ -860,15 +904,15 @@ mod tests {
             serde_json::to_vec(&llama).unwrap(),
         )
         .unwrap();
-        assert!(validate_gpu_chat_checkpoint(tmp.path()).is_err());
+        assert!(validate_model_bundle(tmp.path()).is_ok());
     }
 
     #[test]
     fn gpu_browser_request_is_valid() {
-        let req = parse(json!({"model":MODEL_ID,
+        let req = parse(json!({"model":"model-a",
             "messages":[{"role":"user","content":"Hola"}],
             "temperature":0,"stream":false,"max_tokens":2}));
-        assert_eq!(validate(&req).unwrap(), 2);
+        assert_eq!(validate(&req, "model-a").unwrap(), 2);
     }
     #[test]
     fn gpu_api_does_not_silently_accept_unimplemented_modes() {
@@ -881,12 +925,12 @@ mod tests {
             json!({"response_format":{"type":"json_object"}}),
         ] {
             let mut request =
-                json!({"model":MODEL_ID,"messages":[{"role":"user","content":"Hola"}]});
+                json!({"model":"model-a","messages":[{"role":"user","content":"Hola"}]});
             request
                 .as_object_mut()
                 .unwrap()
                 .extend(param.as_object().unwrap().clone());
-            assert!(validate(&parse(request)).is_err());
+            assert!(validate(&parse(request), "model-a").is_err());
         }
     }
     #[test]
@@ -896,8 +940,13 @@ mod tests {
             content: "Hola".into(),
         }];
         assert_eq!(
-            render_prompt(&messages, false).unwrap(),
-            "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            render_prompt(
+                "{{ messages[0]['role'] }}: {{ messages[0]['content'] }}",
+                &messages,
+                false
+            )
+            .unwrap(),
+            "user: Hola"
         );
     }
 }

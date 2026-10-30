@@ -1,0 +1,68 @@
+name: KVSLIM
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: kvslim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked --lib
+      - run: cargo test --locked -p kvslim-adapter-api
+
+  adapters:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "accelerator-backend"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile selected adapter surface
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo check --locked --all-targets --features "${{ matrix.features }}"
+          else
+            cargo check --locked --all-targets --no-default-features
+          fi
+
+  release-artifacts:
+    runs-on: ubuntu-latest
+    needs: [core, adapters]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --release --no-default-features --lib
+      - run: cargo build --locked --release --features accelerator-backend --bin kvslim-runtime-worker
+      - run: cargo build --locked --release --features unified-router --bin kvslim-server
+      - run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
+      - run: test -x target/release/kvslim-runtime-worker && test -x target/release/kvslim-server
+
+  physical:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --features accelerator-backend --all-targets -- --ignored --nocapture
+
+  load:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --lib inference_worker -- --nocapture

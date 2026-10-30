@@ -1,4 +1,4 @@
-//! Real AMD/Intel/NVIDIA OpenCL GPU attention benchmark (not full LLM inference).
+//! Physical accelerator attention benchmark (not full LLM inference).
 //! Uses the same GQA geometry as configured-model by default but synthetic KV/Q.
 
 use anyhow::{Context, Result, bail, ensure};
@@ -110,10 +110,10 @@ fn main() -> Result<()> {
             "--model" => model = Some(PathBuf::from(args.next().context("missing --model")?)),
             "--help" | "-h" => {
                 println!(
-                    "Usage: kvslim-igpu-bench [--tokens 1024] [--dtype bf16|f16|f32] [--qheads 16] [--kvheads 2] [--dim 128] [--rounds 3] [--model /model]"
+                    "Usage: kvslim-attention-bench [--tokens 1024] [--dtype bf16|f16|f32] [--qheads 16] [--kvheads 2] [--dim 128] [--rounds 3] [--model /model]"
                 );
                 println!(
-                    "Test actual OpenCL GPU attention against Rust CPU reference. Model --model reads config.json only; Q/K/V benchmark inputs are synthetic."
+                    "Test the selected accelerator against the Rust CPU reference. Model --model reads config.json only; Q/K/V benchmark inputs are synthetic."
                 );
                 return Ok(());
             }
@@ -191,7 +191,7 @@ fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "engine": "kvslim-opencl-rust-native",
+            "engine": "kvslim-runtime-attention",
             "backend": gpu.name(),
             "hardware": gpu.device_info(),
             "physical_gpu_discovered_via": "OpenCL CL_DEVICE_TYPE_GPU",

@@ -366,7 +366,7 @@ impl AttentionBackend for OpenClBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "physical-conformance"))]
 mod tests {
     use super::*;
     use crate::portable::{AttentionGeometry, CpuReferenceBackend, RawTensor};

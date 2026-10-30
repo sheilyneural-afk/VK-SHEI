@@ -240,7 +240,7 @@ impl HipRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "physical-conformance"))]
 mod tests {
     use super::*;
     #[test]

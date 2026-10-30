@@ -230,7 +230,7 @@ impl DecoderGeometry {
                 eos: vec![1, 130_073],
                 chat: ChatTemplateFamily::MiniCpm5,
             })
-        } else if spec.is_llama31_8b_instruct_bf16() {
+        } else if spec.matches_dense_profile() {
             Ok(Self {
                 hidden: 4_096,
                 intermediate: 14_336,
@@ -5097,7 +5097,7 @@ impl AttentionCache for KVSLIMKvCache {
 impl MiniCpmModel {
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
         let spec = ModelSpec::inspect(&model_dir)?;
-        spec.ensure_torch_runtime_compatible()?;
+        spec.ensure_cpu_runtime_compatible()?;
         let geometry = DecoderGeometry::from_spec(&spec)?;
         let weights = WeightArchive::open_dir(&model_dir)?;
         let embedding = weights.require_bf16(
@@ -5579,7 +5579,7 @@ impl TorchModelRuntime {
 
     fn load_internal(model_dir: &Path, prefix_cache_dir: Option<PathBuf>) -> Result<Self> {
         let spec = ModelSpec::inspect(model_dir)?;
-        spec.ensure_torch_runtime_compatible()?;
+        spec.ensure_cpu_runtime_compatible()?;
         let tokenizer_path = model_dir.join("tokenizer.json");
         let model_identity = if spec.native_profile_match {
             let weight_path = model_weight_file(model_dir)?;

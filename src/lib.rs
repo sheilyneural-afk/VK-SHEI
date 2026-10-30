@@ -9,6 +9,7 @@ pub mod adapter_catalog;
 pub mod adaptive_extent;
 pub mod attention_certificate;
 pub mod cold_store;
+pub mod conformance;
 pub mod conversion_worker;
 pub mod document_graph;
 pub mod engine;
@@ -27,6 +28,8 @@ pub use kvslim_adapter_api::{
     AdapterAvailability, AdapterCapabilities, AdapterDescriptor, AdapterSelection, AdapterStatus,
     ComputeKind, ModelAdapter, select_adapter, select_available_adapter,
 };
+#[cfg(feature = "model-bundle")]
+pub mod model_bundle;
 pub mod model_catalog;
 pub mod model_config;
 pub mod model_resolver;

@@ -21,9 +21,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_BODY_BYTES: usize = 1_048_576;
 const CHAT_HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/chat.html"));
-const NATIVE_CHAT_HTML: &str = include_str!(concat!(
+const RUNTIME_CHAT_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/assets/chat-native.html"
+    "/assets/chat-runtime.html"
 ));
 
 /// Accepted OpenAI-compatible subset. Unsupported behavior must fail closed,
@@ -354,20 +354,18 @@ fn validate_request(
     Ok((max_tokens, native, request.compare_native))
 }
 
-fn model_list_json(dense_route: &str) -> Value {
+fn model_list_json(loaded_model_id: &str) -> Value {
     json!({
         "object": "list",
         "data": [
             {"id": KVSLIM_MODEL, "object": "model", "created": 0, "owned_by": "local"},
-            {"id": dense_route, "object": "model", "created": 0, "owned_by": "local"}
+            {"id": loaded_model_id, "object": "model", "created": 0, "owned_by": "local"}
         ]
     })
 }
 
 async fn models(State(state): State<AppState>) -> Json<Value> {
-    Json(model_list_json(advertised_dense_model(
-        state.model_spec.is_llama31_8b_instruct_bf16(),
-    )))
+    Json(model_list_json(&state.model_id))
 }
 
 async fn capabilities(State(state): State<AppState>) -> Json<Value> {
@@ -383,8 +381,8 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         });
     Json(json!({
         "engine": "kvslim-engine",
-        "backend": "rust_with_optional_libtorch",
-        "running_backend": "libtorch_cpu_bf16",
+        "backend": "local-runtime",
+        "running_backend": "local-runtime",
         "independent_rust_core": true,
         "native_cpu_reference_attention": true,
         "gpu_llm_inference_implemented": false,
@@ -402,21 +400,15 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "libtorch_model_shared_between_workers": state.shared_authority,
         "shared_weight_tensors_verified_by_data_ptr": state.shared_weight_tensors,
         "model_metadata": state.model_spec.support_summary(),
-        "supported_chat_models": [
-            KVSLIM_MODEL,
-            advertised_dense_model(state.model_spec.is_llama31_8b_instruct_bf16())
-        ],
-        "torch_runtime_family": state.model_spec.torch_runtime_family(),
-        "kvslim_kv_lod": state.model_spec.native_profile_match,
-        "llama_dense_bf16": state.model_spec.is_llama31_8b_instruct_bf16(),
+        "supported_chat_models": [KVSLIM_MODEL, state.model_id],
         "certified_v_omission_api":{
             "availability":"disabled_until_logits_parity_and_exact_fallback",
             "parameter":"applied_mass_tolerance",
             "range":"0 < epsilon <= 0.01",
-            "supported_geometry":"Llama_3.1_8B_32Q_8KV_128dim; original configured-model 16Q_2KV",
-            "authority":"exact BF16 K score softmax-mass, complete per-KV-head V maxima, original ColdStore partial reads",
+            "supported_geometry":"reported by the selected adapter after model inspection",
+            "authority":"selected adapter capability and measured runtime evidence",
             "promise":"not exposed by the server until final-logit parity and exact fallback are verified",
-            "legacy_prefix":"missing per-KV-head certificate -> full original BF16 V fallback"
+            "fallback_policy":"missing per-KV-head certificate -> full BF16 V evaluation"
         },
         "chat_features": {
             "greedy": true,
@@ -479,8 +471,8 @@ async fn chat_ui() -> Html<&'static str> {
     Html(CHAT_HTML)
 }
 
-async fn native_chat_ui() -> Html<&'static str> {
-    Html(NATIVE_CHAT_HTML)
+async fn runtime_chat_ui() -> Html<&'static str> {
+    Html(RUNTIME_CHAT_HTML)
 }
 
 async fn ready(State(state): State<AppState>) -> Json<Value> {
@@ -556,7 +548,7 @@ async fn chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let dense_route = advertised_dense_model(state.model_spec.is_llama31_8b_instruct_bf16());
+    let dense_route = advertised_dense_model(state.model_spec.matches_dense_profile());
     let (max_tokens, native, compare_native) =
         validate_request(&request, &state.model_id, dense_route)?;
     let applied_mass_tolerance = request.applied_mass_tolerance;
@@ -586,7 +578,6 @@ async fn chat(
     } else {
         "stop"
     };
-    let llama = state.model_spec.is_llama31_8b_instruct_bf16();
     Ok(Json(json!({
         "id": format!("chatcmpl-kvslim-rust-{created}"),
         "object": "chat.completion",
@@ -594,19 +585,11 @@ async fn chat(
         "model": if native { dense_route } else { KVSLIM_MODEL },
         "weights": {
             "checkpoint": state.model_id,
-            "family": state.model_spec.torch_runtime_family(),
+            "family": "selected-model",
             "dense_route": dense_route,
             "shared_by_native_and_kvslim": true
         },
-        "certified_v_omission_path": if llama {
-            if applied_mass_tolerance.is_some() {
-                "experimental_llama_32q_8kv_exact_mass_partial_v_fail_closed"
-            } else {
-                "disabled_by_default_llama_full_bf16_values"
-            }
-        } else {
-            "exact_mass_minicpm_16q_2kv"
-        },
+        "certified_v_omission_path": "disabled-until-selected-adapter-evidence",
         "certified_v_omission_active": result.certified_v_tokens_omitted>0,
         "certified_v_omission_observation":"V omission count is measured materialized tokens, not reduced resident KV bytes",
 
@@ -886,7 +869,7 @@ async fn main() -> Result<()> {
     validate_document_graph_mode(document_graph_path.is_some(), shared_authority)?;
     let model_path = model.context("--model es obligatorio")?;
     let model_spec = ModelSpec::inspect(&model_path)?;
-    model_spec.ensure_torch_runtime_compatible()?;
+    model_spec.ensure_cpu_runtime_compatible()?;
     let prefix_cache_dir =
         prefix_cache_dir.unwrap_or_else(|| model_path.join(".kvslim-prefix-cache"));
     let load_started = Instant::now();
@@ -941,7 +924,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&address).await?;
     let app = Router::new()
         .route("/", get(chat_ui))
-        .route("/nativo", get(native_chat_ui))
+        .route("/runtime", get(runtime_chat_ui))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/v1/models", get(models))

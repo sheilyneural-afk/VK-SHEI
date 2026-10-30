@@ -1,25 +1,11 @@
 //! Real local model/adaptor gate: inspect, load, prefill, decode and KV replay.
 
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
 use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-
-#[derive(Debug, Serialize)]
-struct ValidationReport {
-    bundle: String,
-    adapter: String,
-    inspect: bool,
-    load: bool,
-    prefill: bool,
-    decode: bool,
-    kv_snapshot: bool,
-    kv_restore: bool,
-    status: &'static str,
-}
 
 fn main() -> Result<()> {
     let bundle = PathBuf::from(
@@ -38,18 +24,9 @@ fn main() -> Result<()> {
         .with_context(|| format!("config.json inválido: {}", config_path.display()))?;
     enforce_profile_budget(&root, &bundle)?;
     let selection = kvslim::adapter_catalog::select_available_for_model(&bundle, None, None)?;
-    let mut adapter = kvslim::adapter_catalog::create_adapter(&selection.adapter_id)?;
-    adapter.inspect(&bundle, &config)?;
-    adapter.load(&bundle, &config)?;
-    let prefill = adapter.prefill(&[0])?;
-    ensure!(
-        prefill.is_object(),
-        "prefill no devolvió un resultado estructurado"
-    );
-    adapter.decode(0)?;
-    let snapshot = adapter.snapshot_kv()?;
-    ensure!(!snapshot.is_empty(), "snapshot KV vacío");
-    adapter.restore_kv(&snapshot)?;
+    let adapter = kvslim::adapter_catalog::create_adapter(&selection.adapter_id)?;
+    let conformance =
+        kvslim::conformance::run_adapter_conformance(adapter, &bundle, &config, &[0])?;
     let bundle_digest = bundle
         .file_name()
         .and_then(|name| name.to_str())
@@ -76,18 +53,7 @@ fn main() -> Result<()> {
     temporary_receipt
         .persist(&receipt_path)
         .map_err(|error| error.error)?;
-    let report = ValidationReport {
-        bundle: bundle.display().to_string(),
-        adapter: selection.adapter_id,
-        inspect: true,
-        load: true,
-        prefill: true,
-        decode: true,
-        kv_snapshot: true,
-        kv_restore: true,
-        status: "validated-for-local-execution",
-    };
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    println!("{}", serde_json::to_string_pretty(&conformance)?);
     Ok(())
 }
 

@@ -4,7 +4,8 @@ use anyhow::{Context, Result, bail, ensure};
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -16,6 +17,7 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 struct AppState {
     client: Client,
     workers: Arc<Vec<(String, String)>>,
+    auth_token: Arc<[u8]>,
 }
 
 #[derive(Debug)]
@@ -25,6 +27,39 @@ impl IntoResponse for GatewayError {
     fn into_response(self) -> axum::response::Response {
         (self.0, Json(json!({"error": {"message": self.1}}))).into_response()
     }
+}
+
+fn constant_time_token_eq(expected: &[u8], supplied: &[u8]) -> bool {
+    let max = expected.len().max(supplied.len());
+    let mut difference = expected.len() ^ supplied.len();
+    for index in 0..max {
+        difference |= expected.get(index).copied().unwrap_or(0) as usize
+            ^ supplied.get(index).copied().unwrap_or(0) as usize;
+    }
+    difference == 0
+}
+
+async fn authenticate(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> axum::response::Response {
+    let supplied = bearer_token(request.headers());
+    if supplied.is_some_and(|token| constant_time_token_eq(&state.auth_token, token.as_bytes())) {
+        next.run(request).await
+    } else {
+        GatewayError(StatusCode::UNAUTHORIZED, "authentication required".into()).into_response()
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    value
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty())
 }
 
 fn loopback_url(raw: &str) -> Result<String> {
@@ -191,6 +226,18 @@ mod tests {
         invalid["calibration"]["bundle"] = json!("model-b");
         assert!(!worker_capabilities_are_valid(Some(&invalid)));
     }
+
+    #[test]
+    fn bearer_auth_rejects_missing_or_wrong_tokens_without_plaintext_fallback() {
+        let mut headers = HeaderMap::new();
+        assert!(bearer_token(&headers).is_none());
+        headers.insert("authorization", "Basic secret".parse().unwrap());
+        assert!(bearer_token(&headers).is_none());
+        headers.insert("authorization", "Bearer right".parse().unwrap());
+        let supplied = bearer_token(&headers).unwrap();
+        assert!(constant_time_token_eq(b"right", supplied.as_bytes()));
+        assert!(!constant_time_token_eq(b"wrong", supplied.as_bytes()));
+    }
 }
 
 async fn models(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError> {
@@ -262,6 +309,12 @@ async fn main() -> Result<()> {
     let mut host = "127.0.0.1".to_owned();
     let mut port = 8288u16;
     let mut assignments = Vec::new();
+    let auth_token = std::env::var("KVSLIM_GATEWAY_TOKEN")
+        .context("KVSLIM_GATEWAY_TOKEN must be set; refusing unauthenticated gateway")?;
+    ensure!(
+        !auth_token.is_empty(),
+        "KVSLIM_GATEWAY_TOKEN cannot be empty"
+    );
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -294,15 +347,19 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         client: Client::builder().pool_max_idle_per_host(16).build()?,
         workers: Arc::new(workers),
+        auth_token: Arc::<[u8]>::from(auth_token.into_bytes()),
     });
     let address = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    let app = Router::new()
-        .route("/health", get(ready.clone()))
-        .route("/ready", get(ready))
+    let protected = Router::new()
         .route("/v1/models", get(models))
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/chat/completions", post(chat))
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate));
+    let app = Router::new()
+        .route("/health", get(ready.clone()))
+        .route("/ready", get(ready))
+        .merge(protected)
         .with_state(state);
     println!("KVSLIM server listening at http://{address}");
     axum::serve(listener, app)

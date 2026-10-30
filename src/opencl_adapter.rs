@@ -1,4 +1,4 @@
-//! Concrete OpenCL implementation of the universal adapter boundary.
+//! Concrete accelerator implementation behind the universal adapter boundary.
 
 use std::path::{Path, PathBuf};
 
@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 use kvslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use serde_json::{Value, json};
 
-use crate::model_config::ModelSpec;
+use crate::model_bundle::ModelBundle;
 use crate::opencl_llm::{OpenClLlm, WeightMode};
 
 pub struct OpenClModelAdapter {
@@ -19,8 +19,8 @@ impl Default for OpenClModelAdapter {
     fn default() -> Self {
         Self {
             capabilities: AdapterCapabilities {
-                adapter_id: "opencl-runtime".into(),
-                backend: "opencl".into(),
+                adapter_id: "accelerator-runtime".into(),
+                backend: "accelerator".into(),
                 supports_prefill: true,
                 supports_decode: true,
                 supports_kv_restore: true,
@@ -38,7 +38,8 @@ impl ModelAdapter for OpenClModelAdapter {
     }
 
     fn inspect(&self, model_dir: &Path, config: &Value) -> Result<()> {
-        let spec = ModelSpec::inspect(model_dir)?;
+        let bundle = ModelBundle::load(model_dir)?;
+        let spec = &bundle.spec;
         if !spec.matches_dense_profile() && spec.model_type != "llama" {
             bail!("OpenCL adapter rejects this model configuration");
         }
@@ -91,7 +92,7 @@ impl ModelAdapter for OpenClModelAdapter {
             .as_ref()
             .context("OpenCL adapter is not loaded")?;
         serde_json::to_vec(&json!({
-            "schema": "kvslim.opencl.replay-snapshot/v1",
+            "schema": "kvslim.runtime.replay-snapshot/v1",
             "model_dir": self.model_dir,
             "tokens": runtime.session_token_ids(),
         }))
@@ -103,8 +104,8 @@ impl ModelAdapter for OpenClModelAdapter {
             serde_json::from_slice(snapshot).context("parse OpenCL K/V snapshot")?;
         ensure!(
             envelope.get("schema").and_then(Value::as_str)
-                == Some("kvslim.opencl.replay-snapshot/v1"),
-            "unsupported OpenCL snapshot schema"
+                == Some("kvslim.runtime.replay-snapshot/v1"),
+            "unsupported runtime snapshot schema"
         );
         let expected_dir = envelope
             .get("model_dir")

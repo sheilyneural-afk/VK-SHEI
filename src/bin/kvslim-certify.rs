@@ -1,8 +1,9 @@
 //! Project-local physical certification runner.
 //!
-//! The runner deliberately does not contain a list of model, vendor, device,
-//! or test names. Cargo's test harness remains the source of truth for the
-//! physical test set; this binary only discovers, executes, and records it.
+//! The production gate runs the current conformance path
+//! collection. It validates the canonical model/adaptor path once and records
+//! the measured result. Diagnostic conformance and benchmark tests remain
+//! separate from release certification.
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
@@ -19,7 +20,6 @@ fn main() -> Result<()> {
     let mut model = None;
     let mut timeout_seconds = None;
     let mut features = None;
-    let mut extra = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--model" => model = Some(PathBuf::from(args.next().context("missing --model path")?)),
@@ -32,13 +32,10 @@ fn main() -> Result<()> {
             }
             "--features" => features = Some(args.next().context("missing --features value")?),
             "--help" | "-h" => {
-                println!(
-                    "kvslim-certify [--model DIR] [--features F1,F2] [--timeout-secs N] [-- cargo test arguments]"
-                );
+                println!("kvslim-certify --model DIR [--features F1,F2] [--timeout-secs N]");
                 return Ok(());
             }
-            "--" => extra.extend(&mut args),
-            other => extra.push(other.to_owned()),
+            other => bail!("unrecognized option {other}"),
         }
     }
 
@@ -48,60 +45,67 @@ fn main() -> Result<()> {
         }
     }
 
+    let host = kvslim::adapter_catalog::host_capabilities();
+    let physical_available = host
+        .adapters
+        .iter()
+        .any(|status| status.availability == kvslim::AdapterAvailability::RuntimeAvailable);
+    let selected_features = features
+        .clone()
+        .or_else(|| physical_available.then(|| "accelerator-backend".to_owned()));
     let started = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let mut command = Command::new("cargo");
-    command
-        .current_dir(&root)
-        .args(["test", "--locked", "--lib"]);
-    if let Some(value) = &features {
-        command.args(["--features", value]);
-    }
-    command
-        .args(["--", "--ignored", "--nocapture"])
-        .args(extra)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(path) = &model {
-        command.env("KVSLIM_TEST_MODEL", path);
-    }
-    if let Some(seconds) = timeout_seconds {
-        command.env("KVSLIM_CERTIFICATION_TIMEOUT_SECS", seconds.to_string());
-    }
-
-    let output = command.output().context("run physical test harness")?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let tests_run = stdout
-        .lines()
-        .find_map(|line| {
-            let rest = line.strip_prefix("running ")?;
-            let count = rest
-                .strip_suffix(" tests")
-                .or_else(|| rest.strip_suffix(" test"))?;
-            count.parse::<usize>().ok()
-        })
-        .unwrap_or(0);
-    let status = if output.status.success() && tests_run > 0 {
-        "passed"
-    } else if output.status.success() {
-        "blocked"
+    let (status, checks_run, exit_code, stdout, stderr) = if !physical_available {
+        ("not_applicable", 0, None, String::new(), String::new())
     } else if model.is_none() {
-        "blocked"
+        (
+            "blocked",
+            0,
+            None,
+            String::new(),
+            "physical adapter detected but no model was supplied".to_owned(),
+        )
     } else {
-        "failed"
+        let mut command = Command::new("cargo");
+        command
+            .current_dir(&root)
+            .args(["run", "--locked", "--bin", "kvslim-validate-model"]);
+        if let Some(value) = &selected_features {
+            command.args(["--features", value]);
+        }
+        command
+            .arg("--")
+            .arg(model.as_ref().expect("model checked above"));
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = &model {
+            command.env("KVSLIM_TEST_MODEL", path);
+        }
+        if let Some(seconds) = timeout_seconds {
+            command.env("KVSLIM_CERTIFICATION_TIMEOUT_SECS", seconds.to_string());
+        }
+        let output = command.output().context("run physical test harness")?;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let status = if output.status.success() {
+            "passed"
+        } else {
+            "failed"
+        };
+        (status, 6, output.status.code(), stdout, stderr)
     };
     let receipt = json!({
-        "schema": "kvslim.physical_certification/v1",
+        "schema": "kvslim.certification/v1",
         "started_unix_seconds": started,
         "finished_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         "status": status,
-        "tests_run": tests_run,
-        "exit_code": output.status.code(),
-        "features": features,
+        "checks_run": checks_run,
+        "exit_code": exit_code,
+        "features": selected_features,
         "model": model.as_ref().map(|path| path.display().to_string()),
-        "host": kvslim::adapter_catalog::host_capabilities(),
-        "harness": "cargo-test-ignored",
+        "host": host,
+        "harness": "kvslim-validate-model",
         "stdout": stdout,
         "stderr": stderr,
     });

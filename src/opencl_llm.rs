@@ -294,7 +294,7 @@ impl CheckpointShards {
         self.payload_bytes
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "physical-conformance"))]
     fn tensor_count(&self) -> usize {
         self.tensor_to_shard.len()
     }
@@ -3536,7 +3536,7 @@ impl OpenClLlm {
             model_weights_dtype: "BF16".to_owned(),
             gpu_compute: "FP32_accumulators_BF16_intermediate_storage".to_owned(),
             hip_bf16_gemm_active: self.native_hip_enabled(),
-            historical_kvslim_lod_active: false,
+            kvslim_lod_active: false,
             canonical_cpu_lod_components_active: self.lod.is_some(),
             canonical_cpu_lod_stats: self.canonical_lod_stats(),
             gpu_kv_capacity_bytes: self.canonical_lod_gpu_kv_capacity_bytes(),
@@ -3614,7 +3614,7 @@ pub struct OpenClGeneration {
     pub model_weights_dtype: String,
     pub gpu_compute: String,
     pub hip_bf16_gemm_active: bool,
-    pub historical_kvslim_lod_active: bool,
+    pub kvslim_lod_active: bool,
     pub canonical_cpu_lod_components_active: bool,
     pub canonical_cpu_lod_stats: Option<CanonicalGpuLodStats>,
     pub gpu_kv_capacity_bytes: usize,
@@ -3689,897 +3689,768 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "requires a physical OpenCL GPU to compile the complete kernel program"]
-    fn gpu_actual_opencl_program_compiles_llama3_rope_kernels() {
-        use super::*;
-        let engine = GpuEngine::new(false).unwrap();
-        assert!(!engine.name.is_empty());
-    }
+    #[cfg(feature = "physical-conformance")]
+    mod physical_conformance {
+        use super::super::*;
 
-    #[test]
-    fn checkpoint_shards_resolve_tensors_and_reject_duplicates() {
-        use super::*;
-        use safetensors::tensor::serialize_to_file;
+        #[test]
+        #[ignore = "requires a physical accelerator and compatible checkpoint"]
+        fn gpu_actual_opencl_program_compiles_llama3_rope_kernels() {
+            use super::*;
+            let engine = GpuEngine::new(false).unwrap();
+            assert!(!engine.name.is_empty());
+        }
 
-        let dir = tempfile::tempdir().unwrap();
-        let first_bytes = [0_u8, 0x3f, 0, 0x40];
-        let second_bytes = [0_u8, 0x41];
-        let first = TensorView::new(Dtype::BF16, vec![2], &first_bytes).unwrap();
-        let second = TensorView::new(Dtype::BF16, vec![1], &second_bytes).unwrap();
-        serialize_to_file(
-            [("model.embed_tokens.weight", first)],
-            &None,
-            &dir.path().join("model-00001-of-00002.safetensors"),
-        )
-        .unwrap();
-        serialize_to_file(
-            [("lm_head.weight", second)],
-            &None,
-            &dir.path().join("model-00002-of-00002.safetensors"),
-        )
-        .unwrap();
-        let names = vec![
-            "model-00001-of-00002.safetensors".to_owned(),
-            "model-00002-of-00002.safetensors".to_owned(),
-        ];
-        let checkpoint = CheckpointShards::open(dir.path(), &names).unwrap();
-        assert_eq!(checkpoint.payload_bytes(), 6);
-        assert_eq!(checkpoint.tensor_count(), 2);
-        checkpoint
-            .with_tensor("model.embed_tokens.weight", |view| {
-                assert_eq!(view.shape(), [2]);
-                assert_eq!(view.data(), first_bytes);
-                Ok(())
-            })
+        #[test]
+        fn checkpoint_shards_resolve_tensors_and_reject_duplicates() {
+            use super::*;
+            use safetensors::tensor::serialize_to_file;
+
+            let dir = tempfile::tempdir().unwrap();
+            let first_bytes = [0_u8, 0x3f, 0, 0x40];
+            let second_bytes = [0_u8, 0x41];
+            let first = TensorView::new(Dtype::BF16, vec![2], &first_bytes).unwrap();
+            let second = TensorView::new(Dtype::BF16, vec![1], &second_bytes).unwrap();
+            serialize_to_file(
+                [("model.embed_tokens.weight", first)],
+                &None,
+                &dir.path().join("model-00001-of-00002.safetensors"),
+            )
             .unwrap();
-        checkpoint
-            .with_tensor("lm_head.weight", |view| {
-                assert_eq!(view.shape(), [1]);
-                assert_eq!(view.data(), second_bytes);
-                Ok(())
-            })
+            serialize_to_file(
+                [("lm_head.weight", second)],
+                &None,
+                &dir.path().join("model-00002-of-00002.safetensors"),
+            )
             .unwrap();
-        assert!(checkpoint.with_tensor("missing", |_| Ok(())).is_err());
-
-        let duplicate = TensorView::new(Dtype::BF16, vec![1], &second_bytes).unwrap();
-        serialize_to_file(
-            [("model.embed_tokens.weight", duplicate)],
-            &None,
-            &dir.path().join("duplicate.safetensors"),
-        )
-        .unwrap();
-        let mut duplicate_names = names;
-        duplicate_names.push("duplicate.safetensors".to_owned());
-        let error = CheckpointShards::open(dir.path(), &duplicate_names)
-            .err()
-            .expect("duplicate tensor names must fail closed");
-        assert!(error.to_string().contains("duplicate checkpoint tensor"));
-    }
-
-    #[test]
-    #[ignore = "requires a configured local checkpoint"]
-    fn local_checkpoint_shards_are_complete() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
-        let spec = ModelSpec::inspect(&model).unwrap();
-        assert!(!spec.weight_shards.is_empty());
-        let checkpoint = CheckpointShards::open(Path::new(&model), &spec.weight_shards).unwrap();
-        assert!(checkpoint.tensor_count() > 0);
-        assert!(checkpoint.payload_bytes() > 0);
-    }
-
-    #[test]
-    #[ignore = "requires actual physical OpenCL GPU and a local configured-model BF16 checkpoint"]
-    fn gpu_actual_full_minicpm5_hola_and_independent_session_reset() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .expect("actual checkpoint tokenizer required");
-        let prompt =
-            "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
-        let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 15);
-        let mut model = OpenClLlm::load(model, 64, WeightMode::Resident)
-            .expect("physical GPU must run the full 24-layer model");
-        let first = model.generate(&ids, 2, false).unwrap();
-        assert_eq!(first.tokens, vec![61973, 61]);
-        let initial_sha = model.logical_kv_sha256().unwrap();
-        model.reset_session().unwrap();
-        let repeated = model.generate(&ids, 2, false).unwrap();
-        assert_eq!(first.tokens, repeated.tokens);
-        assert_eq!(initial_sha, model.logical_kv_sha256().unwrap());
-    }
-
-    #[test]
-    #[ignore = "requires physical GPU and real configured-model checkpoint"]
-    fn gpu_actual_canonical_lod_zero_matches_dense_gpu_outputs() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
+            let names = vec![
+                "model-00001-of-00002.safetensors".to_owned(),
+                "model-00002-of-00002.safetensors".to_owned(),
+            ];
+            let checkpoint = CheckpointShards::open(dir.path(), &names).unwrap();
+            assert_eq!(checkpoint.payload_bytes(), 6);
+            assert_eq!(checkpoint.tensor_count(), 2);
+            checkpoint
+                .with_tensor("model.embed_tokens.weight", |view| {
+                    assert_eq!(view.shape(), [2]);
+                    assert_eq!(view.data(), first_bytes);
+                    Ok(())
+                })
                 .unwrap();
-        let text =
-            "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
-        let encoded = tokenizer.encode(text, false).unwrap();
-        let ids = encoded.get_ids().to_vec();
-        let mut dense = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
-        let dense_result = dense.generate(&ids, 16, true).unwrap();
-        let dense_ids = dense_result.tokens.clone();
-        // Free dense weights before allocating another >2 GiB GPU runtime.
-        drop(dense);
-        let cfg = CanonicalGpuLodConfig {
-            epsilon: 0.0,
-            stage_tokens: 4,
-            cold_directory: None,
-        };
-        let mut lod =
-            OpenClLlm::load_with_canonical_lod(&model, 64, WeightMode::Resident, cfg).unwrap();
-        let lod_result = lod.generate(&ids, 16, true).unwrap();
-        assert_eq!(dense_ids, lod_result.tokens);
-        assert!(lod_result.canonical_cpu_lod_components_active);
-        assert!(lod_result.gpu_kv_capacity_bytes < 64 * 2 * 2 * 128 * 24 * 2);
-        let stats = lod_result.canonical_cpu_lod_stats.as_ref().unwrap();
-        assert!(stats.exact_v_tokens_read_from_cold > 0);
-        assert_eq!(stats.exact_v_tokens_skipped, 0);
-        assert!(stats.four_bit_index_payload_bytes > 0);
-        assert!(stats.physical_cold_store_bytes > 0);
-        for (a, b) in dense_result.steps.iter().zip(lod_result.steps.iter()) {
-            assert_eq!(a.argmax_token, b.argmax_token);
-            let x = a.logits.as_ref().unwrap();
-            let y = b.logits.as_ref().unwrap();
-            assert_eq!(x, y, "epsilon=0 must preserve bitwise GPU dense logits");
+            checkpoint
+                .with_tensor("lm_head.weight", |view| {
+                    assert_eq!(view.shape(), [1]);
+                    assert_eq!(view.data(), second_bytes);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(checkpoint.with_tensor("missing", |_| Ok(())).is_err());
+
+            let duplicate = TensorView::new(Dtype::BF16, vec![1], &second_bytes).unwrap();
+            serialize_to_file(
+                [("model.embed_tokens.weight", duplicate)],
+                &None,
+                &dir.path().join("duplicate.safetensors"),
+            )
+            .unwrap();
+            let mut duplicate_names = names;
+            duplicate_names.push("duplicate.safetensors".to_owned());
+            let error = CheckpointShards::open(dir.path(), &duplicate_names)
+                .err()
+                .expect("duplicate tensor names must fail closed");
+            assert!(error.to_string().contains("duplicate checkpoint tensor"));
         }
-        lod.reset_session().unwrap();
-        let again = lod.generate(&ids, 16, false).unwrap();
-        assert_eq!(again.tokens, lod_result.tokens);
-    }
 
-    #[test]
-    #[ignore = "requires real Radeon GPU and configured-model BF16 checkpoint"]
-    fn gpu_actual_parallel_prefill_dense_matches_sequential_gpu() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let text =
-            "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
-        let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 15);
-        let mut old = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
-        let old_gen = old.generate(&ids, 16, true).unwrap();
-        let old_kv = old.logical_kv_sha256().unwrap();
-        drop(old);
-        let mut fast = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
-        fast.set_batch_prefill_tokens(Some(64)).unwrap();
-        let new_gen = fast.generate(&ids, 16, true).unwrap();
-        let new_kv = fast.logical_kv_sha256().unwrap();
-        assert_eq!(
-            old_gen.tokens, new_gen.tokens,
-            "GPU prefill changed generated token IDs"
-        );
-        assert_eq!(old_kv, new_kv, "GPU prefill changed exact BF16 K/V bytes");
-        for (i, (a, b)) in old_gen.steps.iter().zip(new_gen.steps.iter()).enumerate() {
+        #[test]
+        #[ignore = "requires a configured local checkpoint"]
+        fn local_checkpoint_shards_are_complete() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
+            let spec = ModelSpec::inspect(&model).unwrap();
+            assert!(!spec.weight_shards.is_empty());
+            let checkpoint =
+                CheckpointShards::open(Path::new(&model), &spec.weight_shards).unwrap();
+            assert!(checkpoint.tensor_count() > 0);
+            assert!(checkpoint.payload_bytes() > 0);
+        }
+
+        #[test]
+        #[ignore = "requires actual physical OpenCL GPU and a local configured-model BF16 checkpoint"]
+        fn gpu_actual_full_minicpm5_hola_and_independent_session_reset() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .expect("actual checkpoint tokenizer required");
+            let prompt = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 15);
+            let mut model = OpenClLlm::load(model, 64, WeightMode::Resident)
+                .expect("physical GPU must run the full 24-layer model");
+            let first = model.generate(&ids, 2, false).unwrap();
+            assert_eq!(first.tokens, vec![61973, 61]);
+            let initial_sha = model.logical_kv_sha256().unwrap();
+            model.reset_session().unwrap();
+            let repeated = model.generate(&ids, 2, false).unwrap();
+            assert_eq!(first.tokens, repeated.tokens);
+            assert_eq!(initial_sha, model.logical_kv_sha256().unwrap());
+        }
+
+        #[test]
+        #[ignore = "requires physical GPU and real configured-model checkpoint"]
+        fn gpu_actual_canonical_lod_zero_matches_dense_gpu_outputs() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            let encoded = tokenizer.encode(text, false).unwrap();
+            let ids = encoded.get_ids().to_vec();
+            let mut dense = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
+            let dense_result = dense.generate(&ids, 16, true).unwrap();
+            let dense_ids = dense_result.tokens.clone();
+            // Free dense weights before allocating another >2 GiB GPU runtime.
+            drop(dense);
+            let cfg = CanonicalGpuLodConfig {
+                epsilon: 0.0,
+                stage_tokens: 4,
+                cold_directory: None,
+            };
+            let mut lod =
+                OpenClLlm::load_with_canonical_lod(&model, 64, WeightMode::Resident, cfg).unwrap();
+            let lod_result = lod.generate(&ids, 16, true).unwrap();
+            assert_eq!(dense_ids, lod_result.tokens);
+            assert!(lod_result.canonical_cpu_lod_components_active);
+            assert!(lod_result.gpu_kv_capacity_bytes < 64 * 2 * 2 * 128 * 24 * 2);
+            let stats = lod_result.canonical_cpu_lod_stats.as_ref().unwrap();
+            assert!(stats.exact_v_tokens_read_from_cold > 0);
+            assert_eq!(stats.exact_v_tokens_skipped, 0);
+            assert!(stats.four_bit_index_payload_bytes > 0);
+            assert!(stats.physical_cold_store_bytes > 0);
+            for (a, b) in dense_result.steps.iter().zip(lod_result.steps.iter()) {
+                assert_eq!(a.argmax_token, b.argmax_token);
+                let x = a.logits.as_ref().unwrap();
+                let y = b.logits.as_ref().unwrap();
+                assert_eq!(x, y, "epsilon=0 must preserve bitwise GPU dense logits");
+            }
+            lod.reset_session().unwrap();
+            let again = lod.generate(&ids, 16, false).unwrap();
+            assert_eq!(again.tokens, lod_result.tokens);
+        }
+
+        #[test]
+        #[ignore = "requires real Radeon GPU and configured-model BF16 checkpoint"]
+        fn gpu_actual_parallel_prefill_dense_matches_sequential_gpu() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 15);
+            let mut old = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
+            let old_gen = old.generate(&ids, 16, true).unwrap();
+            let old_kv = old.logical_kv_sha256().unwrap();
+            drop(old);
+            let mut fast = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
+            fast.set_batch_prefill_tokens(Some(64)).unwrap();
+            let new_gen = fast.generate(&ids, 16, true).unwrap();
+            let new_kv = fast.logical_kv_sha256().unwrap();
             assert_eq!(
-                a.logits, b.logits,
-                "GPU parallel prefill changed full vocab BF16 logits at step {i}"
+                old_gen.tokens, new_gen.tokens,
+                "GPU prefill changed generated token IDs"
             );
+            assert_eq!(old_kv, new_kv, "GPU prefill changed exact BF16 K/V bytes");
+            for (i, (a, b)) in old_gen.steps.iter().zip(new_gen.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "GPU parallel prefill changed full vocab BF16 logits at step {i}"
+                );
+            }
+            assert!(new_gen.gpu_prefill_batches > 0);
+            assert_eq!(new_gen.gpu_prefill_temporary_v_capacity_bytes, 0);
         }
-        assert!(new_gen.gpu_prefill_batches > 0);
-        assert_eq!(new_gen.gpu_prefill_temporary_v_capacity_bytes, 0);
-    }
 
-    #[test]
-    #[ignore = "requires real Radeon GPU and configured-model BF16 checkpoint"]
-    fn gpu_actual_parallel_prefill_lod_matches_sequential_and_reduces_pages() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let text =
-            "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
-        let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
-        let config = CanonicalGpuLodConfig {
-            epsilon: 0.0,
-            stage_tokens: 8,
-            cold_directory: None,
-        };
-        let mut old =
-            OpenClLlm::load_with_canonical_lod(&model, 64, WeightMode::Resident, config.clone())
-                .unwrap();
-        let old_gen = old.generate(&ids, 16, true).unwrap();
-        let old_pages = old.canonical_lod_stats().unwrap().physical_cold_store_pages;
-        drop(old);
-        let mut fast =
-            OpenClLlm::load_with_canonical_lod(&model, 64, WeightMode::Resident, config).unwrap();
-        fast.set_batch_prefill_tokens(Some(64)).unwrap();
-        let new_gen = fast.generate(&ids, 16, true).unwrap();
-        let new_stats = new_gen.canonical_cpu_lod_stats.as_ref().unwrap();
-        assert_eq!(
-            old_gen.tokens, new_gen.tokens,
-            "GPU LOD batch prefill changed token IDs"
-        );
-        for (i, (a, b)) in old_gen.steps.iter().zip(new_gen.steps.iter()).enumerate() {
+        #[test]
+        #[ignore = "requires real Radeon GPU and configured-model BF16 checkpoint"]
+        fn gpu_actual_parallel_prefill_lod_matches_sequential_and_reduces_pages() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
+            let config = CanonicalGpuLodConfig {
+                epsilon: 0.0,
+                stage_tokens: 8,
+                cold_directory: None,
+            };
+            let mut old = OpenClLlm::load_with_canonical_lod(
+                &model,
+                64,
+                WeightMode::Resident,
+                config.clone(),
+            )
+            .unwrap();
+            let old_gen = old.generate(&ids, 16, true).unwrap();
+            let old_pages = old.canonical_lod_stats().unwrap().physical_cold_store_pages;
+            drop(old);
+            let mut fast =
+                OpenClLlm::load_with_canonical_lod(&model, 64, WeightMode::Resident, config)
+                    .unwrap();
+            fast.set_batch_prefill_tokens(Some(64)).unwrap();
+            let new_gen = fast.generate(&ids, 16, true).unwrap();
+            let new_stats = new_gen.canonical_cpu_lod_stats.as_ref().unwrap();
             assert_eq!(
-                a.logits, b.logits,
-                "GPU parallel+LOD prefill changed BF16 logits at step {i}"
+                old_gen.tokens, new_gen.tokens,
+                "GPU LOD batch prefill changed token IDs"
             );
+            for (i, (a, b)) in old_gen.steps.iter().zip(new_gen.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "GPU parallel+LOD prefill changed BF16 logits at step {i}"
+                );
+            }
+            assert!(
+                new_stats.physical_cold_store_pages < old_pages,
+                "Batch prefill did not reduce ColdStore physical pages"
+            );
+            assert!(new_stats.cold_value_read_calls > 0);
+            assert!(new_gen.gpu_prefill_temporary_v_capacity_bytes > 0);
+            assert!(new_gen.gpu_prefill_cold_seal_seconds > 0.0);
+            assert_eq!(new_stats.exact_v_tokens_skipped, 0);
+            fast.reset_session().unwrap();
+            let repeat = fast.generate(&ids, 16, false).unwrap();
+            assert_eq!(repeat.tokens, new_gen.tokens);
         }
-        assert!(
-            new_stats.physical_cold_store_pages < old_pages,
-            "Batch prefill did not reduce ColdStore physical pages"
-        );
-        assert!(new_stats.cold_value_read_calls > 0);
-        assert!(new_gen.gpu_prefill_temporary_v_capacity_bytes > 0);
-        assert!(new_gen.gpu_prefill_cold_seal_seconds > 0.0);
-        assert_eq!(new_stats.exact_v_tokens_skipped, 0);
-        fast.reset_session().unwrap();
-        let repeat = fast.generate(&ids, 16, false).unwrap();
-        assert_eq!(repeat.tokens, new_gen.tokens);
-    }
 
-    #[test]
-    #[ignore = "requires real Radeon GPU + configured-model BF16 checkpoint; ~45s"]
-    fn gpu_actual_three_batch_prefill_375_matches_gpu_dense_bf16_kv_and_lod() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let text = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let mut old = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
-        let old_gen = old.generate(&ids, 2, true).unwrap();
-        let old_sha = old.logical_kv_sha256().unwrap();
-        drop(old);
-        let mut fast = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
-        fast.set_batch_prefill_tokens(Some(128)).unwrap();
-        let dense_gen = fast.generate(&ids, 2, true).unwrap();
-        let fast_sha = fast.logical_kv_sha256().unwrap();
-        assert_eq!(
-            old_sha, fast_sha,
-            "3-batch GPU prefill must preserve logical K/V BF16 SHA"
-        );
-        assert_eq!(
-            old_gen.tokens, dense_gen.tokens,
-            "3-batch GPU prefill changed generated tokens"
-        );
-        assert_eq!(dense_gen.gpu_prefill_batches, 3);
-        for (step, (a, b)) in old_gen.steps.iter().zip(&dense_gen.steps).enumerate() {
+        #[test]
+        #[ignore = "requires real Radeon GPU + configured-model BF16 checkpoint; ~45s"]
+        fn gpu_actual_three_batch_prefill_375_matches_gpu_dense_bf16_kv_and_lod() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let text = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let mut old = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            let old_gen = old.generate(&ids, 2, true).unwrap();
+            let old_sha = old.logical_kv_sha256().unwrap();
+            drop(old);
+            let mut fast = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            fast.set_batch_prefill_tokens(Some(128)).unwrap();
+            let dense_gen = fast.generate(&ids, 2, true).unwrap();
+            let fast_sha = fast.logical_kv_sha256().unwrap();
             assert_eq!(
-                a.logits, b.logits,
-                "3-batch prefill changed BF16 full-vocab logits at {step}"
+                old_sha, fast_sha,
+                "3-batch GPU prefill must preserve logical K/V BF16 SHA"
             );
-        }
-        drop(fast);
-        let cfg = CanonicalGpuLodConfig {
-            epsilon: 0.0,
-            stage_tokens: 64,
-            cold_directory: None,
-        };
-        let mut lod =
-            OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, cfg).unwrap();
-        lod.set_batch_prefill_tokens(Some(128)).unwrap();
-        let lod_gen = lod.generate(&ids, 2, true).unwrap();
-        assert_eq!(lod_gen.tokens, dense_gen.tokens);
-        for (step, (a, b)) in dense_gen.steps.iter().zip(&lod_gen.steps).enumerate() {
             assert_eq!(
-                a.logits, b.logits,
-                "3-batch prefill+canonical LOD changed BF16 logits at {step}"
+                old_gen.tokens, dense_gen.tokens,
+                "3-batch GPU prefill changed generated tokens"
             );
-        }
-        let stats = lod_gen.canonical_cpu_lod_stats.as_ref().unwrap();
-        assert!(
-            stats.physical_cold_store_pages < 300,
-            "GPU LOD prefill did not group cold pages into <=64-token pages"
-        );
-        assert!(stats.exact_v_tokens_read_from_cold > 0);
-        assert!(stats.cold_value_read_calls > 0);
-        assert_eq!(stats.exact_v_tokens_skipped, 0);
-        assert!(lod_gen.gpu_prefill_cold_seal_seconds > 0.0);
-        assert!(lod_gen.gpu_prefill_temporary_v_capacity_bytes > 0);
-        assert!(lod_gen.gpu_prefill_batch_tokens == Some(128));
-    }
-
-    #[test]
-    #[ignore = "requires actual AMD OpenCL GPU; compares 375-token prefill and 16 logits"]
-    fn gpu_actual_exact_hot_v_and_weight_reuse_matches_original_gpu_dense() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
-        let tok =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let prompt = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\nDato verificable: TEST-CODE-001. {}Indica el código del dato verificable.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let ids = tok.encode(prompt, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let mut dense = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
-        dense.set_batch_prefill_tokens(Some(128)).unwrap();
-        let original = dense.generate(&ids, 16, true).unwrap();
-        let original_sha = dense.logical_kv_sha256().unwrap();
-        drop(dense);
-
-        let mut lod = OpenClLlm::load_with_canonical_lod(
-            &model,
-            512,
-            WeightMode::Resident,
-            CanonicalGpuLodConfig::default(),
-        )
-        .unwrap();
-        lod.set_batch_prefill_tokens(Some(128)).unwrap();
-        lod.set_prefill_weight_reuse_tokens(16).unwrap();
-        lod.set_exact_hot_v_tokens(512).unwrap();
-        let current = lod.generate(&ids, 16, true).unwrap();
-        assert_eq!(original.tokens, current.tokens);
-        for (step, (a, b)) in original.steps.iter().zip(&current.steps).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "hot BF16 value cache or weight reuse changed GPU logits at {step}"
-            );
-        }
-        assert_eq!(
-            current.gpu_hot_v_attention_calls,
-            15 * 24,
-            "hot decode should cover all GPU layer attentions"
-        );
-        assert_eq!(current.gpu_hot_v_cold_fallback_calls, 0);
-        assert_eq!(current.gpu_hot_v_valid_prefix_tokens, 390);
-        assert_eq!(
-            current
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .exact_v_tokens_read_from_cold,
-            0,
-            "hot exact V cache must avoid all redundant ColdStore decode reads"
-        );
-        assert!(
-            current
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .physical_cold_store_pages
-                > 0,
-            "hot tier must not bypass canonical exact BF16 ColdStore writes"
-        );
-        // The committed GPU K/V are not directly exposed in LOD mode,
-        // but all logits match the GPU dense reference and cold store is
-        // still hashed/verifiable. Confirm hot prefix isn't leaked on reset.
-        assert!(!original_sha.is_empty());
-        lod.reset_session().unwrap();
-        let repeated = lod.generate(&ids, 16, false).unwrap();
-        assert_eq!(repeated.tokens, current.tokens);
-        assert_eq!(
-            repeated.gpu_hot_v_attention_calls,
-            current.gpu_hot_v_attention_calls
-        );
-    }
-
-    #[test]
-    #[ignore = "actual AMD Radeon needed: validates optimized OpenCL 375+16"]
-    fn gpu_actual_reuse8_hot_v_unroll4_bit_exact_vs_dense_reference() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tok =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let u = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let text = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{u}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tok.encode(text, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let mut reference = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
-        reference.set_batch_prefill_tokens(Some(128)).unwrap();
-        let expected = reference.generate(&ids, 16, true).unwrap();
-        let sha = reference.logical_kv_sha256().unwrap();
-        drop(reference);
-        let mut optimized = OpenClLlm::load_with_canonical_lod(
-            &model,
-            512,
-            WeightMode::Resident,
-            CanonicalGpuLodConfig {
+            assert_eq!(dense_gen.gpu_prefill_batches, 3);
+            for (step, (a, b)) in old_gen.steps.iter().zip(&dense_gen.steps).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "3-batch prefill changed BF16 full-vocab logits at {step}"
+                );
+            }
+            drop(fast);
+            let cfg = CanonicalGpuLodConfig {
                 epsilon: 0.0,
                 stage_tokens: 64,
                 cold_directory: None,
-            },
-        )
-        .unwrap();
-        optimized.set_batch_prefill_tokens(Some(128)).unwrap();
-        optimized.set_prefill_weight_reuse_tokens(8).unwrap();
-        optimized.set_exact_hot_v_tokens(512).unwrap();
-        optimized.set_decode_unroll4(true).unwrap();
-        let actual = optimized.generate(&ids, 16, true).unwrap();
-        assert_eq!(
-            actual.tokens, expected.tokens,
-            "optimized GPU changed greedy generated IDs"
-        );
-        for (i, (a, b)) in expected.steps.iter().zip(&actual.steps).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "BF16 GPU full-vocab logits changed at step {i}"
-            );
-        }
-        assert!(sha.len() == 64);
-        let stats = actual.canonical_cpu_lod_stats.as_ref().unwrap();
-        assert_eq!(stats.exact_v_tokens_skipped, 0);
-        assert_eq!(
-            stats.exact_v_tokens_read_from_cold, 0,
-            "GPU hot V tier unexpectedly re-read cold values"
-        );
-        assert!(stats.physical_cold_store_bytes > 0);
-        assert!(stats.physical_cold_store_pages > 0);
-        assert_eq!(actual.gpu_hot_v_attention_calls, 360);
-        assert_eq!(actual.gpu_hot_v_cold_fallback_calls, 0);
-    }
-
-    #[test]
-    #[ignore = "requires physical gfx1103 Radeon and original configured-model BF16 checkpoint"]
-    fn gpu_actual_deferred_bf16_cold_commit_matches_immediate_and_indexes_every_token() {
-        use super::*;
-        use sha2::{Digest, Sha256};
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let chat = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let make = || {
-            let mut gpu = OpenClLlm::load_with_canonical_lod(
-                &model,
-                512,
-                WeightMode::Resident,
-                CanonicalGpuLodConfig {
-                    epsilon: 0.0,
-                    stage_tokens: 64,
-                    cold_directory: None,
-                },
-            )
-            .unwrap();
-            gpu.set_batch_prefill_tokens(Some(128)).unwrap();
-            gpu.set_prefill_weight_reuse_tokens(8).unwrap();
-            gpu.set_decode_unroll4(true).unwrap();
-            gpu.set_exact_hot_v_tokens(512).unwrap();
-            gpu
-        };
-        let compute_hash = |gpu: &mut OpenClLlm| {
-            let token_bytes = gpu.spec.attention.kv_elements_per_token() * 2;
-            let positions = (0..gpu.position).collect::<Vec<_>>();
-            let mut hasher = Sha256::new();
-            for layer in 0..gpu.spec.num_hidden_layers {
-                hasher.update(
-                    gpu.engine
-                        .read_bf16_bytes(&gpu.workspace.kv[layer].key, gpu.position * token_bytes)
-                        .unwrap(),
+            };
+            let mut lod =
+                OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, cfg).unwrap();
+            lod.set_batch_prefill_tokens(Some(128)).unwrap();
+            let lod_gen = lod.generate(&ids, 2, true).unwrap();
+            assert_eq!(lod_gen.tokens, dense_gen.tokens);
+            for (step, (a, b)) in dense_gen.steps.iter().zip(&lod_gen.steps).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "3-batch prefill+canonical LOD changed BF16 logits at {step}"
                 );
-                let lod = gpu.lod.as_mut().unwrap();
-                assert_eq!(lod.layer_tokens(layer), gpu.position);
-                let values = lod.read_values(layer, &positions).unwrap();
-                hasher.update(values);
             }
-            format!("{:x}", hasher.finalize())
-        };
-        let mut legacy = make();
-        let previous = legacy.generate(&ids, 16, true).unwrap();
-        assert!(!previous.gpu_deferred_cold_activated);
-        let old_hash = compute_hash(&mut legacy);
-        drop(legacy);
-        let mut improved = make();
-        improved.set_deferred_cold_commit(true).unwrap();
-        let result = improved.generate(&ids, 16, true).unwrap();
-        assert!(result.gpu_deferred_cold_enabled);
-        assert!(result.gpu_deferred_cold_activated);
-        assert_eq!(result.gpu_deferred_cold_committed_token_layers, 15 * 24);
-        assert!(result.gpu_deferred_cold_commit_seconds > 0.0);
-        assert_eq!(result.tokens, previous.tokens);
-        for (index, (a, b)) in previous.steps.iter().zip(&result.steps).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "GPU exact BF16 logits diverged step {index}"
-            );
-        }
-        let stats = result.canonical_cpu_lod_stats.as_ref().unwrap();
-        assert_eq!(stats.exact_v_tokens_skipped, 0);
-        assert_eq!(stats.exact_v_tokens_read_from_cold, 0);
-        assert!(stats.physical_cold_store_pages > 0);
-        assert_eq!(
-            improved.lod.as_ref().unwrap().axis().token_len(),
-            improved.position
-        );
-        assert_eq!(
-            old_hash,
-            compute_hash(&mut improved),
-            "original canonical BF16 cold values or original GPU BF16 keys changed"
-        );
-        improved.reset_session().unwrap();
-        let repeat = improved.generate(&ids, 2, false).unwrap();
-        assert!(repeat.gpu_deferred_cold_activated);
-        assert_eq!(repeat.tokens, previous.tokens[..2]);
-    }
-
-    #[test]
-    #[ignore = "requires real AMD GPU and configured-model BF16 checkpoint"]
-    fn gpu_actual_deferred_cold_falls_back_when_hot_v_capacity_insufficient() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let mut gpu = OpenClLlm::load_with_canonical_lod(
-            &model,
-            64,
-            WeightMode::Resident,
-            CanonicalGpuLodConfig::default(),
-        )
-        .unwrap();
-        gpu.set_batch_prefill_tokens(Some(32)).unwrap();
-        gpu.set_exact_hot_v_tokens(16).unwrap();
-        gpu.set_deferred_cold_commit(true).unwrap();
-        let ids = vec![0u32; 8];
-        let generated = gpu.generate(&ids, 16, false).unwrap();
-        assert!(
-            !generated.gpu_deferred_cold_activated,
-            "hot prefix capacity insufficient for entire turn must use original ColdStore path"
-        );
-        assert_eq!(generated.gpu_deferred_cold_committed_token_layers, 0);
-        assert_eq!(gpu.lod.as_ref().unwrap().axis().token_len(), gpu.position);
-        for layer in 0..gpu.spec.num_hidden_layers {
-            assert_eq!(gpu.lod.as_ref().unwrap().layer_tokens(layer), gpu.position);
-        }
-    }
-
-    #[test]
-    #[ignore = "requires physical AMD OpenCL GPU and original configured-model BF16 checkpoint"]
-    fn gpu_actual_fused_qkv_and_swiglu_identical_logits_and_exact_kv() {
-        use super::*;
-        use sha2::{Digest, Sha256};
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let chat = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let create = |fused: bool| {
-            let mut gpu = OpenClLlm::load_with_canonical_lod(
-                &model,
-                512,
-                WeightMode::Resident,
-                CanonicalGpuLodConfig {
-                    epsilon: 0.0,
-                    stage_tokens: 64,
-                    cold_directory: None,
-                },
-            )
-            .unwrap();
-            gpu.set_batch_prefill_tokens(Some(128)).unwrap();
-            gpu.set_prefill_weight_reuse_tokens(8).unwrap();
-            gpu.set_decode_unroll4(true).unwrap();
-            gpu.set_exact_hot_v_tokens(512).unwrap();
-            gpu.set_deferred_cold_commit(true).unwrap();
-            gpu.set_decode_fused_kernels(fused).unwrap();
-            gpu
-        };
-        let kv_hash = |gpu: &mut OpenClLlm| {
-            let mut sha = Sha256::new();
-            let bytes = gpu.spec.attention.kv_elements_per_token() * 2;
-            let all = (0..gpu.position).collect::<Vec<_>>();
-            for layer in 0..gpu.spec.num_hidden_layers {
-                sha.update(
-                    gpu.engine
-                        .read_bf16_bytes(&gpu.workspace.kv[layer].key, gpu.position * bytes)
-                        .unwrap(),
-                );
-                let value = gpu.lod.as_mut().unwrap().read_values(layer, &all).unwrap();
-                sha.update(value);
-            }
-            format!("{:x}", sha.finalize())
-        };
-        let mut baseline = create(false);
-        let expected = baseline.generate(&ids, 16, true).unwrap();
-        let expected_hash = kv_hash(&mut baseline);
-        drop(baseline);
-        let mut fast = create(true);
-        let actual = fast.generate(&ids, 16, true).unwrap();
-        assert_eq!(actual.tokens, expected.tokens);
-        assert!(actual.gpu_decode_fused_kernels);
-        assert!(actual.gpu_deferred_cold_activated);
-        for (step, (a, b)) in expected.steps.iter().zip(actual.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "GPU fused BF16 logits diverged at step {step}"
-            );
-        }
-        assert_eq!(
-            expected_hash,
-            kv_hash(&mut fast),
-            "fused decode modified original K/V BF16 logical contents"
-        );
-        assert_eq!(
-            actual
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .exact_v_tokens_skipped,
-            0
-        );
-    }
-
-    #[test]
-    #[ignore = "requires physical AMD OpenCL GPU, real shaders, original CPU ColdStore"]
-    fn gpu_actual_micro_regions_skip_real_qk_and_cold_v_with_error_bound() {
-        use super::*;
-        let geom = AttentionGeometry::new(2, 1, 4).unwrap();
-        let cfg = CanonicalGpuLodConfig {
-            epsilon: 0.001,
-            stage_tokens: 16,
-            cold_directory: None,
-        };
-        let mut lod = CanonicalGpuLod::new(geom, 1, cfg).unwrap();
-        let as_bf16 = |v: &[f32]| {
-            v.iter()
-                .flat_map(|&x| half::bf16::from_f32(x).to_bits().to_le_bytes())
-                .collect::<Vec<_>>()
-        };
-        let k = (0..32)
-            .flat_map(|i| {
-                if i < 16 {
-                    [-20.0, 0.0, 0.0, 0.0]
-                } else {
-                    [20.0, 0.0, 0.0, 0.0]
-                }
-            })
-            .collect::<Vec<f32>>();
-        let v = (0..32)
-            .flat_map(|i| {
-                if i < 16 {
-                    [1.0, 0.0, 0.0, 0.0]
-                } else {
-                    [0.0, 1.0, 0.0, 0.0]
-                }
-            })
-            .collect::<Vec<f32>>();
-        let keys = as_bf16(&k);
-        let values = as_bf16(&v);
-        let query = as_bf16(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
-        lod.append_batch(0, 0, &keys, &values, 16).unwrap();
-        let selection = lod
-            .plan_micro_regions(0, &query)
-            .unwrap()
-            .context("micro certificate should allow skipping old state")
-            .unwrap();
-        assert_eq!(selection.positions, (16..32).collect::<Vec<_>>());
-        assert_eq!(selection.omitted, 16);
-        assert!(selection.bounds.iter().all(|&b| b <= 0.001));
-        assert_eq!(lod.stats.micro_omitted_k_dot_products, 32);
-        assert_eq!(lod.stats.micro_sparse_queries, 1);
-
-        let engine = GpuEngine::new(false).unwrap();
-        let mut q = engine.alloc_u8(query.len()).unwrap();
-        let mut key = engine.alloc_u8(keys.len()).unwrap();
-        let mut value = engine.alloc_u8(values.len()).unwrap();
-        engine.transfer(&mut q, &query).unwrap();
-        engine.transfer(&mut key, &keys).unwrap();
-        engine.transfer(&mut value, &values).unwrap();
-
-        let dense_scores = engine.alloc_scores(32 * 2).unwrap();
-        let dense_output = engine.alloc_u8(geom.query_elements() * 2).unwrap();
-        engine
-            .attention(&q, (&key, &value), &dense_scores, &dense_output, 32, geom)
-            .unwrap();
-        let exact = engine
-            .read_bf16_bytes(&dense_output, geom.query_elements() * 2)
-            .unwrap();
-
-        let sparse_scores = engine.alloc_scores(32 * 2).unwrap();
-        engine
-            .micro_sparse_scores(&q, &key, &sparse_scores, &selection.positions, geom, 32)
-            .unwrap();
-        // Real GPU QK only computed for certified selected original BF16 K.
-        let mut raw_scores = vec![0.0f32; 32 * 2];
-        // SAFETY: Blocking read of the actual original OpenCL scores.
-        unsafe {
-            engine
-                .queue
-                .enqueue_read_buffer(&sparse_scores, CL_BLOCKING, 0, &mut raw_scores, &[])
-                .unwrap();
-        }
-        for head in 0..geom.query_heads {
-            for idx in 0..32 {
-                let score = raw_scores[head * 32 + idx];
-                if idx < 16 {
-                    assert!(score.is_infinite() && score.is_sign_negative());
-                } else {
-                    assert!(score.is_finite());
-                }
-            }
-        }
-        let n = 32u32;
-        let heads = 2u32;
-        // SAFETY: Execute the original real GPU softmax, not a CPU simulation.
-        unsafe {
-            ExecuteKernel::new(&engine.kernels.softmax)
-                .set_arg(&sparse_scores)
-                .set_arg(&n)
-                .set_arg(&heads)
-                .set_global_work_size(2)
-                .enqueue_nd_range(&engine.queue)
-                .unwrap();
-        }
-        let chosen_v = lod.read_values(0, &selection.positions).unwrap();
-        assert_eq!(chosen_v.len(), 16 * 8);
-        let mut staged_v = engine.alloc_u8(chosen_v.len()).unwrap();
-        engine.transfer(&mut staged_v, &chosen_v).unwrap();
-        let indices = selection
-            .positions
-            .iter()
-            .map(|&x| u32::try_from(x).unwrap())
-            .collect::<Vec<_>>();
-        let mut staged_ids = engine.alloc_indices(indices.len()).unwrap();
-        let mut accumulator = engine.alloc_scores(geom.query_elements()).unwrap();
-        let mut mass = engine.alloc_scores(geom.query_heads).unwrap();
-        let zeros = vec![0.0f32; geom.query_elements()];
-        let one = vec![1.0f32; geom.query_heads];
-        // SAFETY: Blocking writes retain host backing and matched GPU buffer
-        // capacities. This physically runs original GPU BF16 PV kernels.
-        unsafe {
-            engine
-                .queue
-                .enqueue_write_buffer(&mut staged_ids, CL_BLOCKING, 0, &indices, &[])
-                .unwrap();
-            engine
-                .queue
-                .enqueue_write_buffer(&mut accumulator, CL_BLOCKING, 0, &zeros, &[])
-                .unwrap();
-            engine
-                .queue
-                .enqueue_write_buffer(&mut mass, CL_BLOCKING, 0, &one, &[])
-                .unwrap();
-        }
-        let selected_count = 16u32;
-        let kvheads = 1u32;
-        let dim = 4u32;
-        let out = engine.alloc_u8(geom.query_elements() * 2).unwrap();
-        // SAFETY: This is the original physical GPU BF16 PV staging path,
-        // with no CPU floating point arithmetic for attention.
-        unsafe {
-            ExecuteKernel::new(&engine.kernels.lod_pv_stage)
-                .set_arg(&sparse_scores)
-                .set_arg(&staged_v)
-                .set_arg(&staged_ids)
-                .set_arg(&accumulator)
-                .set_arg(&selected_count)
-                .set_arg(&n)
-                .set_arg(&heads)
-                .set_arg(&kvheads)
-                .set_arg(&dim)
-                .set_global_work_size(geom.query_elements())
-                .enqueue_nd_range(&engine.queue)
-                .unwrap();
-            ExecuteKernel::new(&engine.kernels.lod_pv_finish)
-                .set_arg(&accumulator)
-                .set_arg(&mass)
-                .set_arg(&out)
-                .set_arg(&heads)
-                .set_arg(&dim)
-                .set_global_work_size(geom.query_elements())
-                .enqueue_nd_range(&engine.queue)
-                .unwrap();
-        }
-        let approximate = engine
-            .read_bf16_bytes(&out, geom.query_elements() * 2)
-            .unwrap();
-        let mut max_abs_error = 0.0f32;
-        let mut full_output = Vec::new();
-        let mut sparse_output = Vec::new();
-        for (a, b) in exact.chunks_exact(2).zip(approximate.chunks_exact(2)) {
-            let a = half::bf16::from_bits(u16::from_le_bytes([a[0], a[1]])).to_f32();
-            let b = half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
-            max_abs_error = max_abs_error.max((a - b).abs());
-            full_output.push(a);
-            sparse_output.push(b);
+            let stats = lod_gen.canonical_cpu_lod_stats.as_ref().unwrap();
             assert!(
-                (a - b).abs() <= 0.001 + 1e-6,
-                "actual GPU omitted mass exceeded micro certificate"
+                stats.physical_cold_store_pages < 300,
+                "GPU LOD prefill did not group cold pages into <=64-token pages"
+            );
+            assert!(stats.exact_v_tokens_read_from_cold > 0);
+            assert!(stats.cold_value_read_calls > 0);
+            assert_eq!(stats.exact_v_tokens_skipped, 0);
+            assert!(lod_gen.gpu_prefill_cold_seal_seconds > 0.0);
+            assert!(lod_gen.gpu_prefill_temporary_v_capacity_bytes > 0);
+            assert!(lod_gen.gpu_prefill_batch_tokens == Some(128));
+        }
+
+        #[test]
+        #[ignore = "requires actual AMD OpenCL GPU; compares 375-token prefill and 16 logits"]
+        fn gpu_actual_exact_hot_v_and_weight_reuse_matches_original_gpu_dense() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
+            let tok = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let prompt = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\nDato verificable: TEST-CODE-001. {}Indica el código del dato verificable.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let ids = tok.encode(prompt, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let mut dense = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            dense.set_batch_prefill_tokens(Some(128)).unwrap();
+            let original = dense.generate(&ids, 16, true).unwrap();
+            let original_sha = dense.logical_kv_sha256().unwrap();
+            drop(dense);
+
+            let mut lod = OpenClLlm::load_with_canonical_lod(
+                &model,
+                512,
+                WeightMode::Resident,
+                CanonicalGpuLodConfig::default(),
+            )
+            .unwrap();
+            lod.set_batch_prefill_tokens(Some(128)).unwrap();
+            lod.set_prefill_weight_reuse_tokens(16).unwrap();
+            lod.set_exact_hot_v_tokens(512).unwrap();
+            let current = lod.generate(&ids, 16, true).unwrap();
+            assert_eq!(original.tokens, current.tokens);
+            for (step, (a, b)) in original.steps.iter().zip(&current.steps).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "hot BF16 value cache or weight reuse changed GPU logits at {step}"
+                );
+            }
+            assert_eq!(
+                current.gpu_hot_v_attention_calls,
+                15 * 24,
+                "hot decode should cover all GPU layer attentions"
+            );
+            assert_eq!(current.gpu_hot_v_cold_fallback_calls, 0);
+            assert_eq!(current.gpu_hot_v_valid_prefix_tokens, 390);
+            assert_eq!(
+                current
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .exact_v_tokens_read_from_cold,
+                0,
+                "hot exact V cache must avoid all redundant ColdStore decode reads"
+            );
+            assert!(
+                current
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .physical_cold_store_pages
+                    > 0,
+                "hot tier must not bypass canonical exact BF16 ColdStore writes"
+            );
+            // The committed GPU K/V are not directly exposed in LOD mode,
+            // but all logits match the GPU dense reference and cold store is
+            // still hashed/verifiable. Confirm hot prefix isn't leaked on reset.
+            assert!(!original_sha.is_empty());
+            lod.reset_session().unwrap();
+            let repeated = lod.generate(&ids, 16, false).unwrap();
+            assert_eq!(repeated.tokens, current.tokens);
+            assert_eq!(
+                repeated.gpu_hot_v_attention_calls,
+                current.gpu_hot_v_attention_calls
             );
         }
-        eprintln!(
-            "PRUEBA_GPU_REAL micro: dispositivo={} | tokens_K_total=32 | tokens_K_calculados={} | productos_QK_omitidos={} | V_recuperadas={} | V_omitidas={} | cotas={:?} | L_inf_real={} | L_inf_permitido=0.001 | salida_densa_BF16={:?} | salida_micro_BF16={:?}",
-            engine.name,
-            selection.positions.len(),
-            lod.stats.micro_omitted_k_dot_products,
-            lod.stats.exact_v_tokens_read_from_cold,
-            lod.stats.exact_v_tokens_skipped,
-            selection.bounds,
-            max_abs_error,
-            full_output,
-            sparse_output
-        );
-        assert_eq!(lod.stats.exact_v_tokens_read_from_cold, 16);
-        assert_eq!(lod.stats.exact_v_tokens_skipped, 16);
-        // REAL physical-GPU microbenchmark, not a count-of-operations
-        // proxy. For each repetition, the original dense path includes
-        // full GPU QK, softmax, PV, device queue finish, with resident V.
-        // The micro path includes original CPU dimensional planner,
-        // indexed K GPU upload/clear/QK, original GPU softmax,
-        // hash-verified ColdStore V reads, BF16 staging and GPU PV.
-        // This deliberately exposes when the metadata overhead is
-        // *slower* despite fewer products; neither count is substituted
-        // for actual measured wall time. Small N is launch-dominated.
-        let trials = 96usize;
-        let warmup = 12usize;
-        let mut dense_ms = Vec::new();
-        let mut micro_total_ms = Vec::new();
-        let mut micro_planner_ms = Vec::new();
-        let mut micro_qk_ms = Vec::new();
-        let mut micro_cold_ms = Vec::new();
-        for iter in 0..(trials + warmup) {
-            let t = std::time::Instant::now();
+
+        #[test]
+        #[ignore = "actual AMD Radeon needed: validates optimized OpenCL 375+16"]
+        fn gpu_actual_reuse8_hot_v_unroll4_bit_exact_vs_dense_reference() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tok = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let u = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let text = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{u}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tok.encode(text, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let mut reference = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            reference.set_batch_prefill_tokens(Some(128)).unwrap();
+            let expected = reference.generate(&ids, 16, true).unwrap();
+            let sha = reference.logical_kv_sha256().unwrap();
+            drop(reference);
+            let mut optimized = OpenClLlm::load_with_canonical_lod(
+                &model,
+                512,
+                WeightMode::Resident,
+                CanonicalGpuLodConfig {
+                    epsilon: 0.0,
+                    stage_tokens: 64,
+                    cold_directory: None,
+                },
+            )
+            .unwrap();
+            optimized.set_batch_prefill_tokens(Some(128)).unwrap();
+            optimized.set_prefill_weight_reuse_tokens(8).unwrap();
+            optimized.set_exact_hot_v_tokens(512).unwrap();
+            optimized.set_decode_unroll4(true).unwrap();
+            let actual = optimized.generate(&ids, 16, true).unwrap();
+            assert_eq!(
+                actual.tokens, expected.tokens,
+                "optimized GPU changed greedy generated IDs"
+            );
+            for (i, (a, b)) in expected.steps.iter().zip(&actual.steps).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "BF16 GPU full-vocab logits changed at step {i}"
+                );
+            }
+            assert!(sha.len() == 64);
+            let stats = actual.canonical_cpu_lod_stats.as_ref().unwrap();
+            assert_eq!(stats.exact_v_tokens_skipped, 0);
+            assert_eq!(
+                stats.exact_v_tokens_read_from_cold, 0,
+                "GPU hot V tier unexpectedly re-read cold values"
+            );
+            assert!(stats.physical_cold_store_bytes > 0);
+            assert!(stats.physical_cold_store_pages > 0);
+            assert_eq!(actual.gpu_hot_v_attention_calls, 360);
+            assert_eq!(actual.gpu_hot_v_cold_fallback_calls, 0);
+        }
+
+        #[test]
+        #[ignore = "requires physical gfx1103 Radeon and original configured-model BF16 checkpoint"]
+        fn gpu_actual_deferred_bf16_cold_commit_matches_immediate_and_indexes_every_token() {
+            use super::*;
+            use sha2::{Digest, Sha256};
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let chat = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let make = || {
+                let mut gpu = OpenClLlm::load_with_canonical_lod(
+                    &model,
+                    512,
+                    WeightMode::Resident,
+                    CanonicalGpuLodConfig {
+                        epsilon: 0.0,
+                        stage_tokens: 64,
+                        cold_directory: None,
+                    },
+                )
+                .unwrap();
+                gpu.set_batch_prefill_tokens(Some(128)).unwrap();
+                gpu.set_prefill_weight_reuse_tokens(8).unwrap();
+                gpu.set_decode_unroll4(true).unwrap();
+                gpu.set_exact_hot_v_tokens(512).unwrap();
+                gpu
+            };
+            let compute_hash = |gpu: &mut OpenClLlm| {
+                let token_bytes = gpu.spec.attention.kv_elements_per_token() * 2;
+                let positions = (0..gpu.position).collect::<Vec<_>>();
+                let mut hasher = Sha256::new();
+                for layer in 0..gpu.spec.num_hidden_layers {
+                    hasher.update(
+                        gpu.engine
+                            .read_bf16_bytes(
+                                &gpu.workspace.kv[layer].key,
+                                gpu.position * token_bytes,
+                            )
+                            .unwrap(),
+                    );
+                    let lod = gpu.lod.as_mut().unwrap();
+                    assert_eq!(lod.layer_tokens(layer), gpu.position);
+                    let values = lod.read_values(layer, &positions).unwrap();
+                    hasher.update(values);
+                }
+                format!("{:x}", hasher.finalize())
+            };
+            let mut legacy = make();
+            let previous = legacy.generate(&ids, 16, true).unwrap();
+            assert!(!previous.gpu_deferred_cold_activated);
+            let old_hash = compute_hash(&mut legacy);
+            drop(legacy);
+            let mut improved = make();
+            improved.set_deferred_cold_commit(true).unwrap();
+            let result = improved.generate(&ids, 16, true).unwrap();
+            assert!(result.gpu_deferred_cold_enabled);
+            assert!(result.gpu_deferred_cold_activated);
+            assert_eq!(result.gpu_deferred_cold_committed_token_layers, 15 * 24);
+            assert!(result.gpu_deferred_cold_commit_seconds > 0.0);
+            assert_eq!(result.tokens, previous.tokens);
+            for (index, (a, b)) in previous.steps.iter().zip(&result.steps).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "GPU exact BF16 logits diverged step {index}"
+                );
+            }
+            let stats = result.canonical_cpu_lod_stats.as_ref().unwrap();
+            assert_eq!(stats.exact_v_tokens_skipped, 0);
+            assert_eq!(stats.exact_v_tokens_read_from_cold, 0);
+            assert!(stats.physical_cold_store_pages > 0);
+            assert_eq!(
+                improved.lod.as_ref().unwrap().axis().token_len(),
+                improved.position
+            );
+            assert_eq!(
+                old_hash,
+                compute_hash(&mut improved),
+                "original canonical BF16 cold values or original GPU BF16 keys changed"
+            );
+            improved.reset_session().unwrap();
+            let repeat = improved.generate(&ids, 2, false).unwrap();
+            assert!(repeat.gpu_deferred_cold_activated);
+            assert_eq!(repeat.tokens, previous.tokens[..2]);
+        }
+
+        #[test]
+        #[ignore = "requires real AMD GPU and configured-model BF16 checkpoint"]
+        fn gpu_actual_deferred_cold_falls_back_when_hot_v_capacity_insufficient() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let mut gpu = OpenClLlm::load_with_canonical_lod(
+                &model,
+                64,
+                WeightMode::Resident,
+                CanonicalGpuLodConfig::default(),
+            )
+            .unwrap();
+            gpu.set_batch_prefill_tokens(Some(32)).unwrap();
+            gpu.set_exact_hot_v_tokens(16).unwrap();
+            gpu.set_deferred_cold_commit(true).unwrap();
+            let ids = vec![0u32; 8];
+            let generated = gpu.generate(&ids, 16, false).unwrap();
+            assert!(
+                !generated.gpu_deferred_cold_activated,
+                "hot prefix capacity insufficient for entire turn must use original ColdStore path"
+            );
+            assert_eq!(generated.gpu_deferred_cold_committed_token_layers, 0);
+            assert_eq!(gpu.lod.as_ref().unwrap().axis().token_len(), gpu.position);
+            for layer in 0..gpu.spec.num_hidden_layers {
+                assert_eq!(gpu.lod.as_ref().unwrap().layer_tokens(layer), gpu.position);
+            }
+        }
+
+        #[test]
+        #[ignore = "requires physical AMD OpenCL GPU and original configured-model BF16 checkpoint"]
+        fn gpu_actual_fused_qkv_and_swiglu_identical_logits_and_exact_kv() {
+            use super::*;
+            use sha2::{Digest, Sha256};
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let chat = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let create = |fused: bool| {
+                let mut gpu = OpenClLlm::load_with_canonical_lod(
+                    &model,
+                    512,
+                    WeightMode::Resident,
+                    CanonicalGpuLodConfig {
+                        epsilon: 0.0,
+                        stage_tokens: 64,
+                        cold_directory: None,
+                    },
+                )
+                .unwrap();
+                gpu.set_batch_prefill_tokens(Some(128)).unwrap();
+                gpu.set_prefill_weight_reuse_tokens(8).unwrap();
+                gpu.set_decode_unroll4(true).unwrap();
+                gpu.set_exact_hot_v_tokens(512).unwrap();
+                gpu.set_deferred_cold_commit(true).unwrap();
+                gpu.set_decode_fused_kernels(fused).unwrap();
+                gpu
+            };
+            let kv_hash = |gpu: &mut OpenClLlm| {
+                let mut sha = Sha256::new();
+                let bytes = gpu.spec.attention.kv_elements_per_token() * 2;
+                let all = (0..gpu.position).collect::<Vec<_>>();
+                for layer in 0..gpu.spec.num_hidden_layers {
+                    sha.update(
+                        gpu.engine
+                            .read_bf16_bytes(&gpu.workspace.kv[layer].key, gpu.position * bytes)
+                            .unwrap(),
+                    );
+                    let value = gpu.lod.as_mut().unwrap().read_values(layer, &all).unwrap();
+                    sha.update(value);
+                }
+                format!("{:x}", sha.finalize())
+            };
+            let mut baseline = create(false);
+            let expected = baseline.generate(&ids, 16, true).unwrap();
+            let expected_hash = kv_hash(&mut baseline);
+            drop(baseline);
+            let mut fast = create(true);
+            let actual = fast.generate(&ids, 16, true).unwrap();
+            assert_eq!(actual.tokens, expected.tokens);
+            assert!(actual.gpu_decode_fused_kernels);
+            assert!(actual.gpu_deferred_cold_activated);
+            for (step, (a, b)) in expected.steps.iter().zip(actual.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "GPU fused BF16 logits diverged at step {step}"
+                );
+            }
+            assert_eq!(
+                expected_hash,
+                kv_hash(&mut fast),
+                "fused decode modified original K/V BF16 logical contents"
+            );
+            assert_eq!(
+                actual
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .exact_v_tokens_skipped,
+                0
+            );
+        }
+
+        #[test]
+        #[ignore = "requires physical AMD OpenCL GPU, real shaders, original CPU ColdStore"]
+        fn gpu_actual_micro_regions_skip_real_qk_and_cold_v_with_error_bound() {
+            use super::*;
+            let geom = AttentionGeometry::new(2, 1, 4).unwrap();
+            let cfg = CanonicalGpuLodConfig {
+                epsilon: 0.001,
+                stage_tokens: 16,
+                cold_directory: None,
+            };
+            let mut lod = CanonicalGpuLod::new(geom, 1, cfg).unwrap();
+            let as_bf16 = |v: &[f32]| {
+                v.iter()
+                    .flat_map(|&x| half::bf16::from_f32(x).to_bits().to_le_bytes())
+                    .collect::<Vec<_>>()
+            };
+            let k = (0..32)
+                .flat_map(|i| {
+                    if i < 16 {
+                        [-20.0, 0.0, 0.0, 0.0]
+                    } else {
+                        [20.0, 0.0, 0.0, 0.0]
+                    }
+                })
+                .collect::<Vec<f32>>();
+            let v = (0..32)
+                .flat_map(|i| {
+                    if i < 16 {
+                        [1.0, 0.0, 0.0, 0.0]
+                    } else {
+                        [0.0, 1.0, 0.0, 0.0]
+                    }
+                })
+                .collect::<Vec<f32>>();
+            let keys = as_bf16(&k);
+            let values = as_bf16(&v);
+            let query = as_bf16(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+            lod.append_batch(0, 0, &keys, &values, 16).unwrap();
+            let selection = lod
+                .plan_micro_regions(0, &query)
+                .unwrap()
+                .context("micro certificate should allow skipping old state")
+                .unwrap();
+            assert_eq!(selection.positions, (16..32).collect::<Vec<_>>());
+            assert_eq!(selection.omitted, 16);
+            assert!(selection.bounds.iter().all(|&b| b <= 0.001));
+            assert_eq!(lod.stats.micro_omitted_k_dot_products, 32);
+            assert_eq!(lod.stats.micro_sparse_queries, 1);
+
+            let engine = GpuEngine::new(false).unwrap();
+            let mut q = engine.alloc_u8(query.len()).unwrap();
+            let mut key = engine.alloc_u8(keys.len()).unwrap();
+            let mut value = engine.alloc_u8(values.len()).unwrap();
+            engine.transfer(&mut q, &query).unwrap();
+            engine.transfer(&mut key, &keys).unwrap();
+            engine.transfer(&mut value, &values).unwrap();
+
+            let dense_scores = engine.alloc_scores(32 * 2).unwrap();
+            let dense_output = engine.alloc_u8(geom.query_elements() * 2).unwrap();
             engine
                 .attention(&q, (&key, &value), &dense_scores, &dense_output, 32, geom)
                 .unwrap();
-            engine.queue.finish().unwrap();
-            let duration_dense = t.elapsed().as_secs_f64() * 1000.0;
-
-            let start_total = std::time::Instant::now();
-            let start_plan = std::time::Instant::now();
-            let selection_iter = lod
-                .plan_micro_regions(0, &query)
-                .unwrap()
-                .expect("certification must still succeed in benchmark");
-            let duration_plan = start_plan.elapsed().as_secs_f64() * 1000.0;
-            assert_eq!(selection_iter.positions, selection.positions);
-
-            let start_qk = std::time::Instant::now();
-            engine
-                .micro_sparse_scores(
-                    &q,
-                    &key,
-                    &sparse_scores,
-                    &selection_iter.positions,
-                    geom,
-                    32,
-                )
+            let exact = engine
+                .read_bf16_bytes(&dense_output, geom.query_elements() * 2)
                 .unwrap();
-            let duration_qk = start_qk.elapsed().as_secs_f64() * 1000.0;
 
-            // SAFETY: Both original physical GPU softmax and V-stage PV.
+            let sparse_scores = engine.alloc_scores(32 * 2).unwrap();
+            engine
+                .micro_sparse_scores(&q, &key, &sparse_scores, &selection.positions, geom, 32)
+                .unwrap();
+            // Real GPU QK only computed for certified selected original BF16 K.
+            let mut raw_scores = vec![0.0f32; 32 * 2];
+            // SAFETY: Blocking read of the actual original OpenCL scores.
+            unsafe {
+                engine
+                    .queue
+                    .enqueue_read_buffer(&sparse_scores, CL_BLOCKING, 0, &mut raw_scores, &[])
+                    .unwrap();
+            }
+            for head in 0..geom.query_heads {
+                for idx in 0..32 {
+                    let score = raw_scores[head * 32 + idx];
+                    if idx < 16 {
+                        assert!(score.is_infinite() && score.is_sign_negative());
+                    } else {
+                        assert!(score.is_finite());
+                    }
+                }
+            }
+            let n = 32u32;
+            let heads = 2u32;
+            // SAFETY: Execute the original real GPU softmax, not a CPU simulation.
             unsafe {
                 ExecuteKernel::new(&engine.kernels.softmax)
                     .set_arg(&sparse_scores)
@@ -4589,18 +4460,43 @@ mod tests {
                     .enqueue_nd_range(&engine.queue)
                     .unwrap();
             }
-            let start_cold = std::time::Instant::now();
-            let selected_values = lod.read_values(0, &selection_iter.positions).unwrap();
-            engine.transfer(&mut staged_v, &selected_values).unwrap();
-            let duration_cold = start_cold.elapsed().as_secs_f64() * 1000.0;
-            // SAFETY: Reset the FP32 accumulator with blocking copy
-            // on each benchmark iteration, so GPU PV is not accumulated
-            // incorrectly across repeated independent requests.
+            let chosen_v = lod.read_values(0, &selection.positions).unwrap();
+            assert_eq!(chosen_v.len(), 16 * 8);
+            let mut staged_v = engine.alloc_u8(chosen_v.len()).unwrap();
+            engine.transfer(&mut staged_v, &chosen_v).unwrap();
+            let indices = selection
+                .positions
+                .iter()
+                .map(|&x| u32::try_from(x).unwrap())
+                .collect::<Vec<_>>();
+            let mut staged_ids = engine.alloc_indices(indices.len()).unwrap();
+            let mut accumulator = engine.alloc_scores(geom.query_elements()).unwrap();
+            let mut mass = engine.alloc_scores(geom.query_heads).unwrap();
+            let zeros = vec![0.0f32; geom.query_elements()];
+            let one = vec![1.0f32; geom.query_heads];
+            // SAFETY: Blocking writes retain host backing and matched GPU buffer
+            // capacities. This physically runs original GPU BF16 PV kernels.
             unsafe {
+                engine
+                    .queue
+                    .enqueue_write_buffer(&mut staged_ids, CL_BLOCKING, 0, &indices, &[])
+                    .unwrap();
                 engine
                     .queue
                     .enqueue_write_buffer(&mut accumulator, CL_BLOCKING, 0, &zeros, &[])
                     .unwrap();
+                engine
+                    .queue
+                    .enqueue_write_buffer(&mut mass, CL_BLOCKING, 0, &one, &[])
+                    .unwrap();
+            }
+            let selected_count = 16u32;
+            let kvheads = 1u32;
+            let dim = 4u32;
+            let out = engine.alloc_u8(geom.query_elements() * 2).unwrap();
+            // SAFETY: This is the original physical GPU BF16 PV staging path,
+            // with no CPU floating point arithmetic for attention.
+            unsafe {
                 ExecuteKernel::new(&engine.kernels.lod_pv_stage)
                     .set_arg(&sparse_scores)
                     .set_arg(&staged_v)
@@ -4624,449 +4520,1046 @@ mod tests {
                     .enqueue_nd_range(&engine.queue)
                     .unwrap();
             }
-            engine.queue.finish().unwrap();
-            let duration_micro_total = start_total.elapsed().as_secs_f64() * 1000.0;
-            if iter >= warmup {
-                dense_ms.push(duration_dense);
-                micro_total_ms.push(duration_micro_total);
-                micro_planner_ms.push(duration_plan);
-                micro_qk_ms.push(duration_qk);
-                micro_cold_ms.push(duration_cold);
+            let approximate = engine
+                .read_bf16_bytes(&out, geom.query_elements() * 2)
+                .unwrap();
+            let mut max_abs_error = 0.0f32;
+            let mut full_output = Vec::new();
+            let mut sparse_output = Vec::new();
+            for (a, b) in exact.chunks_exact(2).zip(approximate.chunks_exact(2)) {
+                let a = half::bf16::from_bits(u16::from_le_bytes([a[0], a[1]])).to_f32();
+                let b = half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
+                max_abs_error = max_abs_error.max((a - b).abs());
+                full_output.push(a);
+                sparse_output.push(b);
+                assert!(
+                    (a - b).abs() <= 0.001 + 1e-6,
+                    "actual GPU omitted mass exceeded micro certificate"
+                );
             }
-        }
-        let median = |mut values: Vec<f64>| {
-            values.sort_unstable_by(f64::total_cmp);
-            values[values.len() / 2]
-        };
-        let dense = median(dense_ms);
-        let micro = median(micro_total_ms);
-        eprintln!(
-            "BENCHMARK_TIEMPO_REAL_GPU32 repeticiones={} | atencion_completa_ms_mediana={:.6} | micro_seleccion_cold_gpu_ms_mediana={:.6} | relacion_micro_sobre_completa={:.4} | planificador_cpu_ms_mediana={:.6} | qk_micro_y_transferencia_indice_ms_mediana={:.6} | lectura_v_fria_y_transferencia_ms_mediana={:.6} | BF16_error_previamente_verificado={:.12} | tokens_K_omitidos=16/32 | V_omitidas=16/32",
-            trials,
-            dense,
-            micro,
-            micro / dense,
-            median(micro_planner_ms),
-            median(micro_qk_ms),
-            median(micro_cold_ms),
-            max_abs_error,
-        );
+            eprintln!(
+                "PRUEBA_GPU_REAL micro: dispositivo={} | tokens_K_total=32 | tokens_K_calculados={} | productos_QK_omitidos={} | V_recuperadas={} | V_omitidas={} | cotas={:?} | L_inf_real={} | L_inf_permitido=0.001 | salida_densa_BF16={:?} | salida_micro_BF16={:?}",
+                engine.name,
+                selection.positions.len(),
+                lod.stats.micro_omitted_k_dot_products,
+                lod.stats.exact_v_tokens_read_from_cold,
+                lod.stats.exact_v_tokens_skipped,
+                selection.bounds,
+                max_abs_error,
+                full_output,
+                sparse_output
+            );
+            assert_eq!(lod.stats.exact_v_tokens_read_from_cold, 16);
+            assert_eq!(lod.stats.exact_v_tokens_skipped, 16);
+            // REAL physical-GPU microbenchmark, not a count-of-operations
+            // proxy. For each repetition, the original dense path includes
+            // full GPU QK, softmax, PV, device queue finish, with resident V.
+            // The micro path includes original CPU dimensional planner,
+            // indexed K GPU upload/clear/QK, original GPU softmax,
+            // hash-verified ColdStore V reads, BF16 staging and GPU PV.
+            // This deliberately exposes when the metadata overhead is
+            // *slower* despite fewer products; neither count is substituted
+            // for actual measured wall time. Small N is launch-dominated.
+            let trials = 96usize;
+            let warmup = 12usize;
+            let mut dense_ms = Vec::new();
+            let mut micro_total_ms = Vec::new();
+            let mut micro_planner_ms = Vec::new();
+            let mut micro_qk_ms = Vec::new();
+            let mut micro_cold_ms = Vec::new();
+            for iter in 0..(trials + warmup) {
+                let t = std::time::Instant::now();
+                engine
+                    .attention(&q, (&key, &value), &dense_scores, &dense_output, 32, geom)
+                    .unwrap();
+                engine.queue.finish().unwrap();
+                let duration_dense = t.elapsed().as_secs_f64() * 1000.0;
 
-        // Fast path under EXACTLY the same certified micro selection:
-        // BF16 V remains device resident; selected K indices are
-        // uploaded ONCE and cached in the OpenCL device buffer.
-        // This is a true end-to-end attention latency benchmark.
-        let mut cache = MicroSelectedDevice {
-            indices: engine.alloc_indices(32).unwrap(),
-            last_positions: Vec::new(),
-            upload_calls: 0,
-            reuse_hits: 0,
-        };
-        engine
-            .micro_update_cached_indices(&mut cache, &selection.positions, 32)
-            .unwrap();
-        let resident_output = engine.alloc_u8(geom.query_elements() * 2).unwrap();
-        engine
-            .micro_hot_attention(
-                (&q, &key, &value, &cache.indices, &resident_output),
-                (selection.positions.len(), 32),
-                geom,
-            )
-            .unwrap();
-        engine.queue.finish().unwrap();
-        let hot_actual = engine
-            .read_bf16_bytes(&resident_output, geom.query_elements() * 2)
-            .unwrap();
-        let mut hot_error = 0.0f32;
-        for (a, b) in exact.chunks_exact(2).zip(hot_actual.chunks_exact(2)) {
-            let a = half::bf16::from_bits(u16::from_le_bytes([a[0], a[1]])).to_f32();
-            let b = half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
-            hot_error = hot_error.max((a - b).abs());
-        }
-        assert!(
-            hot_error <= 0.001,
-            "resident micro BF16 output violates certified omitted mass"
-        );
-        let warmup = 12usize;
-        let trials = 96usize;
-        let mut dense_ms = Vec::new();
-        let mut micro_hot_ms = Vec::new();
-        let mut planning_ms = Vec::new();
-        let mut kernel_ms = Vec::new();
-        for i in 0..warmup + trials {
-            let start = std::time::Instant::now();
-            engine
-                .attention(&q, (&key, &value), &dense_scores, &dense_output, 32, geom)
-                .unwrap();
-            engine.queue.finish().unwrap();
-            let full_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let start_total = std::time::Instant::now();
+                let start_plan = std::time::Instant::now();
+                let selection_iter = lod
+                    .plan_micro_regions(0, &query)
+                    .unwrap()
+                    .expect("certification must still succeed in benchmark");
+                let duration_plan = start_plan.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(selection_iter.positions, selection.positions);
 
-            let start = std::time::Instant::now();
-            let planned = lod.plan_micro_regions(0, &query).unwrap().unwrap();
-            let planned_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let gpu_started = std::time::Instant::now();
+                let start_qk = std::time::Instant::now();
+                engine
+                    .micro_sparse_scores(
+                        &q,
+                        &key,
+                        &sparse_scores,
+                        &selection_iter.positions,
+                        geom,
+                        32,
+                    )
+                    .unwrap();
+                let duration_qk = start_qk.elapsed().as_secs_f64() * 1000.0;
+
+                // SAFETY: Both original physical GPU softmax and V-stage PV.
+                unsafe {
+                    ExecuteKernel::new(&engine.kernels.softmax)
+                        .set_arg(&sparse_scores)
+                        .set_arg(&n)
+                        .set_arg(&heads)
+                        .set_global_work_size(2)
+                        .enqueue_nd_range(&engine.queue)
+                        .unwrap();
+                }
+                let start_cold = std::time::Instant::now();
+                let selected_values = lod.read_values(0, &selection_iter.positions).unwrap();
+                engine.transfer(&mut staged_v, &selected_values).unwrap();
+                let duration_cold = start_cold.elapsed().as_secs_f64() * 1000.0;
+                // SAFETY: Reset the FP32 accumulator with blocking copy
+                // on each benchmark iteration, so GPU PV is not accumulated
+                // incorrectly across repeated independent requests.
+                unsafe {
+                    engine
+                        .queue
+                        .enqueue_write_buffer(&mut accumulator, CL_BLOCKING, 0, &zeros, &[])
+                        .unwrap();
+                    ExecuteKernel::new(&engine.kernels.lod_pv_stage)
+                        .set_arg(&sparse_scores)
+                        .set_arg(&staged_v)
+                        .set_arg(&staged_ids)
+                        .set_arg(&accumulator)
+                        .set_arg(&selected_count)
+                        .set_arg(&n)
+                        .set_arg(&heads)
+                        .set_arg(&kvheads)
+                        .set_arg(&dim)
+                        .set_global_work_size(geom.query_elements())
+                        .enqueue_nd_range(&engine.queue)
+                        .unwrap();
+                    ExecuteKernel::new(&engine.kernels.lod_pv_finish)
+                        .set_arg(&accumulator)
+                        .set_arg(&mass)
+                        .set_arg(&out)
+                        .set_arg(&heads)
+                        .set_arg(&dim)
+                        .set_global_work_size(geom.query_elements())
+                        .enqueue_nd_range(&engine.queue)
+                        .unwrap();
+                }
+                engine.queue.finish().unwrap();
+                let duration_micro_total = start_total.elapsed().as_secs_f64() * 1000.0;
+                if iter >= warmup {
+                    dense_ms.push(duration_dense);
+                    micro_total_ms.push(duration_micro_total);
+                    micro_planner_ms.push(duration_plan);
+                    micro_qk_ms.push(duration_qk);
+                    micro_cold_ms.push(duration_cold);
+                }
+            }
+            let median = |mut values: Vec<f64>| {
+                values.sort_unstable_by(f64::total_cmp);
+                values[values.len() / 2]
+            };
+            let dense = median(dense_ms);
+            let micro = median(micro_total_ms);
+            eprintln!(
+                "BENCHMARK_TIEMPO_REAL_GPU32 repeticiones={} | atencion_completa_ms_mediana={:.6} | micro_seleccion_cold_gpu_ms_mediana={:.6} | relacion_micro_sobre_completa={:.4} | planificador_cpu_ms_mediana={:.6} | qk_micro_y_transferencia_indice_ms_mediana={:.6} | lectura_v_fria_y_transferencia_ms_mediana={:.6} | BF16_error_previamente_verificado={:.12} | tokens_K_omitidos=16/32 | V_omitidas=16/32",
+                trials,
+                dense,
+                micro,
+                micro / dense,
+                median(micro_planner_ms),
+                median(micro_qk_ms),
+                median(micro_cold_ms),
+                max_abs_error,
+            );
+
+            // Fast path under EXACTLY the same certified micro selection:
+            // BF16 V remains device resident; selected K indices are
+            // uploaded ONCE and cached in the OpenCL device buffer.
+            // This is a true end-to-end attention latency benchmark.
+            let mut cache = MicroSelectedDevice {
+                indices: engine.alloc_indices(32).unwrap(),
+                last_positions: Vec::new(),
+                upload_calls: 0,
+                reuse_hits: 0,
+            };
             engine
-                .micro_update_cached_indices(&mut cache, &planned.positions, 32)
+                .micro_update_cached_indices(&mut cache, &selection.positions, 32)
                 .unwrap();
+            let resident_output = engine.alloc_u8(geom.query_elements() * 2).unwrap();
             engine
                 .micro_hot_attention(
                     (&q, &key, &value, &cache.indices, &resident_output),
-                    (planned.positions.len(), 32),
+                    (selection.positions.len(), 32),
                     geom,
                 )
                 .unwrap();
             engine.queue.finish().unwrap();
-            let gpu_ms = gpu_started.elapsed().as_secs_f64() * 1000.0;
-            if i >= warmup {
-                dense_ms.push(full_ms);
-                planning_ms.push(planned_ms);
-                kernel_ms.push(gpu_ms);
-                micro_hot_ms.push(planned_ms + gpu_ms);
+            let hot_actual = engine
+                .read_bf16_bytes(&resident_output, geom.query_elements() * 2)
+                .unwrap();
+            let mut hot_error = 0.0f32;
+            for (a, b) in exact.chunks_exact(2).zip(hot_actual.chunks_exact(2)) {
+                let a = half::bf16::from_bits(u16::from_le_bytes([a[0], a[1]])).to_f32();
+                let b = half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
+                hot_error = hot_error.max((a - b).abs());
             }
-        }
-        let median = |mut v: Vec<f64>| {
-            v.sort_unstable_by(f64::total_cmp);
-            v[v.len() / 2]
-        };
-        let full = median(dense_ms);
-        let hot = median(micro_hot_ms);
-        eprintln!(
-            "BENCHMARK_MICRO_HOT_GPU32 repeticiones={} | atencion_completa_ms_mediana={:.6} | micro_con_indices_y_v_residentes_ms_mediana={:.6} | aceleracion_vs_completa={:.4} | micro_planificador_cpu_ms_mediana={:.6} | micro_gpu_kernel_ms_mediana={:.6} | subida_indice_gpu_veces={} | reutilizaciones_indice_gpu={} | L_inf_BF16_real={:.12} | K_omitidas=16/32 | V_omitidas=16/32",
-            trials,
-            full,
-            hot,
-            full / hot,
-            median(planning_ms),
-            median(kernel_ms),
-            cache.upload_calls,
-            cache.reuse_hits,
-            hot_error
-        );
-        assert_eq!(
-            cache.upload_calls, 1,
-            "micro GPU selection should remain device resident after first upload"
-        );
-        assert!(
-            cache.reuse_hits >= trials,
-            "micro GPU selected indices were needlessly reuploaded"
-        );
-    }
-
-    #[test]
-    #[ignore = "requires physical AMD Radeon and configured-model BF16 checkpoint"]
-    fn gpu_actual_micro_full_model_falls_back_when_uncertified() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let mut gpu = OpenClLlm::load_with_canonical_lod(
-            &model,
-            64,
-            WeightMode::Resident,
-            CanonicalGpuLodConfig {
-                epsilon: 0.001,
-                stage_tokens: 16,
-                cold_directory: None,
-            },
-        )
-        .unwrap();
-        gpu.set_batch_prefill_tokens(Some(32)).unwrap();
-        let ids = vec![0u32; 8];
-        let result = gpu.generate(&ids, 2, true).unwrap();
-        assert_eq!(result.prompt_tokens, 8);
-        assert!(!result.tokens.is_empty());
-        let stats = result.canonical_cpu_lod_stats.unwrap();
-        assert!(stats.shared_original_cpu_algorithms);
-        // The batched prefill uses dense causal GPU attention with K/V
-        // sealed once; only subsequent autoregressive decode invokes
-        // the micro region planner, once per Transformer layer.
-        assert_eq!(
-            stats.queries,
-            gpu.spec.num_hidden_layers * (result.steps.len() - 1)
-        );
-        assert!(stats.micro_dense_fallback_queries > 0);
-        assert!(stats.micro_sparse_queries <= stats.queries);
-        assert!(stats.maximum_certified_error_bound <= 0.001);
-    }
-
-    #[test]
-    #[ignore = "requires physical Radeon Phoenix GPU and exact configured-model BF16 checkpoint"]
-    fn gpu_actual_micro_hot_model_375_bitwise_dense_fallback_and_cold_integrity() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tok =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let chat = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tok.encode(chat, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-
-        // ORIGINAL GPU dense BF16 reference, no metadata/no approximation.
-        let mut reference = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
-        reference.set_batch_prefill_tokens(Some(128)).unwrap();
-        reference.set_prefill_weight_reuse_tokens(8).unwrap();
-        reference.set_decode_unroll4(true).unwrap();
-        reference.set_decode_fused_kernels(true).unwrap();
-        let expected = reference.generate(&ids, 16, true).unwrap();
-        let dense_kv = reference.debug_kv_layer_bytes().unwrap();
-        drop(reference);
-
-        // NEW POSITIVE epsilon GPU BF16 HOT V; original canonical CPU
-        // ColdStore and four-bit/LSH remain the authoritative BF16 backing.
-        let config = CanonicalGpuLodConfig {
-            epsilon: 0.001,
-            stage_tokens: 64,
-            cold_directory: None,
-        };
-        let mut runtime =
-            OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, config).unwrap();
-        runtime.set_batch_prefill_tokens(Some(128)).unwrap();
-        runtime.set_prefill_weight_reuse_tokens(8).unwrap();
-        runtime.set_decode_unroll4(true).unwrap();
-        runtime.set_decode_fused_kernels(true).unwrap();
-        runtime.set_micro_hot_v_tokens(512).unwrap();
-        let actual = runtime.generate(&ids, 16, true).unwrap();
-        assert_eq!(actual.tokens, expected.tokens);
-        assert_eq!(actual.steps.len(), expected.steps.len());
-        for (step, (a, b)) in actual.steps.iter().zip(expected.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "full GPU hot exact fallback changed BF16 logits at step {step}"
+            assert!(
+                hot_error <= 0.001,
+                "resident micro BF16 output violates certified omitted mass"
             );
-        }
-        assert_eq!(actual.gpu_micro_hot_v_capacity_tokens, 512);
-        assert_eq!(
-            actual.gpu_micro_hot_sparse_calls, 0,
-            "actual 375-token sample has no certified region omissions"
-        );
-        assert_eq!(actual.gpu_micro_hot_exact_fallback_calls, 24 * 15);
-        assert_eq!(
-            actual.gpu_hot_v_cold_fallback_calls, 0,
-            "hot BF16 V must avoid cold value staging"
-        );
-        let stats = actual.canonical_cpu_lod_stats.as_ref().unwrap();
-        assert_eq!(stats.micro_sparse_queries, 0);
-        assert_eq!(stats.exact_v_tokens_read_from_cold, 0);
-        assert_eq!(stats.exact_v_tokens_skipped, 0);
-        assert!(stats.physical_cold_store_bytes > 0);
-        assert_eq!(
-            runtime.lod.as_ref().unwrap().axis().token_len(),
-            runtime.position
-        );
-        let count = runtime.position;
-        let kvheads = runtime.spec.attention.kv_heads;
-        let item = runtime.spec.attention.head_dim * 2;
-        let token_bytes = kvheads * item;
-        let positions = (0..count).collect::<Vec<_>>();
-        let mut verified_bytes = 0usize;
-        for (layer, (reference_key, reference_value)) in dense_kv.iter().enumerate() {
-            let k = runtime
-                .engine
-                .read_bf16_bytes(&runtime.workspace.kv[layer].key, count * token_bytes)
-                .unwrap();
-            let v = runtime
-                .lod
-                .as_mut()
-                .unwrap()
-                .read_values(layer, &positions)
-                .unwrap();
-            for head in 0..kvheads {
-                for token in 0..count {
-                    let from = (token * kvheads + head) * item;
-                    let to = (head * count + token) * item;
-                    assert_eq!(
-                        &k[from..from + item],
-                        &reference_key[to..to + item],
-                        "GPU micro hot changed original BF16 K"
-                    );
-                    assert_eq!(
-                        &v[from..from + item],
-                        &reference_value[to..to + item],
-                        "GPU micro hot ColdStore changed original BF16 V"
-                    );
-                    verified_bytes += 2 * item;
+            let warmup = 12usize;
+            let trials = 96usize;
+            let mut dense_ms = Vec::new();
+            let mut micro_hot_ms = Vec::new();
+            let mut planning_ms = Vec::new();
+            let mut kernel_ms = Vec::new();
+            for i in 0..warmup + trials {
+                let start = std::time::Instant::now();
+                engine
+                    .attention(&q, (&key, &value), &dense_scores, &dense_output, 32, geom)
+                    .unwrap();
+                engine.queue.finish().unwrap();
+                let full_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+                let start = std::time::Instant::now();
+                let planned = lod.plan_micro_regions(0, &query).unwrap().unwrap();
+                let planned_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let gpu_started = std::time::Instant::now();
+                engine
+                    .micro_update_cached_indices(&mut cache, &planned.positions, 32)
+                    .unwrap();
+                engine
+                    .micro_hot_attention(
+                        (&q, &key, &value, &cache.indices, &resident_output),
+                        (planned.positions.len(), 32),
+                        geom,
+                    )
+                    .unwrap();
+                engine.queue.finish().unwrap();
+                let gpu_ms = gpu_started.elapsed().as_secs_f64() * 1000.0;
+                if i >= warmup {
+                    dense_ms.push(full_ms);
+                    planning_ms.push(planned_ms);
+                    kernel_ms.push(gpu_ms);
+                    micro_hot_ms.push(planned_ms + gpu_ms);
                 }
             }
-        }
-        eprintln!(
-            "MICRO_HOT_LLM_GPU375_PASS | input_tokens={} | decoded_tokens={} | logits_identical=true | BF16_KV_bytes_verified={} | GPU_micro_hot_sparse={} | GPU_micro_exact_fallback={} | ColdStore_V_reads_during_decode={} | original_index_bytes={} | coldstore_pages={} | result_preview={:?}",
-            ids.len(),
-            actual.tokens.len(),
-            verified_bytes,
-            actual.gpu_micro_hot_sparse_calls,
-            actual.gpu_micro_hot_exact_fallback_calls,
-            stats.exact_v_tokens_read_from_cold,
-            stats.four_bit_index_payload_bytes,
-            stats.physical_cold_store_pages,
-            &actual.tokens[..actual.tokens.len().min(5)]
-        );
-        runtime.reset_session().unwrap();
-        runtime.set_exact_hot_fused_attention(true).unwrap();
-        let again = runtime.generate(&ids, 16, true).unwrap();
-        assert_eq!(again.tokens, expected.tokens);
-        assert!(again.gpu_exact_hot_fused_attention);
-        assert_eq!(again.gpu_micro_hot_exact_fallback_calls, 24 * 15);
-        for (step, (a, b)) in again.steps.iter().zip(expected.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "positive-epsilon MICRO hot exact fallback fusion changed BF16 logits at step {step}"
-            );
-        }
-        assert_eq!(
-            again
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .exact_v_tokens_skipped,
-            0
-        );
-        eprintln!(
-            "MICRO_POSITIVE_FUSED_EXACT_GPU_LLM_PASS prompts={} decode={} bit_exact_full_logits=true cold_bytes={}",
-            ids.len(),
-            again.tokens.len(),
-            again
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .physical_cold_store_bytes
-        );
-    }
-
-    #[test]
-    #[ignore = "requires Radeon OpenCL GPU: full BF16 QK-softmax-PV parity against original GPU kernels"]
-    fn gpu_actual_exact_hot_fused_attention_parity_for_many_context_lengths() {
-        use super::*;
-        let engine = GpuEngine::new(false).unwrap();
-        let geom = AttentionGeometry::new(16, 2, 128).unwrap();
-        let q = (0..geom.query_elements())
-            .map(|i| half::bf16::from_f32(((i % 101) as f32 - 50.0) * 0.0101))
-            .flat_map(|x| x.to_bits().to_le_bytes())
-            .collect::<Vec<_>>();
-        let mut query = engine.alloc_u8(q.len()).unwrap();
-        engine.transfer(&mut query, &q).unwrap();
-        let mut key = engine
-            .alloc_u8(2048 * geom.kv_elements_per_token() * 2)
-            .unwrap();
-        let mut value = engine
-            .alloc_u8(2048 * geom.kv_elements_per_token() * 2)
-            .unwrap();
-        let original = engine.alloc_u8(geom.query_elements() * 2).unwrap();
-        let fused = engine.alloc_u8(geom.query_elements() * 2).unwrap();
-        let scores = engine.alloc_scores(2048 * geom.query_heads).unwrap();
-        for tokens in [1usize, 2, 15, 32, 127, 375, 512, 1024, 2048] {
-            let n = tokens * geom.kv_elements_per_token();
-            let bytes_k = (0..n)
-                .map(|i| half::bf16::from_f32(((i % 47) as f32 - 23.0) * 0.033))
-                .flat_map(|x| x.to_bits().to_le_bytes())
-                .collect::<Vec<_>>();
-            let bytes_v = (0..n)
-                .map(|i| half::bf16::from_f32(((i % 71) as f32 - 35.0) * 0.026))
-                .flat_map(|x| x.to_bits().to_le_bytes())
-                .collect::<Vec<_>>();
-            engine.transfer(&mut key, &bytes_k).unwrap();
-            engine.transfer(&mut value, &bytes_v).unwrap();
-            engine
-                .attention(
-                    &query,
-                    (&key, &value),
-                    &scores,
-                    &original,
-                    u32::try_from(tokens).unwrap(),
-                    geom,
-                )
-                .unwrap();
-            engine
-                .exact_hot_fused_attention(&query, &key, &value, &fused, tokens, geom)
-                .unwrap();
-            engine.queue.finish().unwrap();
-            let dense_bytes = engine
-                .read_bf16_bytes(&original, geom.query_elements() * 2)
-                .unwrap();
-            let fast_bytes = engine
-                .read_bf16_bytes(&fused, geom.query_elements() * 2)
-                .unwrap();
-            assert_eq!(
-                dense_bytes, fast_bytes,
-                "BF16 exact hot fusion altered GPU output at context {tokens}"
-            );
+            let median = |mut v: Vec<f64>| {
+                v.sort_unstable_by(f64::total_cmp);
+                v[v.len() / 2]
+            };
+            let full = median(dense_ms);
+            let hot = median(micro_hot_ms);
             eprintln!(
-                "FUSED_EXACT_GPU_PARITY context={tokens} BF16_bytes={} equal=true",
-                dense_bytes.len()
+                "BENCHMARK_MICRO_HOT_GPU32 repeticiones={} | atencion_completa_ms_mediana={:.6} | micro_con_indices_y_v_residentes_ms_mediana={:.6} | aceleracion_vs_completa={:.4} | micro_planificador_cpu_ms_mediana={:.6} | micro_gpu_kernel_ms_mediana={:.6} | subida_indice_gpu_veces={} | reutilizaciones_indice_gpu={} | L_inf_BF16_real={:.12} | K_omitidas=16/32 | V_omitidas=16/32",
+                trials,
+                full,
+                hot,
+                full / hot,
+                median(planning_ms),
+                median(kernel_ms),
+                cache.upload_calls,
+                cache.reuse_hits,
+                hot_error
             );
-            if [32usize, 375, 1024, 2048].contains(&tokens) {
-                // Physical GPU wall times; each sample includes GPU command
-                // queue completion, original 3 kernels vs one fused kernel.
-                // The same Q/K/V BF16 and outputs were bitwise validated.
-                let warmup = 10usize;
-                let trials = 72usize;
-                let mut old_times = Vec::new();
-                let mut fused_times = Vec::new();
-                for trial in 0..warmup + trials {
-                    let start = std::time::Instant::now();
-                    engine
-                        .attention(
-                            &query,
-                            (&key, &value),
-                            &scores,
-                            &original,
-                            u32::try_from(tokens).unwrap(),
-                            geom,
-                        )
-                        .unwrap();
-                    engine.queue.finish().unwrap();
-                    let old_ms = start.elapsed().as_secs_f64() * 1000.0;
-                    let start = std::time::Instant::now();
-                    engine
-                        .exact_hot_fused_attention(&query, &key, &value, &fused, tokens, geom)
-                        .unwrap();
-                    engine.queue.finish().unwrap();
-                    let fused_ms = start.elapsed().as_secs_f64() * 1000.0;
-                    if trial >= warmup {
-                        old_times.push(old_ms);
-                        fused_times.push(fused_ms);
+            assert_eq!(
+                cache.upload_calls, 1,
+                "micro GPU selection should remain device resident after first upload"
+            );
+            assert!(
+                cache.reuse_hits >= trials,
+                "micro GPU selected indices were needlessly reuploaded"
+            );
+        }
+
+        #[test]
+        #[ignore = "requires physical AMD Radeon and configured-model BF16 checkpoint"]
+        fn gpu_actual_micro_full_model_falls_back_when_uncertified() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let mut gpu = OpenClLlm::load_with_canonical_lod(
+                &model,
+                64,
+                WeightMode::Resident,
+                CanonicalGpuLodConfig {
+                    epsilon: 0.001,
+                    stage_tokens: 16,
+                    cold_directory: None,
+                },
+            )
+            .unwrap();
+            gpu.set_batch_prefill_tokens(Some(32)).unwrap();
+            let ids = vec![0u32; 8];
+            let result = gpu.generate(&ids, 2, true).unwrap();
+            assert_eq!(result.prompt_tokens, 8);
+            assert!(!result.tokens.is_empty());
+            let stats = result.canonical_cpu_lod_stats.unwrap();
+            assert!(stats.shared_original_cpu_algorithms);
+            // The batched prefill uses dense causal GPU attention with K/V
+            // sealed once; only subsequent autoregressive decode invokes
+            // the micro region planner, once per Transformer layer.
+            assert_eq!(
+                stats.queries,
+                gpu.spec.num_hidden_layers * (result.steps.len() - 1)
+            );
+            assert!(stats.micro_dense_fallback_queries > 0);
+            assert!(stats.micro_sparse_queries <= stats.queries);
+            assert!(stats.maximum_certified_error_bound <= 0.001);
+        }
+
+        #[test]
+        #[ignore = "requires physical Radeon Phoenix GPU and exact configured-model BF16 checkpoint"]
+        fn gpu_actual_micro_hot_model_375_bitwise_dense_fallback_and_cold_integrity() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tok = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let chat = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tok.encode(chat, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+
+            // ORIGINAL GPU dense BF16 reference, no metadata/no approximation.
+            let mut reference = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            reference.set_batch_prefill_tokens(Some(128)).unwrap();
+            reference.set_prefill_weight_reuse_tokens(8).unwrap();
+            reference.set_decode_unroll4(true).unwrap();
+            reference.set_decode_fused_kernels(true).unwrap();
+            let expected = reference.generate(&ids, 16, true).unwrap();
+            let dense_kv = reference.debug_kv_layer_bytes().unwrap();
+            drop(reference);
+
+            // NEW POSITIVE epsilon GPU BF16 HOT V; original canonical CPU
+            // ColdStore and four-bit/LSH remain the authoritative BF16 backing.
+            let config = CanonicalGpuLodConfig {
+                epsilon: 0.001,
+                stage_tokens: 64,
+                cold_directory: None,
+            };
+            let mut runtime =
+                OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, config)
+                    .unwrap();
+            runtime.set_batch_prefill_tokens(Some(128)).unwrap();
+            runtime.set_prefill_weight_reuse_tokens(8).unwrap();
+            runtime.set_decode_unroll4(true).unwrap();
+            runtime.set_decode_fused_kernels(true).unwrap();
+            runtime.set_micro_hot_v_tokens(512).unwrap();
+            let actual = runtime.generate(&ids, 16, true).unwrap();
+            assert_eq!(actual.tokens, expected.tokens);
+            assert_eq!(actual.steps.len(), expected.steps.len());
+            for (step, (a, b)) in actual.steps.iter().zip(expected.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "full GPU hot exact fallback changed BF16 logits at step {step}"
+                );
+            }
+            assert_eq!(actual.gpu_micro_hot_v_capacity_tokens, 512);
+            assert_eq!(
+                actual.gpu_micro_hot_sparse_calls, 0,
+                "actual 375-token sample has no certified region omissions"
+            );
+            assert_eq!(actual.gpu_micro_hot_exact_fallback_calls, 24 * 15);
+            assert_eq!(
+                actual.gpu_hot_v_cold_fallback_calls, 0,
+                "hot BF16 V must avoid cold value staging"
+            );
+            let stats = actual.canonical_cpu_lod_stats.as_ref().unwrap();
+            assert_eq!(stats.micro_sparse_queries, 0);
+            assert_eq!(stats.exact_v_tokens_read_from_cold, 0);
+            assert_eq!(stats.exact_v_tokens_skipped, 0);
+            assert!(stats.physical_cold_store_bytes > 0);
+            assert_eq!(
+                runtime.lod.as_ref().unwrap().axis().token_len(),
+                runtime.position
+            );
+            let count = runtime.position;
+            let kvheads = runtime.spec.attention.kv_heads;
+            let item = runtime.spec.attention.head_dim * 2;
+            let token_bytes = kvheads * item;
+            let positions = (0..count).collect::<Vec<_>>();
+            let mut verified_bytes = 0usize;
+            for (layer, (reference_key, reference_value)) in dense_kv.iter().enumerate() {
+                let k = runtime
+                    .engine
+                    .read_bf16_bytes(&runtime.workspace.kv[layer].key, count * token_bytes)
+                    .unwrap();
+                let v = runtime
+                    .lod
+                    .as_mut()
+                    .unwrap()
+                    .read_values(layer, &positions)
+                    .unwrap();
+                for head in 0..kvheads {
+                    for token in 0..count {
+                        let from = (token * kvheads + head) * item;
+                        let to = (head * count + token) * item;
+                        assert_eq!(
+                            &k[from..from + item],
+                            &reference_key[to..to + item],
+                            "GPU micro hot changed original BF16 K"
+                        );
+                        assert_eq!(
+                            &v[from..from + item],
+                            &reference_value[to..to + item],
+                            "GPU micro hot ColdStore changed original BF16 V"
+                        );
+                        verified_bytes += 2 * item;
                     }
                 }
-                let median = |mut times: Vec<f64>| {
-                    times.sort_unstable_by(f64::total_cmp);
-                    times[times.len() / 2]
-                };
-                let old = median(old_times);
-                let now = median(fused_times);
+            }
+            eprintln!(
+                "MICRO_HOT_LLM_GPU375_PASS | input_tokens={} | decoded_tokens={} | logits_identical=true | BF16_KV_bytes_verified={} | GPU_micro_hot_sparse={} | GPU_micro_exact_fallback={} | ColdStore_V_reads_during_decode={} | original_index_bytes={} | coldstore_pages={} | result_preview={:?}",
+                ids.len(),
+                actual.tokens.len(),
+                verified_bytes,
+                actual.gpu_micro_hot_sparse_calls,
+                actual.gpu_micro_hot_exact_fallback_calls,
+                stats.exact_v_tokens_read_from_cold,
+                stats.four_bit_index_payload_bytes,
+                stats.physical_cold_store_pages,
+                &actual.tokens[..actual.tokens.len().min(5)]
+            );
+            runtime.reset_session().unwrap();
+            runtime.set_exact_hot_fused_attention(true).unwrap();
+            let again = runtime.generate(&ids, 16, true).unwrap();
+            assert_eq!(again.tokens, expected.tokens);
+            assert!(again.gpu_exact_hot_fused_attention);
+            assert_eq!(again.gpu_micro_hot_exact_fallback_calls, 24 * 15);
+            for (step, (a, b)) in again.steps.iter().zip(expected.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "positive-epsilon MICRO hot exact fallback fusion changed BF16 logits at step {step}"
+                );
+            }
+            assert_eq!(
+                again
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .exact_v_tokens_skipped,
+                0
+            );
+            eprintln!(
+                "MICRO_POSITIVE_FUSED_EXACT_GPU_LLM_PASS prompts={} decode={} bit_exact_full_logits=true cold_bytes={}",
+                ids.len(),
+                again.tokens.len(),
+                again
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .physical_cold_store_bytes
+            );
+        }
+
+        #[test]
+        #[ignore = "requires Radeon OpenCL GPU: full BF16 QK-softmax-PV parity against original GPU kernels"]
+        fn gpu_actual_exact_hot_fused_attention_parity_for_many_context_lengths() {
+            use super::*;
+            let engine = GpuEngine::new(false).unwrap();
+            let geom = AttentionGeometry::new(16, 2, 128).unwrap();
+            let q = (0..geom.query_elements())
+                .map(|i| half::bf16::from_f32(((i % 101) as f32 - 50.0) * 0.0101))
+                .flat_map(|x| x.to_bits().to_le_bytes())
+                .collect::<Vec<_>>();
+            let mut query = engine.alloc_u8(q.len()).unwrap();
+            engine.transfer(&mut query, &q).unwrap();
+            let mut key = engine
+                .alloc_u8(2048 * geom.kv_elements_per_token() * 2)
+                .unwrap();
+            let mut value = engine
+                .alloc_u8(2048 * geom.kv_elements_per_token() * 2)
+                .unwrap();
+            let original = engine.alloc_u8(geom.query_elements() * 2).unwrap();
+            let fused = engine.alloc_u8(geom.query_elements() * 2).unwrap();
+            let scores = engine.alloc_scores(2048 * geom.query_heads).unwrap();
+            for tokens in [1usize, 2, 15, 32, 127, 375, 512, 1024, 2048] {
+                let n = tokens * geom.kv_elements_per_token();
+                let bytes_k = (0..n)
+                    .map(|i| half::bf16::from_f32(((i % 47) as f32 - 23.0) * 0.033))
+                    .flat_map(|x| x.to_bits().to_le_bytes())
+                    .collect::<Vec<_>>();
+                let bytes_v = (0..n)
+                    .map(|i| half::bf16::from_f32(((i % 71) as f32 - 35.0) * 0.026))
+                    .flat_map(|x| x.to_bits().to_le_bytes())
+                    .collect::<Vec<_>>();
+                engine.transfer(&mut key, &bytes_k).unwrap();
+                engine.transfer(&mut value, &bytes_v).unwrap();
+                engine
+                    .attention(
+                        &query,
+                        (&key, &value),
+                        &scores,
+                        &original,
+                        u32::try_from(tokens).unwrap(),
+                        geom,
+                    )
+                    .unwrap();
+                engine
+                    .exact_hot_fused_attention(&query, &key, &value, &fused, tokens, geom)
+                    .unwrap();
+                engine.queue.finish().unwrap();
+                let dense_bytes = engine
+                    .read_bf16_bytes(&original, geom.query_elements() * 2)
+                    .unwrap();
+                let fast_bytes = engine
+                    .read_bf16_bytes(&fused, geom.query_elements() * 2)
+                    .unwrap();
+                assert_eq!(
+                    dense_bytes, fast_bytes,
+                    "BF16 exact hot fusion altered GPU output at context {tokens}"
+                );
                 eprintln!(
-                    "FUSED_EXACT_GPU_BENCH context={tokens} old_ms={old:.6} fused_ms={now:.6} speedup={:.4} samples={trials} exact_BF16=true",
-                    old / now
+                    "FUSED_EXACT_GPU_PARITY context={tokens} BF16_bytes={} equal=true",
+                    dense_bytes.len()
+                );
+                if [32usize, 375, 1024, 2048].contains(&tokens) {
+                    // Physical GPU wall times; each sample includes GPU command
+                    // queue completion, original 3 kernels vs one fused kernel.
+                    // The same Q/K/V BF16 and outputs were bitwise validated.
+                    let warmup = 10usize;
+                    let trials = 72usize;
+                    let mut old_times = Vec::new();
+                    let mut fused_times = Vec::new();
+                    for trial in 0..warmup + trials {
+                        let start = std::time::Instant::now();
+                        engine
+                            .attention(
+                                &query,
+                                (&key, &value),
+                                &scores,
+                                &original,
+                                u32::try_from(tokens).unwrap(),
+                                geom,
+                            )
+                            .unwrap();
+                        engine.queue.finish().unwrap();
+                        let old_ms = start.elapsed().as_secs_f64() * 1000.0;
+                        let start = std::time::Instant::now();
+                        engine
+                            .exact_hot_fused_attention(&query, &key, &value, &fused, tokens, geom)
+                            .unwrap();
+                        engine.queue.finish().unwrap();
+                        let fused_ms = start.elapsed().as_secs_f64() * 1000.0;
+                        if trial >= warmup {
+                            old_times.push(old_ms);
+                            fused_times.push(fused_ms);
+                        }
+                    }
+                    let median = |mut times: Vec<f64>| {
+                        times.sort_unstable_by(f64::total_cmp);
+                        times[times.len() / 2]
+                    };
+                    let old = median(old_times);
+                    let now = median(fused_times);
+                    eprintln!(
+                        "FUSED_EXACT_GPU_BENCH context={tokens} old_ms={old:.6} fused_ms={now:.6} speedup={:.4} samples={trials} exact_BF16=true",
+                        old / now
+                    );
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "physical AMD OpenCL GPU and full configured-model BF16 checkpoint required"]
+        fn gpu_actual_fused_exact_lod_375_logits_and_cold_kv_parity() {
+            use super::*;
+            use sha2::{Digest, Sha256};
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let input = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let prompt = tokenizer.encode(input, false).unwrap().get_ids().to_vec();
+            assert_eq!(prompt.len(), 375);
+            let build = |enabled: bool| {
+                let mut runtime = OpenClLlm::load_with_canonical_lod(
+                    &model,
+                    512,
+                    WeightMode::Resident,
+                    CanonicalGpuLodConfig {
+                        epsilon: 0.0,
+                        stage_tokens: 64,
+                        cold_directory: None,
+                    },
+                )
+                .unwrap();
+                runtime.set_batch_prefill_tokens(Some(128)).unwrap();
+                runtime.set_prefill_weight_reuse_tokens(8).unwrap();
+                runtime.set_decode_unroll4(true).unwrap();
+                runtime.set_decode_fused_kernels(true).unwrap();
+                runtime.set_exact_hot_v_tokens(512).unwrap();
+                runtime.set_deferred_cold_commit(true).unwrap();
+                runtime.set_exact_hot_fused_attention(enabled).unwrap();
+                runtime
+            };
+            let digest = |runtime: &mut OpenClLlm| {
+                let mut hash = Sha256::new();
+                let size = runtime.position * runtime.spec.attention.kv_elements_per_token() * 2;
+                let positions = (0..runtime.position).collect::<Vec<_>>();
+                for layer in 0..runtime.spec.num_hidden_layers {
+                    let keys = runtime
+                        .engine
+                        .read_bf16_bytes(&runtime.workspace.kv[layer].key, size)
+                        .unwrap();
+                    hash.update(keys);
+                    let cold = runtime
+                        .lod
+                        .as_mut()
+                        .unwrap()
+                        .read_values(layer, &positions)
+                        .unwrap();
+                    hash.update(cold);
+                }
+                format!("{:x}", hash.finalize())
+            };
+            let mut original = build(false);
+            let before = original.generate(&prompt, 16, true).unwrap();
+            let before_hash = digest(&mut original);
+            drop(original);
+            let mut fast = build(true);
+            let after = fast.generate(&prompt, 16, true).unwrap();
+            let after_hash = digest(&mut fast);
+            assert_eq!(
+                before.tokens, after.tokens,
+                "fusion of exact GPU attention changed generated token IDs"
+            );
+            assert_eq!(before.steps.len(), after.steps.len());
+            for (step, (a, b)) in before.steps.iter().zip(after.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "fused GPU exact attention changed BF16 logits at step {step}"
+                );
+            }
+            assert_eq!(
+                before_hash, after_hash,
+                "fused exact GPU attention changed original BF16 KV/ColdStore"
+            );
+            assert_eq!(
+                after
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .exact_v_tokens_skipped,
+                0
+            );
+            assert_eq!(
+                after
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .exact_v_tokens_read_from_cold,
+                0
+            );
+            assert_eq!(
+                before
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .physical_cold_store_pages,
+                after
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .physical_cold_store_pages
+            );
+            assert!(after.gpu_exact_hot_fused_attention);
+            eprintln!(
+                "FUSED_EXACT_GPU_LLM_PARITY prompt={} generated={} all_logits_identical=true all_BF16_KV_SHA_identical=true old_time_s={:.6} fused_time_s={:.6} original_KV_SHA={}",
+                prompt.len(),
+                after.tokens.len(),
+                before.total_seconds,
+                after.total_seconds,
+                &after_hash[..16]
+            );
+        }
+
+        #[test]
+        #[ignore = "requires physical AMD Phoenix OpenCL and original configured-model BF16 checkpoint"]
+        fn gpu_actual_fused_exact_dense_15_full_logits_and_kv_sha() {
+            use super::*;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 15);
+            let build = |fused: bool| {
+                let mut m = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
+                m.set_batch_prefill_tokens(Some(64)).unwrap();
+                m.set_prefill_weight_reuse_tokens(8).unwrap();
+                m.set_decode_unroll4(true).unwrap();
+                m.set_decode_fused_kernels(true).unwrap();
+                m.set_exact_hot_fused_attention(fused).unwrap();
+                m
+            };
+            let mut baseline = build(false);
+            let before = baseline.generate(&ids, 16, true).unwrap();
+            let before_sha = baseline.logical_kv_sha256().unwrap();
+            drop(baseline);
+            let mut fast = build(true);
+            let after = fast.generate(&ids, 16, true).unwrap();
+            let after_sha = fast.logical_kv_sha256().unwrap();
+            assert_eq!(before_sha, after_sha);
+            assert_eq!(before.tokens, after.tokens);
+            assert_eq!(before.steps.len(), after.steps.len());
+            for (i, (a, b)) in before.steps.iter().zip(after.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "full dense BF16 vocab logits changed at {i}"
+                );
+            }
+            assert!(after.gpu_exact_hot_fused_attention);
+            eprintln!(
+                "FUSED_EXACT_GPU_DENSE_PASS tokens={} logits_all_equal=true KV_SHA_equal=true baseline_s={:.3} fused_s={:.3}",
+                after.tokens.len(),
+                before.total_seconds,
+                after.total_seconds
+            );
+        }
+
+        #[test]
+        #[ignore = "physical AMD Phoenix BF16 GPU configured-model; compares 5 prefill kernels in one resident model"]
+        fn gpu_actual_prefill_register_unrolling_precision_and_speed() {
+            use super::*;
+            use std::collections::BTreeMap;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let prompt = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let mut gpu = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            gpu.set_batch_prefill_tokens(Some(128)).unwrap();
+            let strategies = [
+                (8usize, false),
+                (8, true),
+                (16, false),
+                (16, true),
+                (32, false),
+                (16, true),
+                (16, false),
+                (8, true),
+                (8, false),
+                (32, false),
+            ];
+            let mut reference_logits = None::<Vec<f32>>;
+            let mut reference_sha = None::<String>;
+            let mut timings = BTreeMap::<(usize, bool), Vec<f64>>::new();
+            for (i, (tile, register)) in strategies.iter().copied().enumerate() {
+                if i > 0 {
+                    gpu.reset_session().unwrap();
+                }
+                gpu.set_prefill_weight_reuse_tokens(tile).unwrap();
+                gpu.set_prefill_register_unrolled(register).unwrap();
+                let output = gpu.generate(&ids, 1, true).unwrap();
+                let logits = output.steps[0].logits.as_ref().unwrap();
+                let sha = gpu.logical_kv_sha256().unwrap();
+                if let Some(ref expected) = reference_logits {
+                    assert_eq!(
+                        expected, logits,
+                        "register-unrolled prefill changed model BF16 logits with tile={tile} register={register}"
+                    );
+                } else {
+                    reference_logits = Some(logits.clone());
+                    reference_sha = Some(sha.clone());
+                }
+                assert_eq!(
+                    reference_sha.as_ref().unwrap(),
+                    &sha,
+                    "register-unrolled prefill altered BF16 GPU K/V SHA"
+                );
+                assert_eq!(output.prompt_tokens, 375);
+                timings
+                    .entry((tile, register))
+                    .or_default()
+                    .push(output.prefill_seconds);
+                eprintln!(
+                    "GPU_PREFILL_REGISTER_REAL trial={i} tile={tile} unrolled={register} prefill_s={:.6} gpu_logits_bit_exact=true logical_KV_SHA={}",
+                    output.prefill_seconds,
+                    &sha[..16]
+                );
+            }
+            for (key, mut times) in timings {
+                times.sort_unstable_by(f64::total_cmp);
+                let median = (times[0] + times[1]) * 0.5;
+                eprintln!(
+                    "GPU_PREFILL_REGISTER_MEDIAN tile={} unrolled={} prefill_s={median:.6} samples=2",
+                    key.0, key.1
                 );
             }
         }
-    }
 
-    #[test]
-    #[ignore = "physical AMD OpenCL GPU and full configured-model BF16 checkpoint required"]
-    fn gpu_actual_fused_exact_lod_375_logits_and_cold_kv_parity() {
-        use super::*;
-        use sha2::{Digest, Sha256};
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let input = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let prompt = tokenizer.encode(input, false).unwrap().get_ids().to_vec();
-        assert_eq!(prompt.len(), 375);
-        let build = |enabled: bool| {
-            let mut runtime = OpenClLlm::load_with_canonical_lod(
+        #[test]
+        #[ignore = "actual Radeon BF16 GPU required; 9 prefill runs on one resident configured-model checkpoint"]
+        fn gpu_actual_prefill_virtual32_64_128_bit_exact_and_speed() {
+            use super::*;
+            use std::collections::BTreeMap;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let prompt = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let mut gpu = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            gpu.set_batch_prefill_tokens(Some(128)).unwrap();
+            gpu.set_prefill_weight_reuse_tokens(8).unwrap();
+            gpu.set_prefill_register_unrolled(false).unwrap();
+            let order = [128usize, 64, 32, 64, 32, 128, 32, 128, 64];
+            let mut reference_logits = None::<Vec<f32>>;
+            let mut reference_sha = None::<String>;
+            let mut times = BTreeMap::<usize, Vec<f64>>::new();
+            for (i, lanes) in order.iter().copied().enumerate() {
+                if i > 0 {
+                    gpu.reset_session().unwrap();
+                }
+                gpu.set_prefill_virtual_lanes(lanes).unwrap();
+                let result = gpu.generate(&ids, 1, true).unwrap();
+                let logits = result.steps[0].logits.as_ref().unwrap();
+                let sha = gpu.logical_kv_sha256().unwrap();
+                if let Some(ref expected) = reference_logits {
+                    assert_eq!(
+                        expected, logits,
+                        "physical virtual lane selection altered BF16 logits at lane={lanes}"
+                    );
+                } else {
+                    reference_logits = Some(logits.clone());
+                    reference_sha = Some(sha.clone());
+                }
+                assert_eq!(
+                    reference_sha.as_ref().unwrap(),
+                    &sha,
+                    "virtual 32/64 original 128-lane summation changed exact BF16 K/V"
+                );
+                assert_eq!(result.prompt_tokens, 375);
+                assert_eq!(result.gpu_prefill_virtual_lanes, lanes);
+                times.entry(lanes).or_default().push(result.prefill_seconds);
+                eprintln!(
+                    "GPU_VIRTUAL_PREFILL_REAL trial={i} lanes={lanes} prefill_s={:.6} bf16_logits_exact=true BF16_KV_SHA={}",
+                    result.prefill_seconds,
+                    &sha[..16]
+                );
+            }
+            for (lanes, mut durations) in times {
+                durations.sort_unstable_by(f64::total_cmp);
+                eprintln!(
+                    "GPU_VIRTUAL_PREFILL_MEDIAN lanes={lanes} prefill_s={:.6} samples=3",
+                    durations[1]
+                );
+            }
+        }
+
+        #[test]
+        #[ignore = "requires real Radeon GPU and configured-model BF16 checkpoint; validates SHA256, exact logits and cold-store byte parity"]
+        fn gpu_actual_verified_prompt_replay_restores_exact_bf16_logits_and_kv() {
+            use super::*;
+            use sha2::{Digest, Sha256};
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
+            let tok = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let prompt = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tok.encode(prompt, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let cfg = CanonicalGpuLodConfig {
+                epsilon: 0.0,
+                stage_tokens: 64,
+                cold_directory: None,
+            };
+            let mut gpu =
+                OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, cfg).unwrap();
+            gpu.set_batch_prefill_tokens(Some(128)).unwrap();
+            gpu.set_prefill_weight_reuse_tokens(8).unwrap();
+            gpu.set_exact_hot_v_tokens(512).unwrap();
+            gpu.set_deferred_cold_commit(true).unwrap();
+            gpu.set_decode_unroll4(true).unwrap();
+            gpu.set_decode_fused_kernels(true).unwrap();
+            gpu.set_exact_hot_fused_attention(true).unwrap();
+            gpu.set_verified_gpu_prompt_replay(512).unwrap();
+            let full_hash = |runtime: &mut OpenClLlm| {
+                let mut sha = Sha256::new();
+                let count = runtime.position;
+                let bytes = count * runtime.spec.attention.kv_elements_per_token() * 2;
+                let positions = (0..count).collect::<Vec<_>>();
+                for layer in 0..runtime.spec.num_hidden_layers {
+                    let keys = runtime
+                        .engine
+                        .read_bf16_bytes(&runtime.workspace.kv[layer].key, bytes)
+                        .unwrap();
+                    sha.update(keys);
+                    let cold = runtime
+                        .lod
+                        .as_mut()
+                        .unwrap()
+                        .read_values(layer, &positions)
+                        .unwrap();
+                    sha.update(cold);
+                }
+                format!("{:x}", sha.finalize())
+            };
+            // First request: real BF16 GPU transformer prefill and 16-step
+            // generation. A small exact RAM-only snapshot is captured from
+            // the SAME K/V bytes already committed by CPU ColdStore.
+            let first = gpu.generate(&ids, 16, true).unwrap();
+            assert!(!first.gpu_verified_prompt_replay_hit);
+            assert_eq!(first.gpu_verified_prompt_replay_cached_tokens, 375);
+            assert!(first.gpu_verified_prompt_replay_cached_bytes > 9_000_000);
+            assert_eq!(
+                first
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .exact_v_tokens_skipped,
+                0
+            );
+            let first_sha = full_hash(&mut gpu);
+            gpu.reset_session().unwrap();
+            // Identical prompt: verifies the exact snapshot SHA256 and
+            // RESTORES ColdStore, original 4-bit index, GPU BF16 K/V and
+            // final prefill logits without running 24 Transformer layers.
+            let replay = gpu.generate(&ids, 16, true).unwrap();
+            assert!(replay.gpu_verified_prompt_replay_hit);
+            assert!(replay.gpu_verified_prompt_replay_sha256_verified);
+            assert_eq!(
+                replay.gpu_verified_prompt_replay_restored_bytes,
+                replay.gpu_verified_prompt_replay_cached_bytes
+            );
+            assert_eq!(replay.gpu_prefill_batches, 0);
+            assert_eq!(first.tokens, replay.tokens);
+            for (step, (a, b)) in first.steps.iter().zip(replay.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "verified BF16 GPU replay changed logits at step {step}"
+                );
+            }
+            let replay_sha = full_hash(&mut gpu);
+            assert_eq!(
+                first_sha, replay_sha,
+                "verified BF16 prompt replay changed original GPU K/ColdStore V"
+            );
+            assert_eq!(
+                first
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .physical_cold_store_pages,
+                replay
+                    .canonical_cpu_lod_stats
+                    .as_ref()
+                    .unwrap()
+                    .physical_cold_store_pages
+            );
+            eprintln!(
+                "GPU_VERIFIED_REPLAY_REAL first_prefill_s={:.6} cached_prefill_s={:.6} first_total_s={:.6} cached_total_s={:.6} prefix_tokens=375 coldstore_restored={} sha_verified=true all_full_logits_equal=true all_BF16_KV_SHA_equal=true",
+                first.prefill_seconds,
+                replay.prefill_seconds,
+                first.total_seconds,
+                replay.total_seconds,
+                replay.gpu_verified_prompt_replay_restored_bytes
+            );
+            // Different IDs cannot use a stale BF16 cache even if the
+            // same tensor shape and model are selected.
+            gpu.reset_session().unwrap();
+            let mut changed = ids.clone();
+            changed[35] = if ids[35] == 1 { 2 } else { 1 };
+            let miss = gpu.generate(&changed, 2, true).unwrap();
+            assert!(!miss.gpu_verified_prompt_replay_hit);
+            assert_eq!(miss.gpu_prefill_batches, 3);
+            assert_eq!(gpu.gpu_prompt_replay.as_ref().unwrap().ids, changed);
+            eprintln!("GPU_VERIFIED_REPLAY_CHANGED_IDS recomputed=true old_prefix_reused=false");
+            // Corrupt one cached BF16 byte. SHA validation MUST refuse it
+            // and physically recompute all 375 original BF16 prompt tokens,
+            // rather than returning an unchecked tensor.
+            gpu.reset_session().unwrap();
+            gpu.gpu_prompt_replay.as_mut().unwrap().kv[0].0[0] ^= 1;
+            let corrupted = gpu.generate(&changed, 1, false).unwrap();
+            assert!(!corrupted.gpu_verified_prompt_replay_hit);
+            assert!(!corrupted.gpu_verified_prompt_replay_sha256_verified);
+            assert_eq!(corrupted.gpu_prefill_batches, 3);
+            assert!(gpu.gpu_prompt_replay.as_ref().unwrap().verify());
+            eprintln!(
+                "GPU_VERIFIED_REPLAY_CORRUPTION sha256_detected=true recomputed_full_GPU_prefill=true"
+            );
+            gpu.reset_session().unwrap();
+            let recovered = gpu.generate(&changed, 1, false).unwrap();
+            assert!(recovered.gpu_verified_prompt_replay_hit);
+            assert!(recovered.gpu_verified_prompt_replay_sha256_verified);
+            eprintln!("GPU_VERIFIED_REPLAY_RECOVERY safe_new_snapshot_hit=true");
+        }
+
+        #[test]
+        #[ignore = "requires real Radeon Phoenix and original configured-model BF16; verifies common-prefix, full logits and exact ColdStore"]
+        fn gpu_actual_verified_shared_prefix_375_vs_full_bf16_kv_and_logits() {
+            use super::*;
+            use sha2::{Digest, Sha256};
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let document = "Dato verificable: TEST-CODE-001. ".to_owned()
+                + &"El informe conserva documentos y códigos de referencia. ".repeat(23);
+            let chat = |question: &str| {
+                let prompt = format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{document}{question}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                );
+                tokenizer.encode(prompt, false).unwrap().get_ids().to_vec()
+            };
+            let ids_a = chat("Indica el código del dato verificable.");
+            let ids_b = chat("¿Qué código exacto aparece en el informe?");
+            assert_eq!(ids_a.len(), 375);
+            let shared = ids_a.iter().zip(&ids_b).take_while(|(a, b)| a == b).count();
+            assert!(
+                shared > 300 && shared < ids_a.len() && shared < ids_b.len(),
+                "question should differ only after long original document prefix"
+            );
+            assert!(ids_b.len() + 16 <= 512);
+
+            let mut gpu = OpenClLlm::load_with_canonical_lod(
                 &model,
                 512,
                 WeightMode::Resident,
@@ -5077,1056 +5570,591 @@ mod tests {
                 },
             )
             .unwrap();
-            runtime.set_batch_prefill_tokens(Some(128)).unwrap();
-            runtime.set_prefill_weight_reuse_tokens(8).unwrap();
-            runtime.set_decode_unroll4(true).unwrap();
-            runtime.set_decode_fused_kernels(true).unwrap();
-            runtime.set_exact_hot_v_tokens(512).unwrap();
-            runtime.set_deferred_cold_commit(true).unwrap();
-            runtime.set_exact_hot_fused_attention(enabled).unwrap();
-            runtime
-        };
-        let digest = |runtime: &mut OpenClLlm| {
-            let mut hash = Sha256::new();
-            let size = runtime.position * runtime.spec.attention.kv_elements_per_token() * 2;
-            let positions = (0..runtime.position).collect::<Vec<_>>();
-            for layer in 0..runtime.spec.num_hidden_layers {
-                let keys = runtime
-                    .engine
-                    .read_bf16_bytes(&runtime.workspace.kv[layer].key, size)
-                    .unwrap();
-                hash.update(keys);
-                let cold = runtime
-                    .lod
-                    .as_mut()
-                    .unwrap()
-                    .read_values(layer, &positions)
-                    .unwrap();
-                hash.update(cold);
-            }
-            format!("{:x}", hash.finalize())
-        };
-        let mut original = build(false);
-        let before = original.generate(&prompt, 16, true).unwrap();
-        let before_hash = digest(&mut original);
-        drop(original);
-        let mut fast = build(true);
-        let after = fast.generate(&prompt, 16, true).unwrap();
-        let after_hash = digest(&mut fast);
-        assert_eq!(
-            before.tokens, after.tokens,
-            "fusion of exact GPU attention changed generated token IDs"
-        );
-        assert_eq!(before.steps.len(), after.steps.len());
-        for (step, (a, b)) in before.steps.iter().zip(after.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "fused GPU exact attention changed BF16 logits at step {step}"
-            );
-        }
-        assert_eq!(
-            before_hash, after_hash,
-            "fused exact GPU attention changed original BF16 KV/ColdStore"
-        );
-        assert_eq!(
-            after
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .exact_v_tokens_skipped,
-            0
-        );
-        assert_eq!(
-            after
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .exact_v_tokens_read_from_cold,
-            0
-        );
-        assert_eq!(
-            before
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .physical_cold_store_pages,
-            after
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .physical_cold_store_pages
-        );
-        assert!(after.gpu_exact_hot_fused_attention);
-        eprintln!(
-            "FUSED_EXACT_GPU_LLM_PARITY prompt={} generated={} all_logits_identical=true all_BF16_KV_SHA_identical=true old_time_s={:.6} fused_time_s={:.6} original_KV_SHA={}",
-            prompt.len(),
-            after.tokens.len(),
-            before.total_seconds,
-            after.total_seconds,
-            &after_hash[..16]
-        );
-    }
-
-    #[test]
-    #[ignore = "requires physical AMD Phoenix OpenCL and original configured-model BF16 checkpoint"]
-    fn gpu_actual_fused_exact_dense_15_full_logits_and_kv_sha() {
-        use super::*;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let text =
-            "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
-        let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 15);
-        let build = |fused: bool| {
-            let mut m = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
-            m.set_batch_prefill_tokens(Some(64)).unwrap();
-            m.set_prefill_weight_reuse_tokens(8).unwrap();
-            m.set_decode_unroll4(true).unwrap();
-            m.set_decode_fused_kernels(true).unwrap();
-            m.set_exact_hot_fused_attention(fused).unwrap();
-            m
-        };
-        let mut baseline = build(false);
-        let before = baseline.generate(&ids, 16, true).unwrap();
-        let before_sha = baseline.logical_kv_sha256().unwrap();
-        drop(baseline);
-        let mut fast = build(true);
-        let after = fast.generate(&ids, 16, true).unwrap();
-        let after_sha = fast.logical_kv_sha256().unwrap();
-        assert_eq!(before_sha, after_sha);
-        assert_eq!(before.tokens, after.tokens);
-        assert_eq!(before.steps.len(), after.steps.len());
-        for (i, (a, b)) in before.steps.iter().zip(after.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "full dense BF16 vocab logits changed at {i}"
-            );
-        }
-        assert!(after.gpu_exact_hot_fused_attention);
-        eprintln!(
-            "FUSED_EXACT_GPU_DENSE_PASS tokens={} logits_all_equal=true KV_SHA_equal=true baseline_s={:.3} fused_s={:.3}",
-            after.tokens.len(),
-            before.total_seconds,
-            after.total_seconds
-        );
-    }
-
-    #[test]
-    #[ignore = "physical AMD Phoenix BF16 GPU configured-model; compares 5 prefill kernels in one resident model"]
-    fn gpu_actual_prefill_register_unrolling_precision_and_speed() {
-        use super::*;
-        use std::collections::BTreeMap;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let prompt = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let mut gpu = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
-        gpu.set_batch_prefill_tokens(Some(128)).unwrap();
-        let strategies = [
-            (8usize, false),
-            (8, true),
-            (16, false),
-            (16, true),
-            (32, false),
-            (16, true),
-            (16, false),
-            (8, true),
-            (8, false),
-            (32, false),
-        ];
-        let mut reference_logits = None::<Vec<f32>>;
-        let mut reference_sha = None::<String>;
-        let mut timings = BTreeMap::<(usize, bool), Vec<f64>>::new();
-        for (i, (tile, register)) in strategies.iter().copied().enumerate() {
-            if i > 0 {
-                gpu.reset_session().unwrap();
-            }
-            gpu.set_prefill_weight_reuse_tokens(tile).unwrap();
-            gpu.set_prefill_register_unrolled(register).unwrap();
-            let output = gpu.generate(&ids, 1, true).unwrap();
-            let logits = output.steps[0].logits.as_ref().unwrap();
-            let sha = gpu.logical_kv_sha256().unwrap();
-            if let Some(ref expected) = reference_logits {
-                assert_eq!(
-                    expected, logits,
-                    "register-unrolled prefill changed model BF16 logits with tile={tile} register={register}"
-                );
-            } else {
-                reference_logits = Some(logits.clone());
-                reference_sha = Some(sha.clone());
-            }
-            assert_eq!(
-                reference_sha.as_ref().unwrap(),
-                &sha,
-                "register-unrolled prefill altered BF16 GPU K/V SHA"
-            );
-            assert_eq!(output.prompt_tokens, 375);
-            timings
-                .entry((tile, register))
-                .or_default()
-                .push(output.prefill_seconds);
-            eprintln!(
-                "GPU_PREFILL_REGISTER_REAL trial={i} tile={tile} unrolled={register} prefill_s={:.6} gpu_logits_bit_exact=true logical_KV_SHA={}",
-                output.prefill_seconds,
-                &sha[..16]
-            );
-        }
-        for (key, mut times) in timings {
-            times.sort_unstable_by(f64::total_cmp);
-            let median = (times[0] + times[1]) * 0.5;
-            eprintln!(
-                "GPU_PREFILL_REGISTER_MEDIAN tile={} unrolled={} prefill_s={median:.6} samples=2",
-                key.0, key.1
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "actual Radeon BF16 GPU required; 9 prefill runs on one resident configured-model checkpoint"]
-    fn gpu_actual_prefill_virtual32_64_128_bit_exact_and_speed() {
-        use super::*;
-        use std::collections::BTreeMap;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let prompt = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let mut gpu = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
-        gpu.set_batch_prefill_tokens(Some(128)).unwrap();
-        gpu.set_prefill_weight_reuse_tokens(8).unwrap();
-        gpu.set_prefill_register_unrolled(false).unwrap();
-        let order = [128usize, 64, 32, 64, 32, 128, 32, 128, 64];
-        let mut reference_logits = None::<Vec<f32>>;
-        let mut reference_sha = None::<String>;
-        let mut times = BTreeMap::<usize, Vec<f64>>::new();
-        for (i, lanes) in order.iter().copied().enumerate() {
-            if i > 0 {
-                gpu.reset_session().unwrap();
-            }
-            gpu.set_prefill_virtual_lanes(lanes).unwrap();
-            let result = gpu.generate(&ids, 1, true).unwrap();
-            let logits = result.steps[0].logits.as_ref().unwrap();
-            let sha = gpu.logical_kv_sha256().unwrap();
-            if let Some(ref expected) = reference_logits {
-                assert_eq!(
-                    expected, logits,
-                    "physical virtual lane selection altered BF16 logits at lane={lanes}"
-                );
-            } else {
-                reference_logits = Some(logits.clone());
-                reference_sha = Some(sha.clone());
-            }
-            assert_eq!(
-                reference_sha.as_ref().unwrap(),
-                &sha,
-                "virtual 32/64 original 128-lane summation changed exact BF16 K/V"
-            );
-            assert_eq!(result.prompt_tokens, 375);
-            assert_eq!(result.gpu_prefill_virtual_lanes, lanes);
-            times.entry(lanes).or_default().push(result.prefill_seconds);
-            eprintln!(
-                "GPU_VIRTUAL_PREFILL_REAL trial={i} lanes={lanes} prefill_s={:.6} bf16_logits_exact=true BF16_KV_SHA={}",
-                result.prefill_seconds,
-                &sha[..16]
-            );
-        }
-        for (lanes, mut durations) in times {
-            durations.sort_unstable_by(f64::total_cmp);
-            eprintln!(
-                "GPU_VIRTUAL_PREFILL_MEDIAN lanes={lanes} prefill_s={:.6} samples=3",
-                durations[1]
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "requires real Radeon GPU and configured-model BF16 checkpoint; validates SHA256, exact logits and cold-store byte parity"]
-    fn gpu_actual_verified_prompt_replay_restores_exact_bf16_logits_and_kv() {
-        use super::*;
-        use sha2::{Digest, Sha256};
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
-        let tok =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let prompt = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tok.encode(prompt, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let cfg = CanonicalGpuLodConfig {
-            epsilon: 0.0,
-            stage_tokens: 64,
-            cold_directory: None,
-        };
-        let mut gpu =
-            OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, cfg).unwrap();
-        gpu.set_batch_prefill_tokens(Some(128)).unwrap();
-        gpu.set_prefill_weight_reuse_tokens(8).unwrap();
-        gpu.set_exact_hot_v_tokens(512).unwrap();
-        gpu.set_deferred_cold_commit(true).unwrap();
-        gpu.set_decode_unroll4(true).unwrap();
-        gpu.set_decode_fused_kernels(true).unwrap();
-        gpu.set_exact_hot_fused_attention(true).unwrap();
-        gpu.set_verified_gpu_prompt_replay(512).unwrap();
-        let full_hash = |runtime: &mut OpenClLlm| {
-            let mut sha = Sha256::new();
-            let count = runtime.position;
-            let bytes = count * runtime.spec.attention.kv_elements_per_token() * 2;
-            let positions = (0..count).collect::<Vec<_>>();
-            for layer in 0..runtime.spec.num_hidden_layers {
-                let keys = runtime
-                    .engine
-                    .read_bf16_bytes(&runtime.workspace.kv[layer].key, bytes)
-                    .unwrap();
-                sha.update(keys);
-                let cold = runtime
-                    .lod
-                    .as_mut()
-                    .unwrap()
-                    .read_values(layer, &positions)
-                    .unwrap();
-                sha.update(cold);
-            }
-            format!("{:x}", sha.finalize())
-        };
-        // First request: real BF16 GPU transformer prefill and 16-step
-        // generation. A small exact RAM-only snapshot is captured from
-        // the SAME K/V bytes already committed by CPU ColdStore.
-        let first = gpu.generate(&ids, 16, true).unwrap();
-        assert!(!first.gpu_verified_prompt_replay_hit);
-        assert_eq!(first.gpu_verified_prompt_replay_cached_tokens, 375);
-        assert!(first.gpu_verified_prompt_replay_cached_bytes > 9_000_000);
-        assert_eq!(
-            first
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .exact_v_tokens_skipped,
-            0
-        );
-        let first_sha = full_hash(&mut gpu);
-        gpu.reset_session().unwrap();
-        // Identical prompt: verifies the exact snapshot SHA256 and
-        // RESTORES ColdStore, original 4-bit index, GPU BF16 K/V and
-        // final prefill logits without running 24 Transformer layers.
-        let replay = gpu.generate(&ids, 16, true).unwrap();
-        assert!(replay.gpu_verified_prompt_replay_hit);
-        assert!(replay.gpu_verified_prompt_replay_sha256_verified);
-        assert_eq!(
-            replay.gpu_verified_prompt_replay_restored_bytes,
-            replay.gpu_verified_prompt_replay_cached_bytes
-        );
-        assert_eq!(replay.gpu_prefill_batches, 0);
-        assert_eq!(first.tokens, replay.tokens);
-        for (step, (a, b)) in first.steps.iter().zip(replay.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "verified BF16 GPU replay changed logits at step {step}"
-            );
-        }
-        let replay_sha = full_hash(&mut gpu);
-        assert_eq!(
-            first_sha, replay_sha,
-            "verified BF16 prompt replay changed original GPU K/ColdStore V"
-        );
-        assert_eq!(
-            first
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .physical_cold_store_pages,
-            replay
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .physical_cold_store_pages
-        );
-        eprintln!(
-            "GPU_VERIFIED_REPLAY_REAL first_prefill_s={:.6} cached_prefill_s={:.6} first_total_s={:.6} cached_total_s={:.6} prefix_tokens=375 coldstore_restored={} sha_verified=true all_full_logits_equal=true all_BF16_KV_SHA_equal=true",
-            first.prefill_seconds,
-            replay.prefill_seconds,
-            first.total_seconds,
-            replay.total_seconds,
-            replay.gpu_verified_prompt_replay_restored_bytes
-        );
-        // Different IDs cannot use a stale BF16 cache even if the
-        // same tensor shape and model are selected.
-        gpu.reset_session().unwrap();
-        let mut changed = ids.clone();
-        changed[35] = if ids[35] == 1 { 2 } else { 1 };
-        let miss = gpu.generate(&changed, 2, true).unwrap();
-        assert!(!miss.gpu_verified_prompt_replay_hit);
-        assert_eq!(miss.gpu_prefill_batches, 3);
-        assert_eq!(gpu.gpu_prompt_replay.as_ref().unwrap().ids, changed);
-        eprintln!("GPU_VERIFIED_REPLAY_CHANGED_IDS recomputed=true old_prefix_reused=false");
-        // Corrupt one cached BF16 byte. SHA validation MUST refuse it
-        // and physically recompute all 375 original BF16 prompt tokens,
-        // rather than returning an unchecked tensor.
-        gpu.reset_session().unwrap();
-        gpu.gpu_prompt_replay.as_mut().unwrap().kv[0].0[0] ^= 1;
-        let corrupted = gpu.generate(&changed, 1, false).unwrap();
-        assert!(!corrupted.gpu_verified_prompt_replay_hit);
-        assert!(!corrupted.gpu_verified_prompt_replay_sha256_verified);
-        assert_eq!(corrupted.gpu_prefill_batches, 3);
-        assert!(gpu.gpu_prompt_replay.as_ref().unwrap().verify());
-        eprintln!(
-            "GPU_VERIFIED_REPLAY_CORRUPTION sha256_detected=true recomputed_full_GPU_prefill=true"
-        );
-        gpu.reset_session().unwrap();
-        let recovered = gpu.generate(&changed, 1, false).unwrap();
-        assert!(recovered.gpu_verified_prompt_replay_hit);
-        assert!(recovered.gpu_verified_prompt_replay_sha256_verified);
-        eprintln!("GPU_VERIFIED_REPLAY_RECOVERY safe_new_snapshot_hit=true");
-    }
-
-    #[test]
-    #[ignore = "requires real Radeon Phoenix and original configured-model BF16; verifies common-prefix, full logits and exact ColdStore"]
-    fn gpu_actual_verified_shared_prefix_375_vs_full_bf16_kv_and_logits() {
-        use super::*;
-        use sha2::{Digest, Sha256};
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let document = "Dato verificable: TEST-CODE-001. ".to_owned()
-            + &"El informe conserva documentos y códigos de referencia. ".repeat(23);
-        let chat = |question: &str| {
-            let prompt = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{document}{question}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            tokenizer.encode(prompt, false).unwrap().get_ids().to_vec()
-        };
-        let ids_a = chat("Indica el código del dato verificable.");
-        let ids_b = chat("¿Qué código exacto aparece en el informe?");
-        assert_eq!(ids_a.len(), 375);
-        let shared = ids_a.iter().zip(&ids_b).take_while(|(a, b)| a == b).count();
-        assert!(
-            shared > 300 && shared < ids_a.len() && shared < ids_b.len(),
-            "question should differ only after long original document prefix"
-        );
-        assert!(ids_b.len() + 16 <= 512);
-
-        let mut gpu = OpenClLlm::load_with_canonical_lod(
-            &model,
-            512,
-            WeightMode::Resident,
-            CanonicalGpuLodConfig {
-                epsilon: 0.0,
-                stage_tokens: 64,
-                cold_directory: None,
-            },
-        )
-        .unwrap();
-        gpu.set_batch_prefill_tokens(Some(128)).unwrap();
-        gpu.set_prefill_weight_reuse_tokens(8).unwrap();
-        gpu.set_exact_hot_v_tokens(512).unwrap();
-        gpu.set_deferred_cold_commit(true).unwrap();
-        gpu.set_decode_unroll4(true).unwrap();
-        gpu.set_decode_fused_kernels(true).unwrap();
-        gpu.set_exact_hot_fused_attention(true).unwrap();
-        gpu.set_verified_gpu_prompt_replay(512).unwrap();
-        gpu.set_verified_gpu_prefix_replay(true).unwrap();
-        let hash = |runtime: &mut OpenClLlm| {
-            let mut digest = Sha256::new();
-            let total = runtime.position;
-            let token_bytes = runtime.spec.attention.kv_elements_per_token() * 2;
-            let positions = (0..total).collect::<Vec<_>>();
-            for layer in 0..runtime.spec.num_hidden_layers {
-                let keys = runtime
-                    .engine
-                    .read_bf16_bytes(&runtime.workspace.kv[layer].key, total * token_bytes)
-                    .unwrap();
-                let cold = runtime
-                    .lod
-                    .as_mut()
-                    .unwrap()
-                    .read_values(layer, &positions)
-                    .unwrap();
-                digest.update(keys);
-                digest.update(cold);
-            }
-            format!("{:x}", digest.finalize())
-        };
-        let original_a = gpu.generate(&ids_a, 16, true).unwrap();
-        assert_eq!(original_a.gpu_verified_prefix_reused_tokens, 0);
-        assert_eq!(original_a.gpu_verified_prompt_replay_cached_tokens, 375);
-        gpu.reset_session().unwrap();
-        let suffix_b = gpu.generate(&ids_b, 16, true).unwrap();
-        assert_eq!(suffix_b.gpu_verified_prefix_reused_tokens, shared);
-        assert!(!suffix_b.gpu_verified_prompt_replay_hit);
-        assert_eq!(
-            suffix_b.gpu_verified_prefix_restored_bytes,
-            2 * shared
-                * gpu.spec.attention.kv_elements_per_token()
-                * 2
-                * gpu.spec.num_hidden_layers
-        );
-        assert_eq!(
-            suffix_b
-                .canonical_cpu_lod_stats
-                .as_ref()
-                .unwrap()
-                .exact_v_tokens_skipped,
-            0
-        );
-        let suffix_sha = hash(&mut gpu);
-        gpu.reset_session().unwrap();
-        gpu.set_verified_gpu_prefix_replay(false).unwrap();
-        gpu.set_verified_gpu_prompt_replay(0).unwrap();
-        let full_b = gpu.generate(&ids_b, 16, true).unwrap();
-        assert_eq!(full_b.gpu_verified_prefix_reused_tokens, 0);
-        assert_eq!(full_b.gpu_prefill_batches, 1 + ids_b.len() / 128);
-        assert_eq!(full_b.tokens, suffix_b.tokens);
-        assert_eq!(full_b.steps.len(), suffix_b.steps.len());
-        for (step, (a, b)) in full_b.steps.iter().zip(suffix_b.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "verified GPU shared-prefix changed BF16 logits step {step}"
-            );
-        }
-        assert_eq!(
-            suffix_sha,
-            hash(&mut gpu),
-            "original K/V+ColdStore BF16 bytes differed after shared-prefix restore"
-        );
-        assert!(suffix_b.gpu_prefill_batches < full_b.gpu_prefill_batches);
-        eprintln!(
-            "GPU_SHARED_PREFIX_PHYSICAL_PASS original_prompt_tokens={} changed_prompt_tokens={} shared_verified_prefix_tokens={} suffix_new_tokens={} full_prefill_s={:.6} shared_prefill_s={:.6} full_model_total_s={:.6} shared_model_total_s={:.6} full_logits_all_steps_identical=true ColdStore_KV_SHA_identical=true original_index_4bit_rebuilt=true",
-            ids_a.len(),
-            ids_b.len(),
-            shared,
-            ids_b.len() - shared,
-            full_b.prefill_seconds,
-            suffix_b.prefill_seconds,
-            full_b.total_seconds,
-            suffix_b.total_seconds
-        );
-        // Damage a copy of the cached original BF16 K. No partially
-        // restored state can reach GPU attention if SHA validation fails.
-        gpu.reset_session().unwrap();
-        gpu.set_verified_gpu_prompt_replay(512).unwrap();
-        gpu.set_verified_gpu_prefix_replay(true).unwrap();
-        let _fresh = gpu.generate(&ids_a, 1, false).unwrap();
-        gpu.reset_session().unwrap();
-        gpu.gpu_prompt_replay.as_mut().unwrap().kv[0].0[0] ^= 1;
-        let fail_closed = gpu.generate(&ids_b, 1, false).unwrap();
-        assert_eq!(fail_closed.gpu_verified_prefix_reused_tokens, 0);
-        assert!(!fail_closed.gpu_verified_prompt_replay_sha256_verified);
-        assert!(fail_closed.gpu_prefill_batches > 0);
-        eprintln!("GPU_SHARED_PREFIX_SHA_CORRUPTION_REJECTED full_gpu_prefill_recomputed=true");
-    }
-
-    #[test]
-    #[ignore = "requires physical AMD OpenCL device: original BF16 fused batch projection parity"]
-    fn gpu_actual_prefill_fused_qkv_and_swiglu_match_original_128_lanes() {
-        use super::*;
-        let engine = GpuEngine::new(false).unwrap();
-        let hidden = 1536usize;
-        let qrows = 2048usize;
-        let kvrows = 256usize;
-        let middle = 4096usize;
-        let build_weight = |elements: usize, seed: usize| -> GpuWeight {
-            let values = (0..elements)
-                .map(|i| {
-                    let index = (i.wrapping_mul(37).wrapping_add(seed * 19)) % 211;
-                    half::bf16::from_f32(((index as f32) - 105.0) * 0.0036)
-                })
-                .flat_map(|x| x.to_bits().to_le_bytes())
-                .collect::<Vec<_>>();
-            let mut data = engine.alloc_u8(values.len()).unwrap();
-            engine.transfer(&mut data, &values).unwrap();
-            GpuWeight {
-                data,
-                #[cfg(feature = "hip-backend")]
-                hip: None,
-            }
-        };
-        let q = build_weight(hidden * qrows, 1);
-        let k = build_weight(hidden * kvrows, 2);
-        let v = build_weight(hidden * kvrows, 3);
-        let gate = build_weight(hidden * middle, 4);
-        let up = build_weight(hidden * middle, 5);
-        let mut input = engine.alloc_u8(128 * hidden * 2).unwrap();
-        let bf16_input = (0..128 * hidden)
-            .map(|i| {
-                let index = (i.wrapping_mul(61) + 11) % 193;
-                half::bf16::from_f32(((index as f32) - 96.0) * 0.0035)
-            })
-            .flat_map(|x| x.to_bits().to_le_bytes())
-            .collect::<Vec<_>>();
-        engine.transfer(&mut input, &bf16_input).unwrap();
-        let old = prefill::BatchKernels::load(&engine, 8, false, 128, 0).unwrap();
-        let fast = prefill::BatchKernels::load(&engine, 8, false, 128, 3).unwrap();
-        let outq = engine.alloc_u8(128 * qrows * 2).unwrap();
-        let outk = engine.alloc_u8(128 * kvrows * 2).unwrap();
-        let outv = engine.alloc_u8(128 * kvrows * 2).unwrap();
-        let newq = engine.alloc_u8(128 * qrows * 2).unwrap();
-        let newk = engine.alloc_u8(128 * kvrows * 2).unwrap();
-        let newv = engine.alloc_u8(128 * kvrows * 2).unwrap();
-        let og = engine.alloc_u8(128 * middle * 2).unwrap();
-        let ou = engine.alloc_u8(128 * middle * 2).unwrap();
-        let oa = engine.alloc_u8(128 * middle * 2).unwrap();
-        let na = engine.alloc_u8(128 * middle * 2).unwrap();
-        for tokens in [1usize, 3, 7, 8, 9, 16, 17, 64, 128] {
-            old.gemv(&engine, &q, &input, &outq, hidden, qrows, tokens)
-                .unwrap();
-            old.gemv(&engine, &k, &input, &outk, hidden, kvrows, tokens)
-                .unwrap();
-            old.gemv(&engine, &v, &input, &outv, hidden, kvrows, tokens)
-                .unwrap();
-            old.gemv(&engine, &gate, &input, &og, hidden, middle, tokens)
-                .unwrap();
-            old.gemv(&engine, &up, &input, &ou, hidden, middle, tokens)
-                .unwrap();
-            engine.swiglu(&og, &ou, &oa, tokens * middle).unwrap();
-            fast.project_qkv8(
-                &engine,
-                (&q, &k, &v),
-                (&input, &newq, &newk, &newv),
-                (hidden, qrows, kvrows, tokens),
-            )
-            .unwrap();
-            fast.project_swiglu8(&engine, (&gate, &up), &input, &na, (hidden, middle, tokens))
-                .unwrap();
-            engine.queue.finish().unwrap();
-            for (name, a, b, rows) in [
-                ("Q", &outq, &newq, qrows),
-                ("K", &outk, &newk, kvrows),
-                ("V", &outv, &newv, kvrows),
-                ("SwiGLU", &oa, &na, middle),
-            ] {
-                let len = tokens * rows * 2;
-                let oldbytes = engine.read_bf16_bytes(a, len).unwrap();
-                let newbytes = engine.read_bf16_bytes(b, len).unwrap();
-                assert_eq!(
-                    oldbytes, newbytes,
-                    "GPU BF16 fused prefill changed exact {} output at batch tokens {}",
-                    name, tokens
-                );
-            }
-            eprintln!(
-                "GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens={} hidden={} q_rows={} kv_rows={} middle={} all_QKV_SwiGLU_BF16_bytes_identical=true",
-                tokens, hidden, qrows, kvrows, middle
-            );
-            if tokens == 128 {
-                let mut old_qkv = Vec::new();
-                let mut new_qkv = Vec::new();
-                let mut old_mlp = Vec::new();
-                let mut new_mlp = Vec::new();
-                for rep in 0..48usize {
-                    let begin = std::time::Instant::now();
-                    old.gemv(&engine, &q, &input, &outq, hidden, qrows, tokens)
+            gpu.set_batch_prefill_tokens(Some(128)).unwrap();
+            gpu.set_prefill_weight_reuse_tokens(8).unwrap();
+            gpu.set_exact_hot_v_tokens(512).unwrap();
+            gpu.set_deferred_cold_commit(true).unwrap();
+            gpu.set_decode_unroll4(true).unwrap();
+            gpu.set_decode_fused_kernels(true).unwrap();
+            gpu.set_exact_hot_fused_attention(true).unwrap();
+            gpu.set_verified_gpu_prompt_replay(512).unwrap();
+            gpu.set_verified_gpu_prefix_replay(true).unwrap();
+            let hash = |runtime: &mut OpenClLlm| {
+                let mut digest = Sha256::new();
+                let total = runtime.position;
+                let token_bytes = runtime.spec.attention.kv_elements_per_token() * 2;
+                let positions = (0..total).collect::<Vec<_>>();
+                for layer in 0..runtime.spec.num_hidden_layers {
+                    let keys = runtime
+                        .engine
+                        .read_bf16_bytes(&runtime.workspace.kv[layer].key, total * token_bytes)
                         .unwrap();
-                    old.gemv(&engine, &k, &input, &outk, hidden, kvrows, tokens)
-                        .unwrap();
-                    old.gemv(&engine, &v, &input, &outv, hidden, kvrows, tokens)
-                        .unwrap();
-                    engine.queue.finish().unwrap();
-                    let old_qkv_time = begin.elapsed().as_secs_f64() * 1000.0;
-                    let begin = std::time::Instant::now();
-                    fast.project_qkv8(
-                        &engine,
-                        (&q, &k, &v),
-                        (&input, &newq, &newk, &newv),
-                        (hidden, qrows, kvrows, tokens),
-                    )
-                    .unwrap();
-                    engine.queue.finish().unwrap();
-                    let new_qkv_time = begin.elapsed().as_secs_f64() * 1000.0;
-                    let begin = std::time::Instant::now();
-                    old.gemv(&engine, &gate, &input, &og, hidden, middle, tokens)
-                        .unwrap();
-                    old.gemv(&engine, &up, &input, &ou, hidden, middle, tokens)
-                        .unwrap();
-                    engine.swiglu(&og, &ou, &oa, tokens * middle).unwrap();
-                    engine.queue.finish().unwrap();
-                    let old_mlp_time = begin.elapsed().as_secs_f64() * 1000.0;
-                    let begin = std::time::Instant::now();
-                    fast.project_swiglu8(
-                        &engine,
-                        (&gate, &up),
-                        &input,
-                        &na,
-                        (hidden, middle, tokens),
-                    )
-                    .unwrap();
-                    engine.queue.finish().unwrap();
-                    let new_mlp_time = begin.elapsed().as_secs_f64() * 1000.0;
-                    if rep >= 8 {
-                        old_qkv.push(old_qkv_time);
-                        new_qkv.push(new_qkv_time);
-                        old_mlp.push(old_mlp_time);
-                        new_mlp.push(new_mlp_time);
-                    }
-                }
-                let median = |mut x: Vec<f64>| {
-                    x.sort_unstable_by(f64::total_cmp);
-                    x[x.len() / 2]
-                };
-                let (oq, nq, om, nm) = (
-                    median(old_qkv),
-                    median(new_qkv),
-                    median(old_mlp),
-                    median(new_mlp),
-                );
-                eprintln!(
-                    "GPU_PREFILL_PROJECTION_TIMING tokens=128 qkv_old_ms={:.6} qkv_fused_ms={:.6} qkv_speedup={:.4} mlp_old_ms={:.6} mlp_fused_ms={:.6} mlp_speedup={:.4} samples=40 BF16_exact=true",
-                    oq,
-                    nq,
-                    oq / nq,
-                    om,
-                    nm,
-                    om / nm
-                );
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "requires real AMD OpenCL GPU and original configured-model checkpoint; full BF16 parity"]
-    fn gpu_actual_fused_prefill_qkv_swiglu_375_full_logits_and_cold_kv_sha() {
-        use super::*;
-        use sha2::{Digest, Sha256};
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tok =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let chat = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tok.encode(chat, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let mut gpu = OpenClLlm::load_with_canonical_lod(
-            &model,
-            512,
-            WeightMode::Resident,
-            CanonicalGpuLodConfig {
-                epsilon: 0.0,
-                stage_tokens: 64,
-                cold_directory: None,
-            },
-        )
-        .unwrap();
-        gpu.set_batch_prefill_tokens(Some(128)).unwrap();
-        gpu.set_prefill_weight_reuse_tokens(8).unwrap();
-        gpu.set_exact_hot_v_tokens(512).unwrap();
-        gpu.set_deferred_cold_commit(true).unwrap();
-        gpu.set_decode_unroll4(true).unwrap();
-        gpu.set_decode_fused_kernels(true).unwrap();
-        gpu.set_exact_hot_fused_attention(true).unwrap();
-        let hash_cold = |engine: &mut OpenClLlm| {
-            let n = engine.position;
-            let token_bytes = engine.spec.attention.kv_elements_per_token() * 2;
-            let locations = (0..n).collect::<Vec<_>>();
-            let mut sha = Sha256::new();
-            sha.update(b"KVSLIM-BF16-KV-exact-fused-prefill-v1");
-            for layer in 0..engine.spec.num_hidden_layers {
-                let k = engine
-                    .engine
-                    .read_bf16_bytes(&engine.workspace.kv[layer].key, n * token_bytes)
-                    .unwrap();
-                sha.update(&k);
-                let cold = engine
-                    .lod
-                    .as_mut()
-                    .unwrap()
-                    .read_values(layer, &locations)
-                    .unwrap();
-                sha.update(&cold);
-            }
-            format!("{:x}", sha.finalize())
-        };
-        let reference = gpu.generate(&ids, 16, true).unwrap();
-        assert!(!reference.gpu_prefill_fused_projections);
-        let ref_sha = hash_cold(&mut gpu);
-        gpu.reset_session().unwrap();
-        gpu.set_prefill_fuse_projections(true).unwrap();
-        let new = gpu.generate(&ids, 16, true).unwrap();
-        assert!(new.gpu_prefill_fused_projections);
-        assert_eq!(
-            reference.tokens, new.tokens,
-            "real GPU fused BF16 prefill changed generated IDs"
-        );
-        assert_eq!(reference.steps.len(), new.steps.len());
-        for (step, (a, b)) in reference.steps.iter().zip(new.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "real GPU fused BF16 prefill changed full-vocab logits at step {step}"
-            );
-        }
-        let new_sha = hash_cold(&mut gpu);
-        assert_eq!(
-            ref_sha, new_sha,
-            "fused BF16 QKV / SwiGLU changed original ColdStore BF16 logical K/V"
-        );
-        let s1 = reference.canonical_cpu_lod_stats.as_ref().unwrap();
-        let s2 = new.canonical_cpu_lod_stats.as_ref().unwrap();
-        assert_eq!(s1.physical_cold_store_pages, s2.physical_cold_store_pages);
-        assert_eq!(s1.physical_cold_store_bytes, s2.physical_cold_store_bytes);
-        assert_eq!(s1.exact_v_tokens_skipped, 0);
-        assert_eq!(s2.exact_v_tokens_skipped, 0);
-        assert_eq!(reference.gpu_prefill_batches, 3);
-        assert_eq!(new.gpu_prefill_batches, 3);
-        eprintln!(
-            "GPU_PREFILL_FUSED_QKV_SWIGLU_MODEL_PARITY prompt_tokens={} output_tokens={} original_prefill_s={:.6} fused_prefill_s={:.6} all_BF16_logits_equal=true original_BF16_KV_SHA_identical=true cold_pages={} cold_bytes={} BF16_KV_SHA={}",
-            ids.len(),
-            new.tokens.len(),
-            reference.prefill_seconds,
-            new.prefill_seconds,
-            s2.physical_cold_store_pages,
-            s2.physical_cold_store_bytes,
-            &new_sha[..16]
-        );
-        // Independent MLP-only configuration: preserve original QKV,
-        // apply only the BF16 SwiGLU projection fusion.
-        gpu.reset_session().unwrap();
-        gpu.set_prefill_projection_fusion_mode(2).unwrap();
-        let mlp = gpu.generate(&ids, 16, true).unwrap();
-        assert_eq!(mlp.gpu_prefill_fusion_mask, 2);
-        assert_eq!(reference.tokens, mlp.tokens);
-        for (step, (a, b)) in reference.steps.iter().zip(mlp.steps.iter()).enumerate() {
-            assert_eq!(
-                a.logits, b.logits,
-                "SwiGLU-only fused BF16 prefill changed full-vocab logits at step {step}"
-            );
-        }
-        let mlp_sha = hash_cold(&mut gpu);
-        assert_eq!(
-            ref_sha, mlp_sha,
-            "SwiGLU-only prefill changed original ColdStore K/V"
-        );
-        eprintln!(
-            "GPU_PREFILL_MLP_ONLY_MODEL_PARITY prompt_tokens={} generated={} baseline_prefill_s={:.6} mlp_prefill_s={:.6} all_logits_identical=true BF16_KV_SHA_identical=true",
-            ids.len(),
-            mlp.tokens.len(),
-            reference.prefill_seconds,
-            mlp.prefill_seconds
-        );
-        // The actual test model remains resident on the physical AMD
-        // GPU. Interleave real uncached prompt prefill of both modes;
-        // latency excludes model upload, includes canonical ColdStore
-        // and exact BF16 decode (same in both paths). Repeat loads of
-        // prompt replay are disabled so this is genuinely NEW prefill.
-        let mut original_prefill = Vec::new();
-        let mut fused_prefill = Vec::new();
-        let mut original_total = Vec::new();
-        let mut fused_total = Vec::new();
-        for mode in [0u8, 2, 2, 0, 0, 2] {
-            gpu.reset_session().unwrap();
-            gpu.set_prefill_projection_fusion_mode(mode).unwrap();
-            let answer = gpu.generate(&ids, 16, false).unwrap();
-            assert_eq!(answer.tokens, reference.tokens);
-            assert_eq!(answer.gpu_prefill_fusion_mask, mode);
-            assert!(!answer.gpu_verified_prompt_replay_hit);
-            assert_eq!(answer.gpu_verified_prefix_reused_tokens, 0);
-            eprintln!(
-                "GPU_FUSED_PREFILL_REAL_RUN mode={} prompt={} prefill_s={:.6} decode_s={:.6} total_s={:.6} originalBF16=true",
-                mode,
-                ids.len(),
-                answer.prefill_seconds,
-                answer.total_seconds - answer.prefill_seconds,
-                answer.total_seconds
-            );
-            if mode == 2 {
-                fused_prefill.push(answer.prefill_seconds);
-                fused_total.push(answer.total_seconds);
-            } else {
-                original_prefill.push(answer.prefill_seconds);
-                original_total.push(answer.total_seconds);
-            }
-        }
-        let median = |mut nums: Vec<f64>| {
-            nums.sort_unstable_by(f64::total_cmp);
-            nums[nums.len() / 2]
-        };
-        let (old, new, old_total, new_total) = (
-            median(original_prefill),
-            median(fused_prefill),
-            median(original_total),
-            median(fused_total),
-        );
-        eprintln!(
-            "GPU_FUSED_PREFILL_MLP_RELEASE_MEDIAN baseline_prefill_s={old:.6} mlp_only_prefill_s={new:.6} prefill_speedup={:.4} baseline_total_s={old_total:.6} mlp_only_total_s={new_total:.6} total_speedup={:.4} samples_each=3 logits_and_BF16_KV_SHA_proven=true",
-            old / new,
-            old_total / new_total
-        );
-    }
-
-    #[test]
-    #[ignore = "requires physical AMD Radeon OpenCL and configured-model BF16 for batch size parity and speed"]
-    fn gpu_actual_prefill_64_128_192_256_bit_exact_full_logits_kv_and_speed() {
-        use super::*;
-        use sha2::{Digest, Sha256};
-        use std::collections::BTreeMap;
-        let model = std::env::var("KVSLIM_TEST_MODEL")
-            .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(std::path::Path::new(&model).join("tokenizer.json"))
-                .unwrap();
-        let user = format!(
-            "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-            "El informe conserva documentos y códigos de referencia. ".repeat(23)
-        );
-        let text = format!(
-            "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
-        let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
-        assert_eq!(ids.len(), 375);
-        let mut model = OpenClLlm::load_with_canonical_lod(
-            &model,
-            512,
-            WeightMode::Resident,
-            CanonicalGpuLodConfig {
-                epsilon: 0.0,
-                stage_tokens: 64,
-                cold_directory: None,
-            },
-        )
-        .unwrap();
-        model.set_batch_prefill_tokens(Some(128)).unwrap();
-        model.set_prefill_weight_reuse_tokens(8).unwrap();
-        model.set_exact_hot_v_tokens(512).unwrap();
-        model.set_deferred_cold_commit(true).unwrap();
-        model.set_decode_unroll4(true).unwrap();
-        model.set_decode_fused_kernels(true).unwrap();
-        model.set_exact_hot_fused_attention(true).unwrap();
-        let sha = |m: &mut OpenClLlm| {
-            let mut h = Sha256::new();
-            h.update(b"KVSLIM-GPU-prefill-tile-physical-KV-v1");
-            let token_bytes = m.spec.attention.kv_elements_per_token() * 2;
-            let positions = (0..m.position).collect::<Vec<_>>();
-            for layer in 0..m.spec.num_hidden_layers {
-                h.update(
-                    m.engine
-                        .read_bf16_bytes(&m.workspace.kv[layer].key, token_bytes * m.position)
-                        .unwrap(),
-                );
-                h.update(
-                    m.lod
+                    let cold = runtime
+                        .lod
                         .as_mut()
                         .unwrap()
                         .read_values(layer, &positions)
-                        .unwrap(),
-                );
-            }
-            format!("{:x}", h.finalize())
-        };
-        let original = model.generate(&ids, 16, true).unwrap();
-        let original_sha = sha(&mut model);
-        for batch in [64usize, 96, 192, 256, 375, 512] {
-            model.reset_session().unwrap();
-            model.set_batch_prefill_tokens(Some(batch)).unwrap();
-            let run = model.generate(&ids, 16, true).unwrap();
-            assert_eq!(run.tokens, original.tokens);
-            for (i, (a, b)) in original.steps.iter().zip(run.steps.iter()).enumerate() {
-                assert_eq!(
-                    a.logits, b.logits,
-                    "GPU BF16 logits changed at generated step {i} for batch {batch}"
-                );
-            }
+                        .unwrap();
+                    digest.update(keys);
+                    digest.update(cold);
+                }
+                format!("{:x}", digest.finalize())
+            };
+            let original_a = gpu.generate(&ids_a, 16, true).unwrap();
+            assert_eq!(original_a.gpu_verified_prefix_reused_tokens, 0);
+            assert_eq!(original_a.gpu_verified_prompt_replay_cached_tokens, 375);
+            gpu.reset_session().unwrap();
+            let suffix_b = gpu.generate(&ids_b, 16, true).unwrap();
+            assert_eq!(suffix_b.gpu_verified_prefix_reused_tokens, shared);
+            assert!(!suffix_b.gpu_verified_prompt_replay_hit);
             assert_eq!(
-                sha(&mut model),
-                original_sha,
-                "BF16 ColdStore K/V SHA different for GPU batch {batch}"
+                suffix_b.gpu_verified_prefix_restored_bytes,
+                2 * shared
+                    * gpu.spec.attention.kv_elements_per_token()
+                    * 2
+                    * gpu.spec.num_hidden_layers
             );
             assert_eq!(
-                run.canonical_cpu_lod_stats
-                    .as_ref()
-                    .unwrap()
-                    .exact_v_tokens_skipped,
-                0
-            );
-            assert_eq!(
-                run.canonical_cpu_lod_stats
-                    .as_ref()
-                    .unwrap()
-                    .physical_cold_store_pages,
-                168
-            );
-            eprintln!(
-                "GPU_PREFILL_BATCH_PARITY batch={} prompt_tokens={} generated={} prefill_s={:.6} batch_count={} all_GPU_BF16_logits_KV_exact=true",
-                batch,
-                ids.len(),
-                run.tokens.len(),
-                run.prefill_seconds,
-                run.gpu_prefill_batches
-            );
-        }
-        let mut by_batch = BTreeMap::<usize, Vec<(f64, f64)>>::new();
-        for size in [128usize, 375, 375, 128, 128, 375] {
-            model.reset_session().unwrap();
-            model.set_batch_prefill_tokens(Some(size)).unwrap();
-            let result = model.generate(&ids, 16, false).unwrap();
-            assert_eq!(result.tokens, original.tokens);
-            if size == 375 {
-                assert_eq!(
-                    result.gpu_prefill_batches, 1,
-                    "entire 375-token BF16 prompt must be executed in one physical GPU batch"
-                );
-            }
-            assert_eq!(
-                result
+                suffix_b
                     .canonical_cpu_lod_stats
                     .as_ref()
                     .unwrap()
                     .exact_v_tokens_skipped,
                 0
             );
-            assert!(!result.gpu_verified_prompt_replay_hit);
-            assert_eq!(result.gpu_verified_prefix_reused_tokens, 0);
-            by_batch
-                .entry(size)
-                .or_default()
-                .push((result.prefill_seconds, result.total_seconds));
+            let suffix_sha = hash(&mut gpu);
+            gpu.reset_session().unwrap();
+            gpu.set_verified_gpu_prefix_replay(false).unwrap();
+            gpu.set_verified_gpu_prompt_replay(0).unwrap();
+            let full_b = gpu.generate(&ids_b, 16, true).unwrap();
+            assert_eq!(full_b.gpu_verified_prefix_reused_tokens, 0);
+            assert_eq!(full_b.gpu_prefill_batches, 1 + ids_b.len() / 128);
+            assert_eq!(full_b.tokens, suffix_b.tokens);
+            assert_eq!(full_b.steps.len(), suffix_b.steps.len());
+            for (step, (a, b)) in full_b.steps.iter().zip(suffix_b.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "verified GPU shared-prefix changed BF16 logits step {step}"
+                );
+            }
+            assert_eq!(
+                suffix_sha,
+                hash(&mut gpu),
+                "original K/V+ColdStore BF16 bytes differed after shared-prefix restore"
+            );
+            assert!(suffix_b.gpu_prefill_batches < full_b.gpu_prefill_batches);
             eprintln!(
-                "GPU_PREFILL_BATCH_REAL size={} prefill_s={:.6} total_s={:.6} batches={} identical_ids=true",
-                size, result.prefill_seconds, result.total_seconds, result.gpu_prefill_batches
+                "GPU_SHARED_PREFIX_PHYSICAL_PASS original_prompt_tokens={} changed_prompt_tokens={} shared_verified_prefix_tokens={} suffix_new_tokens={} full_prefill_s={:.6} shared_prefill_s={:.6} full_model_total_s={:.6} shared_model_total_s={:.6} full_logits_all_steps_identical=true ColdStore_KV_SHA_identical=true original_index_4bit_rebuilt=true",
+                ids_a.len(),
+                ids_b.len(),
+                shared,
+                ids_b.len() - shared,
+                full_b.prefill_seconds,
+                suffix_b.prefill_seconds,
+                full_b.total_seconds,
+                suffix_b.total_seconds
+            );
+            // Damage a copy of the cached original BF16 K. No partially
+            // restored state can reach GPU attention if SHA validation fails.
+            gpu.reset_session().unwrap();
+            gpu.set_verified_gpu_prompt_replay(512).unwrap();
+            gpu.set_verified_gpu_prefix_replay(true).unwrap();
+            let _fresh = gpu.generate(&ids_a, 1, false).unwrap();
+            gpu.reset_session().unwrap();
+            gpu.gpu_prompt_replay.as_mut().unwrap().kv[0].0[0] ^= 1;
+            let fail_closed = gpu.generate(&ids_b, 1, false).unwrap();
+            assert_eq!(fail_closed.gpu_verified_prefix_reused_tokens, 0);
+            assert!(!fail_closed.gpu_verified_prompt_replay_sha256_verified);
+            assert!(fail_closed.gpu_prefill_batches > 0);
+            eprintln!("GPU_SHARED_PREFIX_SHA_CORRUPTION_REJECTED full_gpu_prefill_recomputed=true");
+        }
+
+        #[test]
+        #[ignore = "requires physical AMD OpenCL device: original BF16 fused batch projection parity"]
+        fn gpu_actual_prefill_fused_qkv_and_swiglu_match_original_128_lanes() {
+            use super::*;
+            let engine = GpuEngine::new(false).unwrap();
+            let hidden = 1536usize;
+            let qrows = 2048usize;
+            let kvrows = 256usize;
+            let middle = 4096usize;
+            let build_weight = |elements: usize, seed: usize| -> GpuWeight {
+                let values = (0..elements)
+                    .map(|i| {
+                        let index = (i.wrapping_mul(37).wrapping_add(seed * 19)) % 211;
+                        half::bf16::from_f32(((index as f32) - 105.0) * 0.0036)
+                    })
+                    .flat_map(|x| x.to_bits().to_le_bytes())
+                    .collect::<Vec<_>>();
+                let mut data = engine.alloc_u8(values.len()).unwrap();
+                engine.transfer(&mut data, &values).unwrap();
+                GpuWeight {
+                    data,
+                    #[cfg(feature = "hip-backend")]
+                    hip: None,
+                }
+            };
+            let q = build_weight(hidden * qrows, 1);
+            let k = build_weight(hidden * kvrows, 2);
+            let v = build_weight(hidden * kvrows, 3);
+            let gate = build_weight(hidden * middle, 4);
+            let up = build_weight(hidden * middle, 5);
+            let mut input = engine.alloc_u8(128 * hidden * 2).unwrap();
+            let bf16_input = (0..128 * hidden)
+                .map(|i| {
+                    let index = (i.wrapping_mul(61) + 11) % 193;
+                    half::bf16::from_f32(((index as f32) - 96.0) * 0.0035)
+                })
+                .flat_map(|x| x.to_bits().to_le_bytes())
+                .collect::<Vec<_>>();
+            engine.transfer(&mut input, &bf16_input).unwrap();
+            let old = prefill::BatchKernels::load(&engine, 8, false, 128, 0).unwrap();
+            let fast = prefill::BatchKernels::load(&engine, 8, false, 128, 3).unwrap();
+            let outq = engine.alloc_u8(128 * qrows * 2).unwrap();
+            let outk = engine.alloc_u8(128 * kvrows * 2).unwrap();
+            let outv = engine.alloc_u8(128 * kvrows * 2).unwrap();
+            let newq = engine.alloc_u8(128 * qrows * 2).unwrap();
+            let newk = engine.alloc_u8(128 * kvrows * 2).unwrap();
+            let newv = engine.alloc_u8(128 * kvrows * 2).unwrap();
+            let og = engine.alloc_u8(128 * middle * 2).unwrap();
+            let ou = engine.alloc_u8(128 * middle * 2).unwrap();
+            let oa = engine.alloc_u8(128 * middle * 2).unwrap();
+            let na = engine.alloc_u8(128 * middle * 2).unwrap();
+            for tokens in [1usize, 3, 7, 8, 9, 16, 17, 64, 128] {
+                old.gemv(&engine, &q, &input, &outq, hidden, qrows, tokens)
+                    .unwrap();
+                old.gemv(&engine, &k, &input, &outk, hidden, kvrows, tokens)
+                    .unwrap();
+                old.gemv(&engine, &v, &input, &outv, hidden, kvrows, tokens)
+                    .unwrap();
+                old.gemv(&engine, &gate, &input, &og, hidden, middle, tokens)
+                    .unwrap();
+                old.gemv(&engine, &up, &input, &ou, hidden, middle, tokens)
+                    .unwrap();
+                engine.swiglu(&og, &ou, &oa, tokens * middle).unwrap();
+                fast.project_qkv8(
+                    &engine,
+                    (&q, &k, &v),
+                    (&input, &newq, &newk, &newv),
+                    (hidden, qrows, kvrows, tokens),
+                )
+                .unwrap();
+                fast.project_swiglu8(&engine, (&gate, &up), &input, &na, (hidden, middle, tokens))
+                    .unwrap();
+                engine.queue.finish().unwrap();
+                for (name, a, b, rows) in [
+                    ("Q", &outq, &newq, qrows),
+                    ("K", &outk, &newk, kvrows),
+                    ("V", &outv, &newv, kvrows),
+                    ("SwiGLU", &oa, &na, middle),
+                ] {
+                    let len = tokens * rows * 2;
+                    let oldbytes = engine.read_bf16_bytes(a, len).unwrap();
+                    let newbytes = engine.read_bf16_bytes(b, len).unwrap();
+                    assert_eq!(
+                        oldbytes, newbytes,
+                        "GPU BF16 fused prefill changed exact {} output at batch tokens {}",
+                        name, tokens
+                    );
+                }
+                eprintln!(
+                    "GPU_FUSED_PREFILL_PROJECTIONS_PARITY tokens={} hidden={} q_rows={} kv_rows={} middle={} all_QKV_SwiGLU_BF16_bytes_identical=true",
+                    tokens, hidden, qrows, kvrows, middle
+                );
+                if tokens == 128 {
+                    let mut old_qkv = Vec::new();
+                    let mut new_qkv = Vec::new();
+                    let mut old_mlp = Vec::new();
+                    let mut new_mlp = Vec::new();
+                    for rep in 0..48usize {
+                        let begin = std::time::Instant::now();
+                        old.gemv(&engine, &q, &input, &outq, hidden, qrows, tokens)
+                            .unwrap();
+                        old.gemv(&engine, &k, &input, &outk, hidden, kvrows, tokens)
+                            .unwrap();
+                        old.gemv(&engine, &v, &input, &outv, hidden, kvrows, tokens)
+                            .unwrap();
+                        engine.queue.finish().unwrap();
+                        let old_qkv_time = begin.elapsed().as_secs_f64() * 1000.0;
+                        let begin = std::time::Instant::now();
+                        fast.project_qkv8(
+                            &engine,
+                            (&q, &k, &v),
+                            (&input, &newq, &newk, &newv),
+                            (hidden, qrows, kvrows, tokens),
+                        )
+                        .unwrap();
+                        engine.queue.finish().unwrap();
+                        let new_qkv_time = begin.elapsed().as_secs_f64() * 1000.0;
+                        let begin = std::time::Instant::now();
+                        old.gemv(&engine, &gate, &input, &og, hidden, middle, tokens)
+                            .unwrap();
+                        old.gemv(&engine, &up, &input, &ou, hidden, middle, tokens)
+                            .unwrap();
+                        engine.swiglu(&og, &ou, &oa, tokens * middle).unwrap();
+                        engine.queue.finish().unwrap();
+                        let old_mlp_time = begin.elapsed().as_secs_f64() * 1000.0;
+                        let begin = std::time::Instant::now();
+                        fast.project_swiglu8(
+                            &engine,
+                            (&gate, &up),
+                            &input,
+                            &na,
+                            (hidden, middle, tokens),
+                        )
+                        .unwrap();
+                        engine.queue.finish().unwrap();
+                        let new_mlp_time = begin.elapsed().as_secs_f64() * 1000.0;
+                        if rep >= 8 {
+                            old_qkv.push(old_qkv_time);
+                            new_qkv.push(new_qkv_time);
+                            old_mlp.push(old_mlp_time);
+                            new_mlp.push(new_mlp_time);
+                        }
+                    }
+                    let median = |mut x: Vec<f64>| {
+                        x.sort_unstable_by(f64::total_cmp);
+                        x[x.len() / 2]
+                    };
+                    let (oq, nq, om, nm) = (
+                        median(old_qkv),
+                        median(new_qkv),
+                        median(old_mlp),
+                        median(new_mlp),
+                    );
+                    eprintln!(
+                        "GPU_PREFILL_PROJECTION_TIMING tokens=128 qkv_old_ms={:.6} qkv_fused_ms={:.6} qkv_speedup={:.4} mlp_old_ms={:.6} mlp_fused_ms={:.6} mlp_speedup={:.4} samples=40 BF16_exact=true",
+                        oq,
+                        nq,
+                        oq / nq,
+                        om,
+                        nm,
+                        om / nm
+                    );
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "requires real AMD OpenCL GPU and original configured-model checkpoint; full BF16 parity"]
+        fn gpu_actual_fused_prefill_qkv_swiglu_375_full_logits_and_cold_kv_sha() {
+            use super::*;
+            use sha2::{Digest, Sha256};
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tok = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
+            );
+            let chat = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tok.encode(chat, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let mut gpu = OpenClLlm::load_with_canonical_lod(
+                &model,
+                512,
+                WeightMode::Resident,
+                CanonicalGpuLodConfig {
+                    epsilon: 0.0,
+                    stage_tokens: 64,
+                    cold_directory: None,
+                },
+            )
+            .unwrap();
+            gpu.set_batch_prefill_tokens(Some(128)).unwrap();
+            gpu.set_prefill_weight_reuse_tokens(8).unwrap();
+            gpu.set_exact_hot_v_tokens(512).unwrap();
+            gpu.set_deferred_cold_commit(true).unwrap();
+            gpu.set_decode_unroll4(true).unwrap();
+            gpu.set_decode_fused_kernels(true).unwrap();
+            gpu.set_exact_hot_fused_attention(true).unwrap();
+            let hash_cold = |engine: &mut OpenClLlm| {
+                let n = engine.position;
+                let token_bytes = engine.spec.attention.kv_elements_per_token() * 2;
+                let locations = (0..n).collect::<Vec<_>>();
+                let mut sha = Sha256::new();
+                sha.update(b"KVSLIM-BF16-KV-exact-fused-prefill-v1");
+                for layer in 0..engine.spec.num_hidden_layers {
+                    let k = engine
+                        .engine
+                        .read_bf16_bytes(&engine.workspace.kv[layer].key, n * token_bytes)
+                        .unwrap();
+                    sha.update(&k);
+                    let cold = engine
+                        .lod
+                        .as_mut()
+                        .unwrap()
+                        .read_values(layer, &locations)
+                        .unwrap();
+                    sha.update(&cold);
+                }
+                format!("{:x}", sha.finalize())
+            };
+            let reference = gpu.generate(&ids, 16, true).unwrap();
+            assert!(!reference.gpu_prefill_fused_projections);
+            let ref_sha = hash_cold(&mut gpu);
+            gpu.reset_session().unwrap();
+            gpu.set_prefill_fuse_projections(true).unwrap();
+            let new = gpu.generate(&ids, 16, true).unwrap();
+            assert!(new.gpu_prefill_fused_projections);
+            assert_eq!(
+                reference.tokens, new.tokens,
+                "real GPU fused BF16 prefill changed generated IDs"
+            );
+            assert_eq!(reference.steps.len(), new.steps.len());
+            for (step, (a, b)) in reference.steps.iter().zip(new.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "real GPU fused BF16 prefill changed full-vocab logits at step {step}"
+                );
+            }
+            let new_sha = hash_cold(&mut gpu);
+            assert_eq!(
+                ref_sha, new_sha,
+                "fused BF16 QKV / SwiGLU changed original ColdStore BF16 logical K/V"
+            );
+            let s1 = reference.canonical_cpu_lod_stats.as_ref().unwrap();
+            let s2 = new.canonical_cpu_lod_stats.as_ref().unwrap();
+            assert_eq!(s1.physical_cold_store_pages, s2.physical_cold_store_pages);
+            assert_eq!(s1.physical_cold_store_bytes, s2.physical_cold_store_bytes);
+            assert_eq!(s1.exact_v_tokens_skipped, 0);
+            assert_eq!(s2.exact_v_tokens_skipped, 0);
+            assert_eq!(reference.gpu_prefill_batches, 3);
+            assert_eq!(new.gpu_prefill_batches, 3);
+            eprintln!(
+                "GPU_PREFILL_FUSED_QKV_SWIGLU_MODEL_PARITY prompt_tokens={} output_tokens={} original_prefill_s={:.6} fused_prefill_s={:.6} all_BF16_logits_equal=true original_BF16_KV_SHA_identical=true cold_pages={} cold_bytes={} BF16_KV_SHA={}",
+                ids.len(),
+                new.tokens.len(),
+                reference.prefill_seconds,
+                new.prefill_seconds,
+                s2.physical_cold_store_pages,
+                s2.physical_cold_store_bytes,
+                &new_sha[..16]
+            );
+            // Independent MLP-only configuration: preserve original QKV,
+            // apply only the BF16 SwiGLU projection fusion.
+            gpu.reset_session().unwrap();
+            gpu.set_prefill_projection_fusion_mode(2).unwrap();
+            let mlp = gpu.generate(&ids, 16, true).unwrap();
+            assert_eq!(mlp.gpu_prefill_fusion_mask, 2);
+            assert_eq!(reference.tokens, mlp.tokens);
+            for (step, (a, b)) in reference.steps.iter().zip(mlp.steps.iter()).enumerate() {
+                assert_eq!(
+                    a.logits, b.logits,
+                    "SwiGLU-only fused BF16 prefill changed full-vocab logits at step {step}"
+                );
+            }
+            let mlp_sha = hash_cold(&mut gpu);
+            assert_eq!(
+                ref_sha, mlp_sha,
+                "SwiGLU-only prefill changed original ColdStore K/V"
+            );
+            eprintln!(
+                "GPU_PREFILL_MLP_ONLY_MODEL_PARITY prompt_tokens={} generated={} baseline_prefill_s={:.6} mlp_prefill_s={:.6} all_logits_identical=true BF16_KV_SHA_identical=true",
+                ids.len(),
+                mlp.tokens.len(),
+                reference.prefill_seconds,
+                mlp.prefill_seconds
+            );
+            // The actual test model remains resident on the physical AMD
+            // GPU. Interleave real uncached prompt prefill of both modes;
+            // latency excludes model upload, includes canonical ColdStore
+            // and exact BF16 decode (same in both paths). Repeat loads of
+            // prompt replay are disabled so this is genuinely NEW prefill.
+            let mut original_prefill = Vec::new();
+            let mut fused_prefill = Vec::new();
+            let mut original_total = Vec::new();
+            let mut fused_total = Vec::new();
+            for mode in [0u8, 2, 2, 0, 0, 2] {
+                gpu.reset_session().unwrap();
+                gpu.set_prefill_projection_fusion_mode(mode).unwrap();
+                let answer = gpu.generate(&ids, 16, false).unwrap();
+                assert_eq!(answer.tokens, reference.tokens);
+                assert_eq!(answer.gpu_prefill_fusion_mask, mode);
+                assert!(!answer.gpu_verified_prompt_replay_hit);
+                assert_eq!(answer.gpu_verified_prefix_reused_tokens, 0);
+                eprintln!(
+                    "GPU_FUSED_PREFILL_REAL_RUN mode={} prompt={} prefill_s={:.6} decode_s={:.6} total_s={:.6} originalBF16=true",
+                    mode,
+                    ids.len(),
+                    answer.prefill_seconds,
+                    answer.total_seconds - answer.prefill_seconds,
+                    answer.total_seconds
+                );
+                if mode == 2 {
+                    fused_prefill.push(answer.prefill_seconds);
+                    fused_total.push(answer.total_seconds);
+                } else {
+                    original_prefill.push(answer.prefill_seconds);
+                    original_total.push(answer.total_seconds);
+                }
+            }
+            let median = |mut nums: Vec<f64>| {
+                nums.sort_unstable_by(f64::total_cmp);
+                nums[nums.len() / 2]
+            };
+            let (old, new, old_total, new_total) = (
+                median(original_prefill),
+                median(fused_prefill),
+                median(original_total),
+                median(fused_total),
+            );
+            eprintln!(
+                "GPU_FUSED_PREFILL_MLP_RELEASE_MEDIAN baseline_prefill_s={old:.6} mlp_only_prefill_s={new:.6} prefill_speedup={:.4} baseline_total_s={old_total:.6} mlp_only_total_s={new_total:.6} total_speedup={:.4} samples_each=3 logits_and_BF16_KV_SHA_proven=true",
+                old / new,
+                old_total / new_total
             );
         }
-        for (batch, runs) in by_batch {
-            let mut a = runs.iter().map(|(p, _)| *p).collect::<Vec<_>>();
-            let mut b = runs.iter().map(|(_, t)| *t).collect::<Vec<_>>();
-            a.sort_unstable_by(f64::total_cmp);
-            b.sort_unstable_by(f64::total_cmp);
-            let p = (a[0] + a[1]) / 2.0;
-            let t = (b[0] + b[1]) / 2.0;
-            eprintln!(
-                "GPU_PREFILL_BATCH_RELEASE_SUMMARY batch={} median_prefill_s={p:.6} median_total_s={t:.6} samples=2 original_BF16_KV_logical_SHA_unchanged=true",
-                batch
+
+        #[test]
+        #[ignore = "requires physical AMD Radeon OpenCL and configured-model BF16 for batch size parity and speed"]
+        fn gpu_actual_prefill_64_128_192_256_bit_exact_full_logits_kv_and_speed() {
+            use super::*;
+            use sha2::{Digest, Sha256};
+            use std::collections::BTreeMap;
+            let model = std::env::var("KVSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tokenizer = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let user = format!(
+                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
+                "El informe conserva documentos y códigos de referencia. ".repeat(23)
             );
+            let text = format!(
+                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            );
+            let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
+            assert_eq!(ids.len(), 375);
+            let mut model = OpenClLlm::load_with_canonical_lod(
+                &model,
+                512,
+                WeightMode::Resident,
+                CanonicalGpuLodConfig {
+                    epsilon: 0.0,
+                    stage_tokens: 64,
+                    cold_directory: None,
+                },
+            )
+            .unwrap();
+            model.set_batch_prefill_tokens(Some(128)).unwrap();
+            model.set_prefill_weight_reuse_tokens(8).unwrap();
+            model.set_exact_hot_v_tokens(512).unwrap();
+            model.set_deferred_cold_commit(true).unwrap();
+            model.set_decode_unroll4(true).unwrap();
+            model.set_decode_fused_kernels(true).unwrap();
+            model.set_exact_hot_fused_attention(true).unwrap();
+            let sha = |m: &mut OpenClLlm| {
+                let mut h = Sha256::new();
+                h.update(b"KVSLIM-GPU-prefill-tile-physical-KV-v1");
+                let token_bytes = m.spec.attention.kv_elements_per_token() * 2;
+                let positions = (0..m.position).collect::<Vec<_>>();
+                for layer in 0..m.spec.num_hidden_layers {
+                    h.update(
+                        m.engine
+                            .read_bf16_bytes(&m.workspace.kv[layer].key, token_bytes * m.position)
+                            .unwrap(),
+                    );
+                    h.update(
+                        m.lod
+                            .as_mut()
+                            .unwrap()
+                            .read_values(layer, &positions)
+                            .unwrap(),
+                    );
+                }
+                format!("{:x}", h.finalize())
+            };
+            let original = model.generate(&ids, 16, true).unwrap();
+            let original_sha = sha(&mut model);
+            for batch in [64usize, 96, 192, 256, 375, 512] {
+                model.reset_session().unwrap();
+                model.set_batch_prefill_tokens(Some(batch)).unwrap();
+                let run = model.generate(&ids, 16, true).unwrap();
+                assert_eq!(run.tokens, original.tokens);
+                for (i, (a, b)) in original.steps.iter().zip(run.steps.iter()).enumerate() {
+                    assert_eq!(
+                        a.logits, b.logits,
+                        "GPU BF16 logits changed at generated step {i} for batch {batch}"
+                    );
+                }
+                assert_eq!(
+                    sha(&mut model),
+                    original_sha,
+                    "BF16 ColdStore K/V SHA different for GPU batch {batch}"
+                );
+                assert_eq!(
+                    run.canonical_cpu_lod_stats
+                        .as_ref()
+                        .unwrap()
+                        .exact_v_tokens_skipped,
+                    0
+                );
+                assert_eq!(
+                    run.canonical_cpu_lod_stats
+                        .as_ref()
+                        .unwrap()
+                        .physical_cold_store_pages,
+                    168
+                );
+                eprintln!(
+                    "GPU_PREFILL_BATCH_PARITY batch={} prompt_tokens={} generated={} prefill_s={:.6} batch_count={} all_GPU_BF16_logits_KV_exact=true",
+                    batch,
+                    ids.len(),
+                    run.tokens.len(),
+                    run.prefill_seconds,
+                    run.gpu_prefill_batches
+                );
+            }
+            let mut by_batch = BTreeMap::<usize, Vec<(f64, f64)>>::new();
+            for size in [128usize, 375, 375, 128, 128, 375] {
+                model.reset_session().unwrap();
+                model.set_batch_prefill_tokens(Some(size)).unwrap();
+                let result = model.generate(&ids, 16, false).unwrap();
+                assert_eq!(result.tokens, original.tokens);
+                if size == 375 {
+                    assert_eq!(
+                        result.gpu_prefill_batches, 1,
+                        "entire 375-token BF16 prompt must be executed in one physical GPU batch"
+                    );
+                }
+                assert_eq!(
+                    result
+                        .canonical_cpu_lod_stats
+                        .as_ref()
+                        .unwrap()
+                        .exact_v_tokens_skipped,
+                    0
+                );
+                assert!(!result.gpu_verified_prompt_replay_hit);
+                assert_eq!(result.gpu_verified_prefix_reused_tokens, 0);
+                by_batch
+                    .entry(size)
+                    .or_default()
+                    .push((result.prefill_seconds, result.total_seconds));
+                eprintln!(
+                    "GPU_PREFILL_BATCH_REAL size={} prefill_s={:.6} total_s={:.6} batches={} identical_ids=true",
+                    size, result.prefill_seconds, result.total_seconds, result.gpu_prefill_batches
+                );
+            }
+            for (batch, runs) in by_batch {
+                let mut a = runs.iter().map(|(p, _)| *p).collect::<Vec<_>>();
+                let mut b = runs.iter().map(|(_, t)| *t).collect::<Vec<_>>();
+                a.sort_unstable_by(f64::total_cmp);
+                b.sort_unstable_by(f64::total_cmp);
+                let p = (a[0] + a[1]) / 2.0;
+                let t = (b[0] + b[1]) / 2.0;
+                eprintln!(
+                    "GPU_PREFILL_BATCH_RELEASE_SUMMARY batch={} median_prefill_s={p:.6} median_total_s={t:.6} samples=2 original_BF16_KV_logical_SHA_unchanged=true",
+                    batch
+                );
+            }
         }
     }
 

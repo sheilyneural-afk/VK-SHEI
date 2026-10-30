@@ -47,9 +47,6 @@ La guía operativa única está en
 El contrato de adaptadores está en
 [docs/MODEL_ADAPTERS.md](docs/MODEL_ADAPTERS.md).
 
-La documentación histórica, benchmarks y corpus de prueba no forman parte del
-árbol de producción y se han eliminado.
-
 ## Alcance actual
 
 El núcleo y su contrato son universales. Las implementaciones opcionales de

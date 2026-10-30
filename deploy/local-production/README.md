@@ -255,8 +255,14 @@ si el bind no es loopback o si el formato de ColdStore no está declarado.
 
 ## Estado de producción
 
+El arranque se divide en dos procesos: el worker local (puerto interno 8188) y
+el gateway autenticado (puerto público local 8088). El worker no se publica a
+la red; los clientes usan únicamente el gateway.
+
+```bash
+deploy/local-production/scripts/run-local-worker.sh
+deploy/local-production/scripts/run-local-runtime.sh
+```
+
 Este entorno es local y cerrado, pero todavía no es una certificación de
-producción general. Antes de habilitar tráfico real deben pasar los gates de
-compilación, tests, backend físico, exactitud, carga, recuperación y seguridad.
-La ausencia de autenticación en el servidor actual mantiene el alcance en
-loopback.
+producción general: faltan las pruebas físicas y de carga del nodo concreto.

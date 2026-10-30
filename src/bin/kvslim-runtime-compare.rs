@@ -1,7 +1,7 @@
-//! Strict, opt-in comparison of native BF16 Rust/OpenCL GPU inference versus
+//! Strict, opt-in comparison of native BF16 runtime inference versus
 //! the supported dense BF16 LibTorch CPU model (configured-model or Llama 3.1 8B).
 //! Same original safetensors, tokenizer, greedy input IDs and generation steps.
-//! Neither the model checkpoint nor the KVSLIM historical path is changed.
+//! The comparison does not modify the model bundle or runtime state.
 //! Cross-backend differences are diagnostic, NOT a requirement of bitwise
 //! CPU/GPU equality. GPU LOD fidelity is evaluated against dense GPU.
 
@@ -221,7 +221,7 @@ fn main() -> Result<()> {
             "gpu_prefill_batch_tokens":gpu_generation.gpu_prefill_batch_tokens,
             "gpu_prefill_batches":gpu_generation.gpu_prefill_batches,
             "dense_cpu_seconds":cpu_generation.latency_seconds,
-            "gpu_historical_kvslim_lod_active":false,
+            "gpu_kvslim_lod_active":false,
         }))?
     );
     Ok(())

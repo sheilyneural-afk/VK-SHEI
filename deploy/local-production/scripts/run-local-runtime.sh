@@ -12,13 +12,9 @@ source "$env_file"
 "$script_dir/verify-release.sh"
 
 binary="$root/deploy/local-production/runtime/bin/kvslim-server"
-case "${KVSLIM_MODEL_DIR:-}" in
-  /*) model_dir="$KVSLIM_MODEL_DIR" ;;
-  *) model_dir="$root/$KVSLIM_MODEL_DIR" ;;
-esac
+: "${KVSLIM_GATEWAY_TOKEN:?KVSLIM_GATEWAY_TOKEN must be set}"
+: "${KVSLIM_WORKER_ENDPOINT:?KVSLIM_WORKER_ENDPOINT must be set (for example http://127.0.0.1:8188)}"
 exec "$binary" \
-  --model "$model_dir" \
   --host 127.0.0.1 \
   --port "${KVSLIM_PORT:-8088}" \
-  --max-context-tokens "${KVSLIM_MAX_CONTEXT_TOKENS:-8192}" \
-  --timeout-secs "${KVSLIM_REQUEST_TIMEOUT_SECS:-300}"
+  --worker "local=${KVSLIM_WORKER_ENDPOINT}"

@@ -1,13 +1,12 @@
 #![recursion_limit = "256"]
 //! Experimental full-model BF16 inference with Rust/OpenCL on a physical GPU.
-//! Only MiniCPM5/Llama-style BF16 weights and supported model config.
-//! Does not enable historical Terrsvusion LOD. No Python or LibTorch needed.
+//! Local runtime command line entry point for a verified model bundle.
 
 use anyhow::{Context, Result, bail, ensure};
+use kvslim::gpu_canonical_lod::CanonicalGpuLodConfig;
+use kvslim::opencl_llm::{OpenClLlm, WeightMode};
 use serde_json::json;
 use std::{path::PathBuf, time::Instant};
-use terrsvusion::gpu_canonical_lod::CanonicalGpuLodConfig;
-use terrsvusion::opencl_llm::{OpenClLlm, WeightMode};
 use tokenizers::Tokenizer;
 
 fn raw_user_chat(user: &str, thinking: bool) -> String {
@@ -31,7 +30,7 @@ fn parse_ids(text: &str) -> Result<Vec<u32>> {
 }
 
 fn main() -> Result<()> {
-    let mut model = PathBuf::from("/home/yo/models/MiniCPM5-1B");
+    let mut model = PathBuf::from("deploy/local-production/runtime/models/active");
     let mut user = String::from("Hola");
     let mut ids = None::<Vec<u32>>;
     let mut max_new_tokens = 1usize;
@@ -88,7 +87,7 @@ fn main() -> Result<()> {
                         .parse()?,
                 );
             }
-            "--gpu-prefill-legacy" => {
+            "--gpu-prefill-fallback" => {
                 prefill_batch = None;
             }
             "--gpu-prefill-weight-reuse" => {
@@ -200,9 +199,9 @@ fn main() -> Result<()> {
                     .cold_directory = Some(value);
             }
             "--help" | "-h" => {
-                println!("Terrsvusion BF16 Rust/OpenCL full LLM inference, experimental");
+                println!("KVSLIM BF16 Rust/OpenCL full LLM inference, experimental");
                 println!(
-                    "Usage: terrsvusion-opencl-llm [--model dir] [--prompt Hola | --ids 1,2,3] [--max-new-tokens 1] [--max-context-tokens 128] [--resident|--stream-weights] [--load-only] [--verify-weights] [--logits] [--thinking] [--gpu-lod] [--lod-epsilon 0] [--lod-stage 64] [--gpu-dense-kv] [--gpu-prefill-batch 128|--gpu-prefill-legacy]"
+                    "Usage: kvslim-runtime-cli [--model dir] [--prompt Hola | --ids 1,2,3] [--max-new-tokens 1] [--max-context-tokens 128] [--resident|--stream-weights] [--load-only] [--verify-weights] [--logits] [--thinking] [--gpu-lod] [--lod-epsilon 0] [--lod-stage 64] [--gpu-dense-kv] [--gpu-prefill-batch 128|--gpu-prefill-fallback]"
                 );
                 println!(
                     "GPU computes all transformer layers. --stream-weights minimizes GPU allocations at the expense of repeated weight transfers."
@@ -256,7 +255,7 @@ fn main() -> Result<()> {
         OpenClLlm::load(&model, max_context_tokens, mode)?
     };
     if gpu_micro_sigma.is_some() || gpu_micro_warmup.is_some() || gpu_micro_open_fuse.is_some() {
-        let mut policy = terrsvusion::adaptive_extent::AxisPolicy::default();
+        let mut policy = kvslim::adaptive_extent::AxisPolicy::default();
         if let Some(sigma) = gpu_micro_sigma {
             policy.novelty_sigma = sigma;
         }
@@ -342,7 +341,7 @@ fn main() -> Result<()> {
             "full_llm_layers_computed_on_gpu": true,
             "cpu_for_neural_arithmetic": false,
             "torch_backend_used": false,
-            "historical_terravision_lod_active": false,
+            "kvslim_lod_active": false,
             "input_prompt": user,
             "prompt_ids": prompt_ids,
             "completion_ids": generation.tokens,

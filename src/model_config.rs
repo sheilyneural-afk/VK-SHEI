@@ -210,18 +210,18 @@ impl ModelSpec {
         }
     }
 
-    /// Fail closed for the legacy hardcoded configured-model runtime. Parsing a
+    /// Fail closed for the bounded dense runtime. Parsing a
     /// generic config alone never makes an arbitrary LLM executable.
-    pub fn ensure_legacy_runtime_compatible(&self) -> Result<()> {
+    pub fn ensure_dense_runtime_compatible(&self) -> Result<()> {
         ensure!(
             self.native_profile_match,
-            "runtime heredado limitado a configured-model BF16 (24 capas, 16Q/2KV, 128 dim, vocab 130560, RoPE 5e6 y pesos compatibles); '{}' solo puede inspeccionarse",
+            "dense runtime limitado a una geometría BF16 verificada; '{}' solo puede inspeccionarse",
             self.model_type
         );
         ensure!(self.tokenizer_json_present, "falta tokenizer.json");
         ensure!(
             self.weight_shards.len() == 1,
-            "runtime heredado solo admite un archivo safetensors; encontrados {}",
+            "dense runtime requiere un único archivo safetensors; encontrados {}",
             self.weight_shards.len()
         );
         ensure!(
@@ -262,9 +262,9 @@ impl ModelSpec {
         }
     }
 
-    pub fn ensure_torch_runtime_compatible(&self) -> Result<()> {
+    pub fn ensure_cpu_runtime_compatible(&self) -> Result<()> {
         match self.runtime_profile() {
-            Some("minicpm5-1b") => self.ensure_legacy_runtime_compatible(),
+            Some("minicpm5-1b") => self.ensure_dense_runtime_compatible(),
             Some("llama-3.1-8b-instruct") => {
                 ensure!(self.tokenizer_json_present, "falta tokenizer.json");
                 ensure!(
@@ -297,11 +297,11 @@ impl ModelSpec {
             "portable_byte_storage": self.storage_format.is_some(),
             "model_metadata_inspection": true,
             "native_profile_match": self.native_profile_match,
-            "legacy_model_ready_for_loading": self.ensure_legacy_runtime_compatible().is_ok(),
+            "dense_runtime_ready_for_loading": self.ensure_dense_runtime_compatible().is_ok(),
             "llama31_8b_instruct_bf16": self.matches_dense_profile(),
             "rope_scaling": self.rope_scaling,
             "runtime_profile": self.runtime_profile(),
-            "torch_runtime_ready_for_loading": self.ensure_torch_runtime_compatible().is_ok(),
+            "cpu_runtime_ready_for_loading": self.ensure_cpu_runtime_compatible().is_ok(),
             "rust_cpu_reference_attention": true,
             "native_cpu_llm_end_to_end": false,
             "torch_inference_backend_compiled": cfg!(feature = "torch-backend"),
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(spec.attention, AttentionGeometry::new(12, 2, 128).unwrap());
         assert_eq!(spec.storage_format, Some(FloatFormat::F16));
         assert!(!spec.native_profile_match);
-        assert!(spec.ensure_legacy_runtime_compatible().is_err());
+        assert!(spec.ensure_dense_runtime_compatible().is_err());
     }
 
     #[test]
@@ -370,13 +370,13 @@ mod tests {
             "max_position_embeddings": 131072
         }));
         assert!(spec.native_profile_match);
-        assert!(spec.ensure_legacy_runtime_compatible().is_err());
+        assert!(spec.ensure_dense_runtime_compatible().is_err());
         fs::write(tmp.path().join("model-00001.safetensors"), []).unwrap();
         fs::write(tmp.path().join("tokenizer.json"), []).unwrap();
         assert!(
             ModelSpec::inspect(tmp.path())
                 .unwrap()
-                .ensure_legacy_runtime_compatible()
+                .ensure_dense_runtime_compatible()
                 .is_ok()
         );
     }
@@ -407,7 +407,7 @@ mod tests {
         }));
         assert!(!spec.native_profile_match);
         assert!(!spec.matches_dense_profile());
-        assert!(spec.ensure_legacy_runtime_compatible().is_err());
+        assert!(spec.ensure_dense_runtime_compatible().is_err());
         fs::write(tmp.path().join("model-00001-of-00004.safetensors"), []).unwrap();
         fs::write(tmp.path().join("tokenizer.json"), []).unwrap();
         let spec = ModelSpec::inspect(tmp.path()).unwrap();
@@ -416,8 +416,8 @@ mod tests {
         assert_eq!(rope.factor, 8.0);
         assert_eq!(rope.original_max_position_embeddings, 8192);
         assert_eq!(spec.runtime_profile(), Some("llama-3.1-8b-instruct"));
-        assert!(spec.ensure_torch_runtime_compatible().is_ok());
-        assert!(spec.ensure_legacy_runtime_compatible().is_err());
+        assert!(spec.ensure_cpu_runtime_compatible().is_ok());
+        assert!(spec.ensure_dense_runtime_compatible().is_err());
     }
 
     #[test]

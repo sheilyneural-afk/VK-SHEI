@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>configured-model nativo BF16</title>
+    <title>Runtime local KVSLIM</title>
     <style>
       :root {
         --bg: #111318;
@@ -53,7 +53,7 @@
   <body>
     <main>
       <header>
-        <h1>configured-model nativo BF16 <a href="/" style="font-size:13px;font-weight:500">KVSLIM</a></h1>
+        <h1>Runtime local <a href="/" style="font-size:13px;font-weight:500">KVSLIM</a></h1>
         <div id="status">comprobando motor…</div>
       </header>
       <div id="log"></div>
@@ -68,7 +68,7 @@
     </main>
     <aside>
       <h2>Control</h2>
-      <p style="color:#9aa3b2;font-size:13px;margin:0 0 12px">Mismos pesos configured-model. Atención densa BF16, plantilla oficial, sin sistema por defecto, sin reescribir preguntas, sin prefijo KVSLIM.</p>
+      <p style="color:#9aa3b2;font-size:13px;margin:0 0 12px">Usa el modelo local cargado por la configuración activa. La compatibilidad se valida antes de iniciar el runtime.</p>
       <dl id="engine"></dl>
       <label for="system">Sistema (vacío = ninguno)</label>
       <textarea id="system"></textarea>

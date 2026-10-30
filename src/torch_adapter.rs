@@ -7,11 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use kvslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use serde_json::{Value, json};
 
-use crate::model_config::ModelSpec;
+use crate::model_bundle::ModelBundle;
 use crate::torch_runtime::TorchModelRuntime;
 
 pub struct TorchModelAdapter {
@@ -25,8 +25,8 @@ impl Default for TorchModelAdapter {
     fn default() -> Self {
         Self {
             capabilities: AdapterCapabilities {
-                adapter_id: "torch-runtime".into(),
-                backend: "torch".into(),
+                adapter_id: "cpu-runtime".into(),
+                backend: "cpu".into(),
                 supports_prefill: true,
                 supports_decode: true,
                 supports_kv_restore: true,
@@ -45,8 +45,8 @@ impl ModelAdapter for TorchModelAdapter {
     }
 
     fn inspect(&self, model_dir: &Path, _config: &Value) -> Result<()> {
-        let spec = ModelSpec::inspect(model_dir)?;
-        spec.ensure_torch_runtime_compatible()
+        let bundle = ModelBundle::load(model_dir)?;
+        bundle.spec.ensure_cpu_runtime_compatible()
     }
 
     fn load(&mut self, model_dir: &Path, config: &Value) -> Result<()> {
@@ -86,7 +86,7 @@ impl ModelAdapter for TorchModelAdapter {
             .as_ref()
             .context("Torch adapter is not loaded")?;
         serde_json::to_vec(&json!({
-            "schema": "kvslim.torch.replay-snapshot/v1",
+            "schema": "kvslim.runtime.replay-snapshot/v1",
             "model_dir": self.model_dir,
             "tokens": self.session_tokens,
         }))
@@ -97,8 +97,8 @@ impl ModelAdapter for TorchModelAdapter {
         let envelope: Value = serde_json::from_slice(snapshot).context("parse Torch snapshot")?;
         ensure!(
             envelope.get("schema").and_then(Value::as_str)
-                == Some("kvslim.torch.replay-snapshot/v1"),
-            "unsupported Torch snapshot schema"
+                == Some("kvslim.runtime.replay-snapshot/v1"),
+            "unsupported runtime snapshot schema"
         );
         let expected_dir = envelope
             .get("model_dir")
