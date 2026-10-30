@@ -183,10 +183,23 @@ pub fn adapter_status() -> Vec<AdapterStatus> {
                         )
                     }
                 }
-                "cpu" => (
-                    AdapterAvailability::RequiresProbe,
-                    "requiere validar el runtime local".to_owned(),
-                ),
+                "cpu" => {
+                    #[cfg(feature = "torch-backend")]
+                    {
+                        (
+                            AdapterAvailability::RuntimeAvailable,
+                            "runtime CPU compilado y disponible".to_owned(),
+                        )
+                    }
+                    #[cfg(not(feature = "torch-backend"))]
+                    {
+                        (
+                            AdapterAvailability::Compiled,
+                            "backend CPU no compilado; el núcleo universal sigue disponible"
+                                .to_owned(),
+                        )
+                    }
+                }
                 _ => (
                     AdapterAvailability::RequiresProbe,
                     "requiere prueba del runtime".to_owned(),
