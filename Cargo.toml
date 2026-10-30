@@ -31,10 +31,10 @@ path = "src/bin/terrsvusion-native-parity.rs"
 [features]
 # Native Rust functionality builds without PyTorch, LibTorch or a GPU.
 default = []
-# Opt-in legacy inference server: preserves the audited MiniCPM5 BF16 path.
+# LibTorch CPU runtime (MiniCPM5-1B and Llama 3.1 8B BF16) and its binaries.
 torch-backend = ["dep:tch"]
-# Real native Rust/OpenCL GPU attention reference (QK/softmax/PV).
-# Requires an OpenCL GPU; does NOT offload the full LLM model.
+# Native Rust/OpenCL backend: full BF16 LLM runtime (opencl_llm) plus the
+# isolated attention reference (opencl_backend). Requires an OpenCL device.
 opencl-backend = ["dep:opencl3"]
 # HTTP-only Rust multiplexer; optional and does not load model weights.
 unified-router = ["dep:reqwest"]

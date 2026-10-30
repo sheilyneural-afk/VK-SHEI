@@ -2,7 +2,8 @@
 
 **Vigente desde el 30/10/2026.** Política de interpretación para todos los
 informes, benchmarks, mensajes de interfaz y pruebas de VK-SHEI / Terrsvusion.
-Esta política aclara la lectura de las mediciones históricas sin reescribirlas.
+Indica cómo leer las mediciones de [evidencia/](evidencia/) sin
+reescribirlas.
 
 ## 1. No exigir identidad binaria CPU/GPU
 
@@ -43,7 +44,7 @@ mediante SHA-256, readback y comparaciones exactas **sí** debe ser
 estricta cuando el contrato promete almacenamiento sin pérdida. Esto
 no implica que CPU y GPU deban calcular activaciones idénticas bit a bit.
 
-## 4. Interpretación de los datos históricos
+## 4. Interpretación de las mediciones publicadas
 
 Los valores publicados, como `L∞ logits=0,5` y SHA lógico KV diferente
 en una comparación CPU/GPU, **se mantienen como mediciones**. No se
@@ -53,6 +54,5 @@ de precisión universal. Las pruebas de paridad GPU densa vs GPU LOD
 esa optimización. Las comparaciones de velocidad necesitan misma
 carga útil, generación solicitada y condiciones experimentales.
 
-Los JSON, logs y pruebas históricas se preservan sin modificar los
-resultados medidos. Ante cualquier texto anterior ambiguo, prevalecen
-estos criterios de interpretación.
+Los JSON y logs de `docs/evidencia/` se conservan sin modificar los
+resultados medidos. Si un texto es ambiguo, prevalecen estos criterios.
