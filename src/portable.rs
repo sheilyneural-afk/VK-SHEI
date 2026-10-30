@@ -148,21 +148,30 @@ impl RawTensor {
 
     pub fn decode_f32(&self) -> Vec<f32> {
         match self.dtype {
-            FloatFormat::Bf16 => self
-                .bytes
-                .chunks_exact(2)
-                .map(|b| bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
-                .collect(),
-            FloatFormat::F16 => self
-                .bytes
-                .chunks_exact(2)
-                .map(|b| f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
-                .collect(),
-            FloatFormat::F32 => self
-                .bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_bits(u32::from_le_bytes([b[0], b[1], b[2], b[3]])))
-                .collect(),
+            FloatFormat::Bf16 => {
+                let (chunks, remainder) = self.bytes.as_chunks::<2>();
+                debug_assert!(remainder.is_empty());
+                chunks
+                    .iter()
+                    .map(|b| bf16::from_bits(u16::from_le_bytes(*b)).to_f32())
+                    .collect()
+            }
+            FloatFormat::F16 => {
+                let (chunks, remainder) = self.bytes.as_chunks::<2>();
+                debug_assert!(remainder.is_empty());
+                chunks
+                    .iter()
+                    .map(|b| f16::from_bits(u16::from_le_bytes(*b)).to_f32())
+                    .collect()
+            }
+            FloatFormat::F32 => {
+                let (chunks, remainder) = self.bytes.as_chunks::<4>();
+                debug_assert!(remainder.is_empty());
+                chunks
+                    .iter()
+                    .map(|b| f32::from_bits(u32::from_le_bytes(*b)))
+                    .collect()
+            }
         }
     }
 }

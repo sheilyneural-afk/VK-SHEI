@@ -283,26 +283,33 @@ impl ColdStore {
             checksum_many(&[&header, &key_hash_bytes, &value_hash_bytes, key, value]);
         let record_digest =
             cryptographic_digest(&[&header, &key_hash_bytes, &value_hash_bytes, key, value]);
-        let record_len = (HEADER_LEN
-            + key_hash_bytes.len()
-            + value_hash_bytes.len()
-            + key.len()
-            + value.len()
-            + FOOTER_LEN) as u64;
+        let record_len = [
+            HEADER_LEN,
+            key_hash_bytes.len(),
+            value_hash_bytes.len(),
+            key.len(),
+            value.len(),
+            FOOTER_LEN,
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or_else(|| invalid("longitud de registro KV desbordada"))?;
+        let record_len_u64 =
+            u64::try_from(record_len).map_err(|_| invalid("registro KV excede u64"))?;
         let mut footer = Vec::with_capacity(FOOTER_LEN);
         footer.extend_from_slice(FOOTER_MAGIC);
         put_u64(&mut footer, record_checksum);
-        put_u64(&mut footer, record_len);
+        put_u64(&mut footer, record_len_u64);
         footer.extend_from_slice(&record_digest);
 
-        let mut record = Vec::with_capacity(record_len as usize);
+        let mut record = Vec::with_capacity(record_len);
         record.extend_from_slice(&header);
         record.extend_from_slice(&key_hash_bytes);
         record.extend_from_slice(&value_hash_bytes);
         record.extend_from_slice(key);
         record.extend_from_slice(value);
         record.extend_from_slice(&footer);
-        debug_assert_eq!(record.len(), record_len as usize);
+        debug_assert_eq!(record.len(), record_len);
 
         let key_hashes_offset = HEADER_LEN as u64;
         let value_hashes_offset = key_hashes_offset + key_hash_bytes.len() as u64;
@@ -321,7 +328,7 @@ impl ColdStore {
             value_hashes_checksum,
             record_checksum,
             record_digest,
-            record_len,
+            record_len: record_len_u64,
         };
         Ok(PreparedPage { meta, record })
     }
@@ -572,14 +579,19 @@ impl ColdStore {
         tokens: usize,
         expected_checksum: u64,
     ) -> io::Result<Vec<u64>> {
-        let mut bytes = vec![0_u8; tokens * 8];
+        let byte_count = tokens
+            .checked_mul(8)
+            .ok_or_else(|| invalid("longitud de tabla de hashes desbordada"))?;
+        let mut bytes = vec![0_u8; byte_count];
         read_exact_at(&self.file, offset, &mut bytes)?;
         if checksum(&bytes) != expected_checksum {
             return Err(invalid("tabla de hashes por token inválida"));
         }
-        Ok(bytes
-            .chunks_exact(8)
-            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+        let (chunks, remainder) = bytes.as_chunks::<8>();
+        debug_assert!(remainder.is_empty());
+        Ok(chunks
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
             .collect())
     }
 
@@ -620,12 +632,22 @@ impl ColdStore {
             read_exact_at(&self.file, offset, &mut header)?;
             let parsed = parse_header(&header, offset)?;
             let hash_tables_len = u64::from(parsed.geometry.tokens) * 8 * 2;
-            let record_len = HEADER_LEN as u64
-                + hash_tables_len
-                + parsed.key_len
-                + parsed.value_len
-                + FOOTER_LEN as u64;
+            let record_len = [
+                HEADER_LEN as u64,
+                hash_tables_len,
+                parsed.key_len,
+                parsed.value_len,
+                FOOTER_LEN as u64,
+            ]
+            .into_iter()
+            .try_fold(0_u64, u64::checked_add)
+            .ok_or_else(|| invalid("longitud de registro KV desbordada"))?;
             if record_len > remaining {
+                if has_committed_footer_for_record_start(&self.file, offset, file_len)? {
+                    return Err(invalid(
+                        "cabecera KV incompatible con un pie de commit presente",
+                    ));
+                }
                 break; // footer cannot exist, so the append was never committed
             }
             let mut footer = [0_u8; FOOTER_LEN];
@@ -666,6 +688,45 @@ impl ColdStore {
         }
         Ok(())
     }
+}
+
+fn has_committed_footer_for_record_start(
+    file: &File,
+    record_start: u64,
+    file_len: u64,
+) -> io::Result<bool> {
+    const SCAN_CHUNK_BYTES: usize = 64 * 1024;
+    let marker_len = FOOTER_MAGIC.len();
+    let mut scan_offset = record_start;
+    while scan_offset < file_len {
+        let scan_len = usize::try_from((file_len - scan_offset).min(SCAN_CHUNK_BYTES as u64))
+            .map_err(|_| invalid("fragmento de escaneo KV excede usize"))?;
+        let mut bytes = vec![0_u8; scan_len];
+        read_exact_at(file, scan_offset, &mut bytes)?;
+        for (index, window) in bytes.windows(marker_len).enumerate() {
+            if window != FOOTER_MAGIC {
+                continue;
+            }
+            let footer_offset = scan_offset + index as u64;
+            let Some(footer_end) = footer_offset.checked_add(FOOTER_LEN as u64) else {
+                continue;
+            };
+            if footer_end > file_len {
+                continue;
+            }
+            let mut footer = [0_u8; FOOTER_LEN];
+            read_exact_at(file, footer_offset, &mut footer)?;
+            let record_len = get_u64(&footer, 16)?;
+            if footer_end.checked_sub(record_len) == Some(record_start) {
+                return Ok(true);
+            }
+        }
+        if scan_len < marker_len {
+            break;
+        }
+        scan_offset += (scan_len - (marker_len - 1)) as u64;
+    }
+    Ok(false)
 }
 
 fn validate_geometry(geometry: PageGeometry, key: &[u8], value: &[u8]) -> io::Result<()> {
@@ -737,13 +798,21 @@ fn parse_header(header: &[u8], record_offset: u64) -> io::Result<PageMeta> {
     if key_len == 0 || value_len == 0 {
         return Err(invalid("longitud KV fría inválida"));
     }
-    let key_hashes_offset = record_offset + HEADER_LEN as u64;
-    let value_hashes_offset = key_hashes_offset + u64::from(geometry.tokens) * 8;
+    let key_hashes_offset = record_offset
+        .checked_add(HEADER_LEN as u64)
+        .ok_or_else(|| invalid("offset de tabla K desbordado"))?;
+    let hash_table_len = u64::from(geometry.tokens) * 8;
+    let value_hashes_offset = key_hashes_offset
+        .checked_add(hash_table_len)
+        .ok_or_else(|| invalid("offset de tabla V desbordado"))?;
+    let payload_offset = value_hashes_offset
+        .checked_add(hash_table_len)
+        .ok_or_else(|| invalid("offset de payload KV desbordado"))?;
     Ok(PageMeta {
         page_id: get_u64(header, 16)?,
         geometry,
         record_offset,
-        payload_offset: value_hashes_offset + u64::from(geometry.tokens) * 8,
+        payload_offset,
         key_hashes_offset,
         value_hashes_offset,
         key_len,
@@ -1219,6 +1288,34 @@ mod tests {
 
         let error = match ColdStore::open(&path, 0) {
             Ok(_) => panic!("la cabecera comprometida corrupta fue truncada"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), file_len);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn overflowing_committed_record_length_is_rejected_without_truncation() {
+        let path = temp_path("record-length-overflow");
+        let mut store = ColdStore::create(&path, 0).unwrap();
+        let meta = store
+            .append_page(geometry(0), &[1; 32], &[2; 32], true)
+            .unwrap();
+        drop(store);
+        let file_len = std::fs::metadata(&path).unwrap().len();
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(meta.record_offset + 56)).unwrap();
+        file.write_all(&u64::MAX.to_le_bytes()).unwrap();
+        file.sync_data().unwrap();
+
+        let error = match ColdStore::open(&path, 0) {
+            Ok(_) => panic!("longitud de registro KV desbordada fue aceptada"),
             Err(error) => error,
         };
         assert_eq!(error.kind(), ErrorKind::InvalidData);

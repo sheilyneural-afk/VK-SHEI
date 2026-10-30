@@ -642,9 +642,11 @@ impl GpuEngine {
                 .enqueue_read_buffer(source, CL_BLOCKING, 0, &mut bits, &[])
                 .context("GPU logits BF16 readback failed")?;
         }
-        Ok(bits
-            .chunks_exact(2)
-            .map(|b| half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
+        let (chunks, remainder) = bits.as_chunks::<2>();
+        ensure!(remainder.is_empty(), "GPU logits BF16 byte count is odd");
+        Ok(chunks
+            .iter()
+            .map(|b| half::bf16::from_bits(u16::from_le_bytes(*b)).to_f32())
             .collect())
     }
 
@@ -4508,9 +4510,13 @@ mod tests {
         let mut max_abs_error = 0.0f32;
         let mut full_output = Vec::new();
         let mut sparse_output = Vec::new();
-        for (a, b) in exact.chunks_exact(2).zip(approximate.chunks_exact(2)) {
-            let a = half::bf16::from_bits(u16::from_le_bytes([a[0], a[1]])).to_f32();
-            let b = half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
+        let (exact_bytes, exact_remainder) = exact.as_chunks::<2>();
+        let (approximate_bytes, approximate_remainder) = approximate.as_chunks::<2>();
+        assert!(exact_remainder.is_empty() && approximate_remainder.is_empty());
+        assert_eq!(exact_bytes.len(), approximate_bytes.len());
+        for (a, b) in exact_bytes.iter().zip(approximate_bytes) {
+            let a = half::bf16::from_bits(u16::from_le_bytes(*a)).to_f32();
+            let b = half::bf16::from_bits(u16::from_le_bytes(*b)).to_f32();
             max_abs_error = max_abs_error.max((a - b).abs());
             full_output.push(a);
             sparse_output.push(b);
@@ -4678,9 +4684,13 @@ mod tests {
             .read_bf16_bytes(&resident_output, geom.query_elements() * 2)
             .unwrap();
         let mut hot_error = 0.0f32;
-        for (a, b) in exact.chunks_exact(2).zip(hot_actual.chunks_exact(2)) {
-            let a = half::bf16::from_bits(u16::from_le_bytes([a[0], a[1]])).to_f32();
-            let b = half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
+        let (exact, exact_remainder) = exact.as_chunks::<2>();
+        let (hot_actual, actual_remainder) = hot_actual.as_chunks::<2>();
+        assert!(exact_remainder.is_empty() && actual_remainder.is_empty());
+        assert_eq!(exact.len(), hot_actual.len());
+        for (a, b) in exact.iter().zip(hot_actual) {
+            let a = half::bf16::from_bits(u16::from_le_bytes(*a)).to_f32();
+            let b = half::bf16::from_bits(u16::from_le_bytes(*b)).to_f32();
             hot_error = hot_error.max((a - b).abs());
         }
         assert!(

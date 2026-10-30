@@ -159,9 +159,11 @@ impl MicroKeyRegions {
         // Validate complete input before updating region metadata.
         let mut parsed = Vec::with_capacity(count);
         for token_bytes in original_k_bf16.chunks_exact(token_bytes) {
-            let values = token_bytes
-                .chunks_exact(2)
-                .map(|b| bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
+            let (bits, remainder) = token_bytes.as_chunks::<2>();
+            ensure!(remainder.is_empty(), "micro region K has odd byte length");
+            let values = bits
+                .iter()
+                .map(|b| bf16::from_bits(u16::from_le_bytes(*b)).to_f32())
                 .collect::<Vec<_>>();
             ensure!(
                 values.iter().all(|v| v.is_finite()),
@@ -351,9 +353,14 @@ impl MicroKeyRegions {
             query_bf16.len() == elements * 2,
             "micro region query BF16 shape mismatch"
         );
-        let query = query_bf16
-            .chunks_exact(2)
-            .map(|x| bf16::from_bits(u16::from_le_bytes([x[0], x[1]])).to_f32())
+        let (query_bits, remainder) = query_bf16.as_chunks::<2>();
+        ensure!(
+            remainder.is_empty(),
+            "micro region query has odd byte length"
+        );
+        let query = query_bits
+            .iter()
+            .map(|x| bf16::from_bits(u16::from_le_bytes(*x)).to_f32())
             .collect::<Vec<_>>();
         ensure!(
             query.iter().all(|v| v.is_finite()),
