@@ -710,6 +710,52 @@ struct TerrsvusionLayer {
     pages: Vec<TerrsvusionPage>,
     tail: Option<(Tensor, Tensor)>,
     prefill_hot: Option<(Tensor, Tensor)>,
+    /// Verified resident copy of `pages`, see [`ResidentCommittedKv`].
+    resident: Option<ResidentCommittedKv>,
+}
+
+/// Resident, already verified BF16 copy of a layer's committed pages.
+///
+/// Pages are append-only and immutable once sealed, so each cold page is
+/// read and checksum-verified once, copied into a preallocated buffer that
+/// grows geometrically, and every later block or decode step reuses it
+/// instead of re-reading (and re-hashing) the whole history from disk. The
+/// returned history is a view of the first `tokens` positions, which are
+/// never rewritten, so its bytes are identical to the old `Tensor::cat`.
+struct ResidentCommittedKv {
+    key: Tensor,
+    value: Tensor,
+    tokens: usize,
+    capacity: usize,
+    spans: Vec<(usize, usize)>,
+}
+
+/// Default RAM budget for resident committed KV: `TERRSVUSION_RESIDENT_KV_BYTES`
+/// when set (0 disables it and restores the cold re-read path), otherwise a
+/// third of physical memory capped at 24 GiB (Llama 3.1 8B at 111k tokens
+/// needs ~13.6 GiB).
+fn default_resident_kv_budget_bytes() -> usize {
+    if let Ok(raw) = std::env::var("TERRSVUSION_RESIDENT_KV_BYTES")
+        && let Ok(bytes) = raw.trim().parse::<usize>()
+    {
+        return bytes;
+    }
+    let cap = 24_usize << 30;
+    fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|meminfo| {
+            meminfo
+                .lines()
+                .find_map(|line| line.strip_prefix("MemTotal:"))
+                .and_then(|rest| {
+                    rest.trim()
+                        .trim_end_matches("kB")
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                })
+        })
+        .map_or(cap, |kib| (kib.saturating_mul(1024) / 3).min(cap))
 }
 
 pub struct TerrsvusionKvCache {
@@ -760,6 +806,11 @@ pub struct TerrsvusionKvCache {
     /// opaque libtorch/SDPA workspace is reported separately as unknown.
     known_attention_scratch_peak_bytes: usize,
     prefill_working_peak_bytes: usize,
+    resident_kv_budget_bytes: usize,
+    resident_kv_bytes: usize,
+    resident_kv_peak_bytes: usize,
+    resident_kv_pages_reused: usize,
+    resident_kv_fallbacks: usize,
     prefill_axis_nanos: u64,
     prefill_hot_concat_nanos: u64,
     prefill_certificate_nanos: u64,
@@ -866,6 +917,7 @@ impl TerrsvusionKvCache {
                     pages: Vec::new(),
                     tail: None,
                     prefill_hot: None,
+                    resident: None,
                 })
                 .collect(),
             kv_heads,
@@ -908,6 +960,11 @@ impl TerrsvusionKvCache {
             dense_sdpa_nanos: 0,
             known_attention_scratch_peak_bytes: 0,
             prefill_working_peak_bytes: 0,
+            resident_kv_budget_bytes: default_resident_kv_budget_bytes(),
+            resident_kv_bytes: 0,
+            resident_kv_peak_bytes: 0,
+            resident_kv_pages_reused: 0,
+            resident_kv_fallbacks: 0,
             prefill_axis_nanos: 0,
             prefill_hot_concat_nanos: 0,
             prefill_certificate_nanos: 0,
@@ -999,12 +1056,14 @@ impl TerrsvusionKvCache {
             .map_err(anyhow::Error::from)
     }
 
-    fn assemble_committed_layer(&mut self, layer_index: usize) -> Result<(Tensor, Tensor)> {
-        let pages = self.layers[layer_index].pages.clone();
-        ensure!(!pages.is_empty(), "capa comprometida vacía");
+    /// Exact BF16 K/V tensors of `pages`, reading (and verifying) cold pages.
+    fn committed_page_tensors(
+        &mut self,
+        pages: &[TerrsvusionPage],
+    ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
         let mut keys = Vec::with_capacity(pages.len());
         let mut values = Vec::with_capacity(pages.len());
-        for page in &pages {
+        for page in pages {
             match &page.storage {
                 PageStorage::Cold {
                     exact_id,
@@ -1021,9 +1080,129 @@ impl TerrsvusionKvCache {
                 }
             }
         }
-        let key_refs = keys.iter().collect::<Vec<_>>();
-        let value_refs = values.iter().collect::<Vec<_>>();
-        Ok((Tensor::cat(&key_refs, 2), Tensor::cat(&value_refs, 2)))
+        Ok((keys, values))
+    }
+
+    fn resident_bytes_for(&self, capacity: usize) -> usize {
+        2 * self.kv_heads as usize * capacity * self.head_dim as usize * 2
+    }
+
+    fn release_resident(&mut self, layer_index: usize) {
+        if let Some(resident) = self.layers[layer_index].resident.take() {
+            self.resident_kv_bytes = self
+                .resident_kv_bytes
+                .saturating_sub(self.resident_bytes_for(resident.capacity));
+        }
+    }
+
+    fn assemble_committed_layer(&mut self, layer_index: usize) -> Result<(Tensor, Tensor)> {
+        let pages = self.layers[layer_index].pages.clone();
+        ensure!(!pages.is_empty(), "capa comprometida vacía");
+        let spans = pages
+            .iter()
+            .map(|page| (page.token_start, page.tokens))
+            .collect::<Vec<_>>();
+        let total_tokens = spans.iter().map(|(_, tokens)| *tokens).sum::<usize>();
+        // A resident copy is reused only while its pages are still an exact
+        // prefix of the layer (pages are append-only; anything else drops it).
+        if let Some(resident) = self.layers[layer_index].resident.as_ref()
+            && (resident.spans.len() > spans.len()
+                || spans[..resident.spans.len()] != resident.spans[..])
+        {
+            self.release_resident(layer_index);
+        }
+        let (old_tokens, old_capacity, first_new) = self.layers[layer_index]
+            .resident
+            .as_ref()
+            .map_or((0, 0, 0), |resident| {
+                (resident.tokens, resident.capacity, resident.spans.len())
+            });
+        // Grow geometrically (x1.5) when the budget allows, else exactly.
+        let others = self.resident_kv_bytes - self.resident_bytes_for(old_capacity);
+        let capacity = if total_tokens <= old_capacity {
+            Some(old_capacity)
+        } else {
+            [
+                total_tokens.max(old_capacity + old_capacity / 2),
+                total_tokens,
+            ]
+            .into_iter()
+            .find(|&capacity| {
+                others + self.resident_bytes_for(capacity) <= self.resident_kv_budget_bytes
+            })
+        };
+        let Some(capacity) = capacity else {
+            // Over budget (or disabled with 0): original cold path, which
+            // re-reads and re-verifies every page on each call.
+            if first_new > 0 || self.resident_kv_budget_bytes > 0 {
+                self.resident_kv_fallbacks += 1;
+            }
+            self.release_resident(layer_index);
+            let (keys, values) = self.committed_page_tensors(&pages)?;
+            let key_refs = keys.iter().collect::<Vec<_>>();
+            let value_refs = values.iter().collect::<Vec<_>>();
+            return Ok((Tensor::cat(&key_refs, 2), Tensor::cat(&value_refs, 2)));
+        };
+        let (new_keys, new_values) = self.committed_page_tensors(&pages[first_new..])?;
+        self.resident_kv_pages_reused += first_new;
+        let mut resident = match self.layers[layer_index].resident.take() {
+            Some(resident) if resident.capacity == capacity => resident,
+            previous => {
+                let options = new_keys
+                    .first()
+                    .map(|tensor| (tensor.kind(), tensor.device()))
+                    .unwrap_or((Kind::BFloat16, Device::Cpu));
+                let shape = [1, self.kv_heads, capacity as i64, self.head_dim];
+                let mut grown = ResidentCommittedKv {
+                    key: Tensor::empty(shape, options),
+                    value: Tensor::empty(shape, options),
+                    tokens: 0,
+                    capacity,
+                    spans: Vec::new(),
+                };
+                self.resident_kv_peak_bytes = self
+                    .resident_kv_peak_bytes
+                    .max(self.resident_kv_bytes + self.resident_bytes_for(capacity));
+                if let Some(previous) = previous {
+                    if previous.tokens > 0 {
+                        let n = previous.tokens as i64;
+                        grown
+                            .key
+                            .narrow(2, 0, n)
+                            .copy_(&previous.key.narrow(2, 0, n));
+                        grown
+                            .value
+                            .narrow(2, 0, n)
+                            .copy_(&previous.value.narrow(2, 0, n));
+                    }
+                    grown.tokens = previous.tokens;
+                    grown.spans = previous.spans;
+                    self.resident_kv_bytes -= self.resident_bytes_for(previous.capacity);
+                }
+                self.resident_kv_bytes += self.resident_bytes_for(capacity);
+                grown
+            }
+        };
+        debug_assert_eq!(resident.tokens, old_tokens);
+        for ((key, value), span) in new_keys.iter().zip(&new_values).zip(&spans[first_new..]) {
+            let offset = resident.tokens as i64;
+            let tokens = span.1 as i64;
+            ensure!(
+                key.size()[2] == tokens && value.size()[2] == tokens,
+                "página residente con geometría inconsistente"
+            );
+            resident.key.narrow(2, offset, tokens).copy_(key);
+            resident.value.narrow(2, offset, tokens).copy_(value);
+            resident.tokens += span.1;
+            resident.spans.push(*span);
+        }
+        self.resident_kv_peak_bytes = self.resident_kv_peak_bytes.max(self.resident_kv_bytes);
+        let history = (
+            resident.key.narrow(2, 0, total_tokens as i64),
+            resident.value.narrow(2, 0, total_tokens as i64),
+        );
+        self.layers[layer_index].resident = Some(resident);
+        Ok(history)
     }
 
     fn begin_multitoken_verification(&mut self) -> Result<()> {
@@ -1413,6 +1592,7 @@ impl TerrsvusionKvCache {
                     .collect(),
                 tail: None,
                 prefill_hot: None,
+                resident: None,
             })
             .collect();
         let mut cache = Self::try_new_with_geometry(
@@ -4953,6 +5133,17 @@ pub struct TorchGeneration {
     pub kv_resident_bytes: usize,
     pub kv_known_attention_scratch_peak_bytes: usize,
     pub kv_prefill_working_peak_bytes: usize,
+    /// Resident verified committed KV (bytes now / peak), pages reused from
+    /// it instead of being re-read from the ColdStore, and calls that fell
+    /// back to the cold re-read path because of the RAM budget.
+    #[serde(default)]
+    pub kv_committed_resident_bytes: usize,
+    #[serde(default)]
+    pub kv_committed_resident_peak_bytes: usize,
+    #[serde(default)]
+    pub kv_committed_resident_pages_reused: usize,
+    #[serde(default)]
+    pub kv_committed_resident_fallbacks: usize,
     pub prefill_axis_nanos: u64,
     pub prefill_hot_concat_nanos: u64,
     pub prefill_certificate_nanos: u64,
@@ -6595,6 +6786,10 @@ impl TorchModelRuntime {
                 kv_resident_bytes: resident,
                 kv_known_attention_scratch_peak_bytes: cache.known_attention_scratch_peak_bytes,
                 kv_prefill_working_peak_bytes: cache.prefill_working_peak_bytes,
+                kv_committed_resident_bytes: cache.resident_kv_bytes,
+                kv_committed_resident_peak_bytes: cache.resident_kv_peak_bytes,
+                kv_committed_resident_pages_reused: cache.resident_kv_pages_reused,
+                kv_committed_resident_fallbacks: cache.resident_kv_fallbacks,
                 prefill_axis_nanos: cache.prefill_axis_nanos,
                 prefill_hot_concat_nanos: cache.prefill_hot_concat_nanos,
                 prefill_certificate_nanos: cache.prefill_certificate_nanos,
@@ -7617,6 +7812,120 @@ mod tests {
         // The mapping stays valid for later reads of the same tensor.
         let again = weights.tensor("w").unwrap();
         assert!(again.equal(&tensor));
+    }
+
+    fn resident_test_page(
+        cache: &mut TerrsvusionKvCache,
+        token_start: usize,
+        tokens: usize,
+        seed: f32,
+    ) -> (Tensor, Tensor) {
+        let elements = 8 * tokens * 128;
+        let key = Tensor::from_slice(
+            &(0..elements)
+                .map(|index| seed + (index % 97) as f32 * 0.125)
+                .collect::<Vec<_>>(),
+        )
+        .view([1, 8, tokens as i64, 128])
+        .to_kind(Kind::BFloat16);
+        let value = (&key * -0.5).to_kind(Kind::BFloat16);
+        let key_bits = TerrsvusionKvCache::bf16_bits(&key).unwrap();
+        let value_bits = TerrsvusionKvCache::bf16_bits(&value).unwrap();
+        let key_bytes = TerrsvusionKvCache::u16_bytes(&key_bits);
+        let value_bytes = TerrsvusionKvCache::u16_bytes(&value_bits);
+        let committed = cache
+            .exact_cold
+            .append_page(
+                PageGeometry {
+                    layer: 0,
+                    token_start: token_start as u64,
+                    tokens: tokens as u32,
+                    heads: 8,
+                    head_dim: 128,
+                    tile: 16,
+                },
+                key_bytes,
+                value_bytes,
+                false,
+            )
+            .unwrap();
+        cache.layers[0].pages.push(TerrsvusionPage {
+            token_start,
+            tokens,
+            certificate: PageAttentionCertificate {
+                regions: Vec::new(),
+                value_abs_max: [0.0; 2],
+                value_abs_max_by_kv_head: Vec::new(),
+                value_abs_max_by_kv_head_dim: Vec::new(),
+            },
+            storage: PageStorage::Cold {
+                exact_id: committed.page_id,
+                immutable: false,
+            },
+        });
+        (key, value)
+    }
+
+    #[test]
+    fn resident_committed_kv_reads_each_cold_page_once_and_matches_cat() {
+        let mut cache = TerrsvusionKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        cache.resident_kv_budget_bytes = 64 << 20;
+        let first = resident_test_page(&mut cache, 0, 16, 1.0);
+        let second = resident_test_page(&mut cache, 16, 16, -3.0);
+        let (key, value) = cache.assemble_committed_layer(0).unwrap();
+        let reads_after_first = cache.exact_cold.stats().reads;
+        assert_eq!(reads_after_first, 4, "K y V de dos páginas, una vez");
+        assert!(key.equal(&Tensor::cat(&[&first.0, &second.0], 2)));
+        assert!(value.equal(&Tensor::cat(&[&first.1, &second.1], 2)));
+        // Same history again: served from RAM, no cold read, identical bytes.
+        let (again_key, again_value) = cache.assemble_committed_layer(0).unwrap();
+        assert_eq!(cache.exact_cold.stats().reads, reads_after_first);
+        assert!(again_key.equal(&key) && again_value.equal(&value));
+        // A new page: only that page is read; earlier views stay intact.
+        let third = resident_test_page(&mut cache, 32, 16, 7.0);
+        let (grown_key, grown_value) = cache.assemble_committed_layer(0).unwrap();
+        assert_eq!(cache.exact_cold.stats().reads, reads_after_first + 2);
+        assert!(grown_key.equal(&Tensor::cat(&[&first.0, &second.0, &third.0], 2)));
+        assert!(grown_value.equal(&Tensor::cat(&[&first.1, &second.1, &third.1], 2)));
+        assert!(key.equal(&Tensor::cat(&[&first.0, &second.0], 2)));
+        assert_eq!(cache.resident_kv_pages_reused, 2 + 2);
+        assert!(cache.resident_kv_bytes > 0);
+        assert!(cache.resident_kv_bytes <= cache.resident_kv_budget_bytes);
+        assert_eq!(cache.resident_kv_fallbacks, 0);
+    }
+
+    #[test]
+    fn resident_committed_kv_respects_budget_and_falls_back_to_cold_reads() {
+        let mut cache = TerrsvusionKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        // One 16-token page fits (64 KiB), two do not.
+        cache.resident_kv_budget_bytes = 2 * 8 * 16 * 128 * 2;
+        let first = resident_test_page(&mut cache, 0, 16, 2.0);
+        let _ = cache.assemble_committed_layer(0).unwrap();
+        assert_eq!(cache.resident_kv_bytes, cache.resident_kv_budget_bytes);
+        let second = resident_test_page(&mut cache, 16, 16, 5.0);
+        let (key, value) = cache.assemble_committed_layer(0).unwrap();
+        assert!(key.equal(&Tensor::cat(&[&first.0, &second.0], 2)));
+        assert!(value.equal(&Tensor::cat(&[&first.1, &second.1], 2)));
+        assert_eq!(cache.resident_kv_fallbacks, 1);
+        assert_eq!(
+            cache.resident_kv_bytes, 0,
+            "el residente se libera al pasarse"
+        );
+        let reads = cache.exact_cold.stats().reads;
+        let _ = cache.assemble_committed_layer(0).unwrap();
+        assert_eq!(
+            cache.exact_cold.stats().reads,
+            reads + 4,
+            "ruta fría original"
+        );
+        // Budget 0 disables residency entirely (original behaviour).
+        let mut disabled = TerrsvusionKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        disabled.resident_kv_budget_bytes = 0;
+        let _ = resident_test_page(&mut disabled, 0, 16, 1.0);
+        let _ = disabled.assemble_committed_layer(0).unwrap();
+        let _ = disabled.assemble_committed_layer(0).unwrap();
+        assert_eq!(disabled.exact_cold.stats().reads, 4);
+        assert_eq!(disabled.resident_kv_fallbacks, 0);
     }
 
     #[test]

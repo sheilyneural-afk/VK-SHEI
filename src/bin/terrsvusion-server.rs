@@ -617,6 +617,10 @@ async fn chat(
             "kv_cache_resident_bytes": result.kv_resident_bytes,
             "kv_known_attention_scratch_peak_bytes": result.kv_known_attention_scratch_peak_bytes,
             "kv_prefill_working_peak_bytes": result.kv_prefill_working_peak_bytes,
+            "kv_committed_resident_bytes": result.kv_committed_resident_bytes,
+            "kv_committed_resident_peak_bytes": result.kv_committed_resident_peak_bytes,
+            "kv_committed_resident_pages_reused": result.kv_committed_resident_pages_reused,
+            "kv_committed_resident_fallbacks": result.kv_committed_resident_fallbacks,
             "prefill_internal_nanos": {
                 "axis": result.prefill_axis_nanos,
                 "hot_concat": result.prefill_hot_concat_nanos,
