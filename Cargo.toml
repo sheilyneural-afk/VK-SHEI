@@ -35,7 +35,9 @@ path = "src/bin/kvslim-native-parity.rs"
 
 [features]
 # Native Rust functionality builds without PyTorch, LibTorch or a GPU.
-default = []
+default = ["native-cpu-backend"]
+# Portable Rust CPU runtime. Model families are selected after config inspection.
+native-cpu-backend = ["model-bundle"]
 # LibTorch CPU runtime and its HTTP/CLI binaries.
 torch-backend = ["dep:tch", "model-bundle", "http-server"]
 # Native accelerator runtime and isolated attention reference. Concrete device
@@ -128,7 +130,7 @@ required-features = ["accelerator-backend", "torch-backend"]
 [[bin]]
 name = "kvslim-adapter-parity"
 path = "src/bin/kvslim-adapter-parity.rs"
-required-features = ["accelerator-backend", "torch-backend"]
+required-features = ["accelerator-backend", "native-cpu-backend"]
 
 [[bin]]
 name = "kvslim-runtime-worker"
