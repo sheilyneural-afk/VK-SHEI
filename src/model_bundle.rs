@@ -23,6 +23,7 @@ pub struct ModelBundle {
     pub spec: ModelSpec,
     pub chat_template: Option<String>,
     pub tensor_names: BTreeSet<String>,
+    pub tensor_shapes: std::collections::BTreeMap<String, Vec<usize>>,
 }
 
 impl ModelBundle {
@@ -36,6 +37,7 @@ impl ModelBundle {
 
         let chat_template = read_chat_template(root)?;
         let mut tensor_names = BTreeSet::new();
+        let mut tensor_shapes = std::collections::BTreeMap::new();
         for shard in &spec.weight_shards {
             let bytes = fs::read(root.join(shard)).with_context(|| {
                 format!("no se pudo leer el shard {}", root.join(shard).display())
@@ -43,6 +45,9 @@ impl ModelBundle {
             let tensors = SafeTensors::deserialize(&bytes)
                 .with_context(|| format!("safetensors inválido: {shard}"))?;
             tensor_names.extend(tensors.names().into_iter().cloned());
+            for name in tensors.names() {
+                tensor_shapes.insert(name.clone(), tensors.tensor(name)?.shape().to_vec());
+            }
         }
         ensure!(!tensor_names.is_empty(), "el bundle no contiene tensores");
 
@@ -51,11 +56,16 @@ impl ModelBundle {
             spec,
             chat_template,
             tensor_names,
+            tensor_shapes,
         })
     }
 
     pub fn has_tensor(&self, name: &str) -> bool {
         self.tensor_names.contains(name)
+    }
+
+    pub fn tensor_shape(&self, name: &str) -> Option<&[usize]> {
+        self.tensor_shapes.get(name).map(Vec::as_slice)
     }
 
     pub fn validate_decoder_layout(&self) -> Result<()> {
