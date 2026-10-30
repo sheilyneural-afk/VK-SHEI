@@ -13,6 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use kvslim::{
+    continuity_contract::ContinuityRequest,
     gpu_canonical_lod::CanonicalGpuLodConfig,
     inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
     model_config::ModelSpec,
@@ -82,6 +83,11 @@ struct ChatRequest {
     document: Option<String>,
     #[serde(default)]
     user: Option<String>,
+    /// Optional provider-neutral continuity capability. The worker validates it
+    /// fail-closed; physical resume/snapshot is only enabled once a backend
+    /// implementation is attached.
+    #[serde(default)]
+    continuity: Option<ContinuityRequest>,
     #[serde(flatten)]
     other: BTreeMap<String, Value>,
 }
@@ -458,6 +464,19 @@ async fn chat(
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let max_tokens = validate(&request, &state.model_id)?;
+    if let Some(continuity) = request.continuity.as_ref() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| invalid(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .as_secs();
+        continuity
+            .validate_at(now)
+            .map_err(|e| invalid(StatusCode::BAD_REQUEST, e.to_string()))?;
+        return Err(invalid(
+            StatusCode::NOT_IMPLEMENTED,
+            "continuity contract is validated, but this worker build has no physical session store attached; refusing to pretend resume/snapshot/release succeeded",
+        ));
+    }
     let response = state
         .worker
         .try_submit(GpuJob {
