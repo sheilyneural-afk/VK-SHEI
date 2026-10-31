@@ -280,5 +280,17 @@ deploy/local-production/scripts/run-local-worker.sh
 deploy/local-production/scripts/run-local-runtime.sh
 ```
 
-Este entorno es local y cerrado, pero todavía no es una certificación de
-producción general: faltan las pruebas físicas y de carga del nodo concreto.
+Para certificar la ruta externa completa (proveedor real, HTTP, snapshot,
+reinicio del worker y restore físico) se usa:
+
+```bash
+KVSLIM_MODEL_DIR="$PWD/deploy/local-production/runtime/models/<digest>" \
+  scripts/e2e-worker-external-restart.sh
+```
+
+El script crea un ColdStore y un SessionStore aislados por ejecución y guarda
+las métricas en `deploy/local-production/runtime/validation/`. En la máquina de
+referencia la ruta pasó el E2E real con restore exacto de 351 bytes; el mismo
+ensayo midió 103,56 s por un token en modo `stream`. Eso certifica la conexión y
+la continuidad, pero no constituye todavía un objetivo de rendimiento de
+producción: falta comparar perfiles y backends en el hardware final.

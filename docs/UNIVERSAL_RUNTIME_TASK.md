@@ -113,6 +113,7 @@ La tarea no se considera terminada hasta que:
 - El proveedor externo mantiene el modelo residente y acepta reconexiones secuenciales del worker; un reinicio HTTP no obliga a recompilar ni a recargar el runtime externo.
 - `SessionCoordinator`: sigue disponible como biblioteca; el worker HTTP usa directamente `SessionStore` en el hilo propietario de la sesión externa para evitar duplicar coordinadores.
 - Caché persistente de binarios compilados: implementada y validada en `opencl_llm`.
-- Reinicio HTTP + restore con un proveedor real: falta ejecutar la prueba E2E completa en la máquina objetivo.
-- Benchmark comparativo completo entre backends: pendiente.
-- `production-gate`: pendiente hasta que pasen el E2E real de reinicio y el benchmark reproducible.
+- Reinicio HTTP + restore con el proveedor real: probado con `scripts/e2e-worker-external-restart.sh`; `REAL_EXTERNAL_RESTART_E2E_OK`, snapshot exacto y restore de 351 bytes tras reiniciar el worker.
+- Benchmark reproducible: implementado en el mismo script; última medición real en modo `stream`: 103,56 s por un token (52,64 s prefill + 50,90 s decode) con el bundle local de 8B.
+- Benchmark comparativo completo entre backends: pendiente; la medición actual demuestra funcionalidad, no rendimiento de producción.
+- `production-gate`: pendiente solo por el benchmark comparativo, paridad de calidad y un objetivo de latencia aceptable para el hardware.
