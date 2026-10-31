@@ -6,7 +6,6 @@
 //! launches replace it with an externally supplied runtime implementation.
 use anyhow::{Context, Result, bail};
 use kvslim::{
-    generic_runtime::{IPC_SCHEMA, IpcOperation},
     ipc_transport::{read_request, write_response},
     runtime_host::RuntimeHost,
 };
