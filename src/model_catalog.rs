@@ -70,7 +70,7 @@ pub mod huggingface {
     fn client() -> Result<Client> {
         Client::builder()
             .timeout(Duration::from_secs(20))
-            .user_agent("KVSLIM-model-catalog/0.4")
+            .user_agent("M-SLIM-model-catalog/0.4")
             .build()
             .context("crear cliente de catálogo")
     }

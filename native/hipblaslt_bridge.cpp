@@ -1,4 +1,4 @@
-// KVSLIM V3: optional BF16 matrix backend for real AMD gfx1103.
+// M-SLIM V3: optional BF16 matrix backend for real AMD gfx1103.
 // C++ HIP kernel interface (the model orchestrator stays in Rust).
 // Only native hipBLASLt gfx1103 is used; HSA_OVERRIDE_GFX_VERSION is refused.
 // Original BF16 weight bytes are uploaded unchanged, no conversion to fp16.

@@ -1,5 +1,5 @@
 {
-  "schema": "kvslim.local_release/v1",
+  "schema": "mslim.local_release/v1",
   "release_id": "REPLACE_WITH_RELEASE_ID",
   "backend": "auto",
   "host": "127.0.0.1",
@@ -7,11 +7,11 @@
   "lod_enabled": true,
   "coldstore_format": "TSKVPG04",
   "binary": {
-    "path": "runtime/bin/kvslim-server",
+    "path": "runtime/bin/mslim-server",
     "sha256": "REPLACE_WITH_SHA256"
   },
   "worker_binary": {
-    "path": "runtime/bin/kvslim-runtime-worker",
+    "path": "runtime/bin/mslim-runtime-worker",
     "sha256": "REPLACE_WITH_SHA256"
   },
   "model": {

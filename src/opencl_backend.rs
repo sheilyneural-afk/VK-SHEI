@@ -59,7 +59,7 @@ impl OpenClBackend {
     pub fn new() -> Result<Self, PortableError> {
         let all =
             get_all_devices(CL_DEVICE_TYPE_GPU).map_err(|e| driver_error("enumerate GPU", e))?;
-        let requested = std::env::var("KVSLIM_OPENCL_DEVICE")
+        let requested = std::env::var("MSLIM_OPENCL_DEVICE")
             .unwrap_or_default()
             .to_ascii_lowercase();
         let device = all
@@ -276,11 +276,11 @@ impl OpenClBackend {
             FloatFormat::F16 => 2u32,
             FloatFormat::F32 => 3u32,
         };
-        let k_qk = Kernel::create(&runtime.program, "kvslim_qk")
+        let k_qk = Kernel::create(&runtime.program, "mslim_qk")
             .map_err(|e| driver_error("QK kernel", e))?;
-        let k_softmax = Kernel::create(&runtime.program, "kvslim_softmax")
+        let k_softmax = Kernel::create(&runtime.program, "mslim_softmax")
             .map_err(|e| driver_error("softmax kernel", e))?;
-        let k_pv = Kernel::create(&runtime.program, "kvslim_pv")
+        let k_pv = Kernel::create(&runtime.program, "mslim_pv")
             .map_err(|e| driver_error("PV kernel", e))?;
 
         // SAFETY: OpenCL command queue is serialized by mutex, kernel

@@ -232,7 +232,7 @@ where
         }
         let (sender, receiver) = mpsc::sync_channel::<Job<Q, R, E>>(queue_capacity);
         thread::Builder::new()
-            .name("kvslim-inference".to_owned())
+            .name("mslim-inference".to_owned())
             .spawn(move || {
                 let mut executor = executor;
                 while let Ok(job) = receiver.recv() {

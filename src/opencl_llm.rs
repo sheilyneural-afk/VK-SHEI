@@ -381,7 +381,7 @@ impl VerifiedGpuPromptReplay {
     ) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
-        hash.update(b"kvslim-gpu-exact-prompt-replay-v1");
+        hash.update(b"mslim-gpu-exact-prompt-replay-v1");
         hash.update((ids.len() as u64).to_le_bytes());
         for id in ids {
             hash.update(id.to_le_bytes());
@@ -505,7 +505,7 @@ impl GpuEngine {
         } else {
             None
         };
-        let filter = std::env::var("KVSLIM_OPENCL_DEVICE")
+        let filter = std::env::var("MSLIM_OPENCL_DEVICE")
             .unwrap_or_default()
             .to_ascii_lowercase();
         let devices =
@@ -542,7 +542,7 @@ impl GpuEngine {
         key_hasher.update(device.driver_version()?.as_bytes());
         key_hasher.update(device.version()?.as_bytes());
         let cache_key = hex::encode(key_hasher.finalize());
-        let cache_root = std::env::var_os("KVSLIM_OPENCL_CACHE_DIR")
+        let cache_root = std::env::var_os("MSLIM_OPENCL_CACHE_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from("deploy/local-production/runtime/artifacts/opencl")
@@ -1746,7 +1746,7 @@ impl OpenClLlm {
         Self::load_internal(model_dir, max_tokens, mode, None, false)
     }
 
-    /// Opt-in canonical CPU KVSLIM index/certification/ColdStore reused
+    /// Opt-in canonical CPU M-SLIM index/certification/ColdStore reused
     /// with real GPU QK and chunked BF16 PV, without altering dense mode.
     pub fn load_with_canonical_lod(
         model_dir: impl AsRef<Path>,
@@ -3172,7 +3172,7 @@ impl OpenClLlm {
         );
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
-        hash.update(b"kvslim-dense-kv-state-v1");
+        hash.update(b"mslim-dense-kv-state-v1");
         hash.update((self.position as u64).to_le_bytes());
         let kvheads = self.spec.attention.kv_heads;
         let dim = self.spec.attention.head_dim;
@@ -3873,7 +3873,7 @@ impl OpenClLlm {
             model_weights_dtype: "BF16".to_owned(),
             gpu_compute: "FP32_accumulators_BF16_intermediate_storage".to_owned(),
             hip_bf16_gemm_active: self.native_hip_enabled(),
-            kvslim_lod_active: false,
+            mslim_lod_active: false,
             canonical_cpu_lod_components_active: self.lod.is_some(),
             canonical_cpu_lod_stats: self.canonical_lod_stats(),
             gpu_kv_capacity_bytes: self.canonical_lod_gpu_kv_capacity_bytes(),
@@ -3951,7 +3951,7 @@ pub struct OpenClGeneration {
     pub model_weights_dtype: String,
     pub gpu_compute: String,
     pub hip_bf16_gemm_active: bool,
-    pub kvslim_lod_active: bool,
+    pub mslim_lod_active: bool,
     pub canonical_cpu_lod_components_active: bool,
     pub canonical_cpu_lod_stats: Option<CanonicalGpuLodStats>,
     pub gpu_kv_capacity_bytes: usize,
@@ -4102,7 +4102,7 @@ mod tests {
         #[ignore = "requires a configured local checkpoint"]
         fn local_checkpoint_shards_are_complete() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
             let spec = ModelSpec::inspect(&model).unwrap();
             assert!(!spec.weight_shards.is_empty());
@@ -4116,7 +4116,7 @@ mod tests {
         #[ignore = "requires actual physical OpenCL GPU and a local configured-model BF16 checkpoint"]
         fn gpu_actual_full_minicpm5_hola_and_independent_session_reset() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -4140,7 +4140,7 @@ mod tests {
         #[ignore = "requires physical GPU and real configured-model checkpoint"]
         fn gpu_actual_canonical_lod_zero_matches_dense_gpu_outputs() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -4185,7 +4185,7 @@ mod tests {
         #[ignore = "requires real Radeon GPU and configured-model BF16 checkpoint"]
         fn gpu_actual_parallel_prefill_dense_matches_sequential_gpu() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -4221,7 +4221,7 @@ mod tests {
         #[ignore = "requires real Radeon GPU and configured-model BF16 checkpoint"]
         fn gpu_actual_parallel_prefill_lod_matches_sequential_and_reduces_pages() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -4277,7 +4277,7 @@ mod tests {
         #[ignore = "requires real Radeon GPU + configured-model BF16 checkpoint; ~45s"]
         fn gpu_actual_three_batch_prefill_375_matches_gpu_dense_bf16_kv_and_lod() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -4349,7 +4349,7 @@ mod tests {
         #[ignore = "requires actual AMD OpenCL GPU; compares 375-token prefill and 16 logits"]
         fn gpu_actual_exact_hot_v_and_weight_reuse_matches_original_gpu_dense() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
             let tok = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -4427,7 +4427,7 @@ mod tests {
         #[ignore = "actual AMD Radeon needed: validates optimized OpenCL 375+16"]
         fn gpu_actual_reuse8_hot_v_unroll4_bit_exact_vs_dense_reference() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tok = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -4491,7 +4491,7 @@ mod tests {
         fn gpu_actual_deferred_bf16_cold_commit_matches_immediate_and_indexes_every_token() {
             use super::*;
             use sha2::{Digest, Sha256};
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -4586,7 +4586,7 @@ mod tests {
         #[ignore = "requires real AMD GPU and configured-model BF16 checkpoint"]
         fn gpu_actual_deferred_cold_falls_back_when_hot_v_capacity_insufficient() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let mut gpu = OpenClLlm::load_with_canonical_lod(
                 &model,
@@ -4616,7 +4616,7 @@ mod tests {
         fn gpu_actual_fused_qkv_and_swiglu_identical_logits_and_exact_kv() {
             use super::*;
             use sha2::{Digest, Sha256};
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -5111,7 +5111,7 @@ mod tests {
         #[ignore = "requires physical AMD Radeon and configured-model BF16 checkpoint"]
         fn gpu_actual_micro_full_model_falls_back_when_uncertified() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let mut gpu = OpenClLlm::load_with_canonical_lod(
                 &model,
@@ -5147,7 +5147,7 @@ mod tests {
         #[ignore = "requires physical Radeon Phoenix GPU and exact configured-model BF16 checkpoint"]
         fn gpu_actual_micro_hot_model_375_bitwise_dense_fallback_and_cold_integrity() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tok = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -5408,7 +5408,7 @@ mod tests {
         fn gpu_actual_fused_exact_lod_375_logits_and_cold_kv_parity() {
             use super::*;
             use sha2::{Digest, Sha256};
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -5529,7 +5529,7 @@ mod tests {
         #[ignore = "requires physical AMD Phoenix OpenCL and original configured-model BF16 checkpoint"]
         fn gpu_actual_fused_exact_dense_15_full_logits_and_kv_sha() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -5577,7 +5577,7 @@ mod tests {
         fn gpu_actual_prefill_register_unrolling_precision_and_speed() {
             use super::*;
             use std::collections::BTreeMap;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -5658,7 +5658,7 @@ mod tests {
         fn gpu_actual_prefill_virtual32_64_128_bit_exact_and_speed() {
             use super::*;
             use std::collections::BTreeMap;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -5726,7 +5726,7 @@ mod tests {
         fn gpu_actual_verified_prompt_replay_restores_exact_bf16_logits_and_kv() {
             use super::*;
             use sha2::{Digest, Sha256};
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
             let tok = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -5872,7 +5872,7 @@ mod tests {
         fn gpu_actual_verified_shared_prefix_375_vs_full_bf16_kv_and_logits() {
             use super::*;
             use sha2::{Digest, Sha256};
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".to_owned());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -6177,7 +6177,7 @@ mod tests {
         fn gpu_actual_fused_prefill_qkv_swiglu_375_full_logits_and_cold_kv_sha() {
             use super::*;
             use sha2::{Digest, Sha256};
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tok = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -6215,7 +6215,7 @@ mod tests {
                 let token_bytes = engine.spec.attention.kv_elements_per_token() * 2;
                 let locations = (0..n).collect::<Vec<_>>();
                 let mut sha = Sha256::new();
-                sha.update(b"KVSLIM-BF16-KV-exact-fused-prefill-v1");
+                sha.update(b"M-SLIM-BF16-KV-exact-fused-prefill-v1");
                 for layer in 0..engine.spec.num_hidden_layers {
                     let k = engine
                         .engine
@@ -6354,7 +6354,7 @@ mod tests {
             use super::*;
             use sha2::{Digest, Sha256};
             use std::collections::BTreeMap;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let tokenizer = tokenizers::Tokenizer::from_file(
                 std::path::Path::new(&model).join("tokenizer.json"),
@@ -6389,7 +6389,7 @@ mod tests {
             model.set_exact_hot_fused_attention(true).unwrap();
             let sha = |m: &mut OpenClLlm| {
                 let mut h = Sha256::new();
-                h.update(b"KVSLIM-GPU-prefill-tile-physical-KV-v1");
+                h.update(b"M-SLIM-GPU-prefill-tile-physical-KV-v1");
                 let token_bytes = m.spec.attention.kv_elements_per_token() * 2;
                 let positions = (0..m.position).collect::<Vec<_>>();
                 for layer in 0..m.spec.num_hidden_layers {
@@ -6498,7 +6498,7 @@ mod tests {
         #[ignore = "requires a physical OpenCL GPU and configured-model BF16 checkpoint"]
         fn gpu_actual_persistent_coldstore_restores_without_token_replay() {
             use super::*;
-            let model = std::env::var("KVSLIM_TEST_MODEL")
+            let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let directory = tempfile::tempdir().unwrap();
             let config = CanonicalGpuLodConfig {

@@ -1,37 +1,37 @@
 [package]
-name = "kvslim"
+name = "mslim"
 version = "0.4.0"
 edition = "2024"
 autobins = false
 
 [workspace]
-members = ["crates/kvslim-adapter-api"]
+members = ["crates/mslim-adapter-api"]
 resolver = "3"
 
 [lib]
-name = "kvslim"
+name = "mslim"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [[bin]]
-name = "kvslim-cpu-worker"
+name = "mslim-cpu-worker"
 required-features = ["torch-backend"]
-path = "src/bin/kvslim-server.rs"
+path = "src/bin/mslim-server.rs"
 
 [[bin]]
-name = "kvslim-long-context"
+name = "mslim-long-context"
 required-features = ["torch-backend"]
-path = "src/bin/kvslim-long-context.rs"
+path = "src/bin/mslim-long-context.rs"
 
 [[bin]]
-name = "kvslim-chat"
+name = "mslim-chat"
 required-features = ["torch-backend"]
-path = "src/bin/kvslim-chat.rs"
+path = "src/bin/mslim-chat.rs"
 
 [[bin]]
-name = "kvslim-native-parity"
+name = "mslim-native-parity"
 required-features = ["torch-backend"]
-path = "src/bin/kvslim-native-parity.rs"
+path = "src/bin/mslim-native-parity.rs"
 
 [features]
 # Native Rust functionality builds without PyTorch, LibTorch or a GPU.
@@ -59,116 +59,116 @@ hip-backend = ["accelerator-backend", "dep:libloading"]
 http-server = ["dep:axum", "dep:tokio"]
 
 [[bin]]
-name = "kvslim-inspect"
-path = "src/bin/kvslim-inspect.rs"
+name = "mslim-inspect"
+path = "src/bin/mslim-inspect.rs"
 
 [[bin]]
-name = "kvslim-adapters"
-path = "src/bin/kvslim-adapters.rs"
+name = "mslim-adapters"
+path = "src/bin/mslim-adapters.rs"
 
 [[bin]]
-name = "kvslim-autoconfigure"
-path = "src/bin/kvslim-autoconfigure.rs"
+name = "mslim-autoconfigure"
+path = "src/bin/mslim-autoconfigure.rs"
 
 [[bin]]
-name = "kvslim-calibrate"
-path = "src/bin/kvslim-calibrate.rs"
+name = "mslim-calibrate"
+path = "src/bin/mslim-calibrate.rs"
 
 [[bin]]
-name = "kvslim-certify"
-path = "src/bin/kvslim-certify.rs"
+name = "mslim-certify"
+path = "src/bin/mslim-certify.rs"
 
 [[bin]]
-name = "kvslim-models"
-path = "src/bin/kvslim-models.rs"
+name = "mslim-models"
+path = "src/bin/mslim-models.rs"
 
 [[bin]]
-name = "kvslim-import-model"
-path = "src/bin/kvslim-import-model.rs"
+name = "mslim-import-model"
+path = "src/bin/mslim-import-model.rs"
 required-features = ["model-import"]
 
 [[bin]]
-name = "kvslim-catalog"
-path = "src/bin/kvslim-catalog.rs"
+name = "mslim-catalog"
+path = "src/bin/mslim-catalog.rs"
 required-features = ["model-catalog"]
 
 [[bin]]
-name = "kvslim-recommend"
-path = "src/bin/kvslim-recommend.rs"
+name = "mslim-recommend"
+path = "src/bin/mslim-recommend.rs"
 required-features = ["model-catalog"]
 
 [[bin]]
-name = "kvslim-auth"
-path = "src/bin/kvslim-auth.rs"
+name = "mslim-auth"
+path = "src/bin/mslim-auth.rs"
 required-features = ["model-catalog"]
 
 [[bin]]
-name = "kvslim-download-model"
-path = "src/bin/kvslim-download-model.rs"
+name = "mslim-download-model"
+path = "src/bin/mslim-download-model.rs"
 required-features = ["model-catalog"]
 
 [[bin]]
-name = "kvslim-validate-model"
-path = "src/bin/kvslim-validate-model.rs"
+name = "mslim-validate-model"
+path = "src/bin/mslim-validate-model.rs"
 required-features = ["model-bundle"]
 
 [[bin]]
-name = "kvslim-attention-bench"
-path = "src/bin/kvslim-attention-bench.rs"
+name = "mslim-attention-bench"
+path = "src/bin/mslim-attention-bench.rs"
 required-features = ["accelerator-backend"]
 
 [[bin]]
-name = "kvslim-runtime-cli"
-path = "src/bin/kvslim-runtime-cli.rs"
+name = "mslim-runtime-cli"
+path = "src/bin/mslim-runtime-cli.rs"
 required-features = ["accelerator-backend"]
 
 [[bin]]
-name = "kvslim-runtime-compare"
-path = "src/bin/kvslim-runtime-compare.rs"
+name = "mslim-runtime-compare"
+path = "src/bin/mslim-runtime-compare.rs"
 required-features = ["accelerator-backend", "torch-backend"]
 
 [[bin]]
-name = "kvslim-adapter-parity"
-path = "src/bin/kvslim-adapter-parity.rs"
+name = "mslim-adapter-parity"
+path = "src/bin/mslim-adapter-parity.rs"
 required-features = ["accelerator-backend", "native-cpu-backend"]
 
 [[bin]]
-name = "kvslim-runtime-worker"
-path = "src/bin/kvslim-runtime-worker.rs"
+name = "mslim-runtime-worker"
+path = "src/bin/mslim-runtime-worker.rs"
 required-features = ["accelerator-backend"]
 
 [[bin]]
-name = "kvslim-runtime-host"
-path = "src/bin/kvslim-runtime-host.rs"
+name = "mslim-runtime-host"
+path = "src/bin/mslim-runtime-host.rs"
 
 [[bin]]
-name = "kvslim-runtime-proxy"
-path = "src/bin/kvslim-runtime-proxy.rs"
+name = "mslim-runtime-proxy"
+path = "src/bin/mslim-runtime-proxy.rs"
 required-features = ["http-server"]
 
 [[bin]]
-name = "kvslim-runtime-provider"
-path = "src/bin/kvslim-runtime-provider.rs"
+name = "mslim-runtime-provider"
+path = "src/bin/mslim-runtime-provider.rs"
 required-features = ["accelerator-backend"]
 
 [[bin]]
-name = "kvslim-server"
-path = "src/bin/kvslim-gateway.rs"
+name = "mslim-server"
+path = "src/bin/mslim-gateway.rs"
 required-features = ["unified-router"]
 
 [[bin]]
-name = "kvslim-install-release"
-path = "src/bin/kvslim-install-release.rs"
+name = "mslim-install-release"
+path = "src/bin/mslim-install-release.rs"
 required-features = ["release-installer"]
 
 [[bin]]
-name = "kvslim-document-ask"
-path = "src/bin/kvslim-document-ask.rs"
+name = "mslim-document-ask"
+path = "src/bin/mslim-document-ask.rs"
 required-features = ["torch-backend"]
 
 [[bin]]
-name = "kvslim-document"
-path = "src/bin/kvslim-document.rs"
+name = "mslim-document"
+path = "src/bin/mslim-document.rs"
 
 [dependencies]
 anyhow = "1"
@@ -184,7 +184,7 @@ tokenizers = { version = "0.22", optional = true }
 minijinja = { version = "2", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"], optional = true }
-kvslim-adapter-api = { path = "crates/kvslim-adapter-api" }
+mslim-adapter-api = { path = "crates/mslim-adapter-api" }
 tch = { version = "0.18", optional = true }
 opencl3 = { version = "0.12.4", optional = true }
 libloading = {version = "0.8.9", optional = true}

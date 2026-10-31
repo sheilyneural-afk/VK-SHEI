@@ -348,7 +348,7 @@ impl DenseKvCache {
 
     fn state_digest(&self) -> Result<String> {
         let mut digest = Sha256::new();
-        digest.update(b"kvslim-dense-kv-state-v1");
+        digest.update(b"mslim-dense-kv-state-v1");
         digest.update((self.sequence_tokens as u64).to_le_bytes());
         for (layer, state) in self.layers.iter().enumerate() {
             let (key, value) = state
@@ -569,7 +569,7 @@ impl AttentionCache for DenseKvCache {
     }
 }
 
-struct KVSLIMPage {
+struct MSlimPage {
     token_start: usize,
     tokens: usize,
     certificate: PageAttentionCertificate,
@@ -659,7 +659,7 @@ struct PersistentPrefixManifest {
 
 const PREFIX_CACHE_SCHEMA: u32 = 1;
 
-impl Clone for KVSLIMPage {
+impl Clone for MSlimPage {
     fn clone(&self) -> Self {
         Self {
             token_start: self.token_start,
@@ -687,8 +687,8 @@ impl Clone for KVSLIMPage {
     }
 }
 
-struct KVSLIMLayer {
-    pages: Vec<KVSLIMPage>,
+struct MSlimLayer {
+    pages: Vec<MSlimPage>,
     tail: Option<(Tensor, Tensor)>,
     prefill_hot: Option<(Tensor, Tensor)>,
     /// Verified resident copy of `pages`, see [`ResidentCommittedKv`].
@@ -711,12 +711,12 @@ struct ResidentCommittedKv {
     spans: Vec<(usize, usize)>,
 }
 
-/// Default RAM budget for resident committed KV: `KVSLIM_RESIDENT_KV_BYTES`
+/// Default RAM budget for resident committed KV: `MSLIM_RESIDENT_KV_BYTES`
 /// when set (0 disables it and restores the cold re-read path), otherwise a
 /// third of physical memory capped at 24 GiB (Llama 3.1 8B at 111k tokens
 /// needs ~13.6 GiB).
 fn default_resident_kv_budget_bytes() -> usize {
-    if let Ok(raw) = std::env::var("KVSLIM_RESIDENT_KV_BYTES")
+    if let Ok(raw) = std::env::var("MSLIM_RESIDENT_KV_BYTES")
         && let Ok(bytes) = raw.trim().parse::<usize>()
     {
         return bytes;
@@ -739,8 +739,8 @@ fn default_resident_kv_budget_bytes() -> usize {
         .map_or(cap, |kib| (kib.saturating_mul(1024) / 3).min(cap))
 }
 
-pub struct KVSLIMKvCache {
-    layers: Vec<KVSLIMLayer>,
+pub struct MSlimKvCache {
+    layers: Vec<MSlimLayer>,
     kv_heads: i64,
     head_dim: i64,
     query_heads: i64,
@@ -840,7 +840,7 @@ pub struct KVSLIMKvCache {
     suffix_against_committed: bool,
 }
 
-impl KVSLIMKvCache {
+impl MSlimKvCache {
     fn conversion_worker(first_sequence: u64) -> Result<ConversionWorker<PreparedPage>> {
         ConversionWorker::spawn_from(16, 1, first_sequence, move |job| {
             let geometry = PageGeometry {
@@ -884,7 +884,7 @@ impl KVSLIMKvCache {
                 && query_heads > 0
                 && head_dim > 0
                 && query_heads % kv_heads == 0,
-            "geometría KV KVSLIM inválida"
+            "geometría KV M-SLIM inválida"
         );
         let cold_directory = tempfile::tempdir().context("directorio KV frío")?;
         let exact_cold = ColdStore::create(cold_directory.path().join("pages-exact.kv"), 0)
@@ -894,7 +894,7 @@ impl KVSLIMKvCache {
         let axis_heads = usize::try_from(kv_heads).context("cabezas KV")?;
         Ok(Self {
             layers: (0..n_layers)
-                .map(|_| KVSLIMLayer {
+                .map(|_| MSlimLayer {
                     pages: Vec::new(),
                     tail: None,
                     prefill_hot: None,
@@ -1040,7 +1040,7 @@ impl KVSLIMKvCache {
     /// Exact BF16 K/V tensors of `pages`, reading (and verifying) cold pages.
     fn committed_page_tensors(
         &mut self,
-        pages: &[KVSLIMPage],
+        pages: &[MSlimPage],
     ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
         let mut keys = Vec::with_capacity(pages.len());
         let mut values = Vec::with_capacity(pages.len());
@@ -1250,7 +1250,7 @@ impl KVSLIMKvCache {
     fn logical_state_digest(&mut self) -> Result<String> {
         self.collect_conversions()?;
         let mut digest = Sha256::new();
-        digest.update(b"kvslim-dense-kv-state-v1");
+        digest.update(b"mslim-dense-kv-state-v1");
         digest.update((self.sequence_tokens as u64).to_le_bytes());
         let heads = usize::try_from(self.kv_heads).context("invalid KV heads for digest")?;
         let dimension = usize::try_from(self.head_dim).context("invalid KV head dimension")?;
@@ -1389,7 +1389,7 @@ impl KVSLIMKvCache {
         let mut copied_bytes = 0_u64;
         if !destination.is_dir() {
             let staging = tempfile::Builder::new()
-                .prefix(".kvslim-prefix-")
+                .prefix(".mslim-prefix-")
                 .tempdir_in(cache_root)
                 .context("staging de prefijo persistente")?;
             let published_pages = staging.path().join("pages-exact.kv");
@@ -1569,10 +1569,10 @@ impl KVSLIMKvCache {
         let layers = manifest
             .layers
             .into_iter()
-            .map(|pages| KVSLIMLayer {
+            .map(|pages| MSlimLayer {
                 pages: pages
                     .into_iter()
-                    .map(|page| KVSLIMPage {
+                    .map(|page| MSlimPage {
                         token_start: page.token_start,
                         tokens: page.tokens,
                         certificate: page.certificate,
@@ -2038,7 +2038,7 @@ impl KVSLIMKvCache {
             )
             .map_err(anyhow::Error::msg)?;
             let sequence = self.conversion.submit(job).map_err(anyhow::Error::msg)?;
-            let page = KVSLIMPage {
+            let page = MSlimPage {
                 token_start,
                 tokens,
                 certificate,
@@ -2189,7 +2189,7 @@ impl KVSLIMKvCache {
     fn llama_regional_attention(
         &mut self,
         query: &Tensor,
-        pages: &[KVSLIMPage],
+        pages: &[MSlimPage],
         tail: Option<&(Tensor, Tensor)>,
         sequence_tokens: usize,
         tolerance: f64,
@@ -2532,7 +2532,7 @@ impl KVSLIMKvCache {
         &mut self,
         layer_index: usize,
         query: &Tensor,
-        pages: &[KVSLIMPage],
+        pages: &[MSlimPage],
         tail: Option<&(Tensor, Tensor)>,
         preassembled_key: Option<&Tensor>,
         precomputed_scores: Option<&Tensor>,
@@ -3146,7 +3146,7 @@ impl KVSLIMKvCache {
     fn llama_dense_tile_attention(
         &mut self,
         query: &Tensor,
-        pages: &[KVSLIMPage],
+        pages: &[MSlimPage],
         existing_tail: Option<&(Tensor, Tensor)>,
         preassembled_key: &Tensor,
         new_value: &Tensor,
@@ -3205,7 +3205,7 @@ impl KVSLIMKvCache {
 
     fn llama_dense_tile_key(
         &mut self,
-        pages: &[KVSLIMPage],
+        pages: &[MSlimPage],
         existing_tail: Option<&(Tensor, Tensor)>,
         new_key: &Tensor,
     ) -> Result<Tensor> {
@@ -3246,7 +3246,7 @@ impl KVSLIMKvCache {
     fn llama_dense_single_query_attention(
         &mut self,
         query: &Tensor,
-        pages: &[KVSLIMPage],
+        pages: &[MSlimPage],
         tail: Option<&(Tensor, Tensor)>,
         sequence_tokens: usize,
     ) -> Result<Tensor> {
@@ -3303,7 +3303,7 @@ impl KVSLIMKvCache {
         &mut self,
         layer_index: usize,
         query: &Tensor,
-        pages: &[KVSLIMPage],
+        pages: &[MSlimPage],
         tail: Option<&(Tensor, Tensor)>,
         tolerance: f64,
     ) -> Result<Tensor> {
@@ -3813,7 +3813,7 @@ impl KVSLIMKvCache {
     fn querywise_dense_cold_attention(
         &mut self,
         query: &Tensor,
-        pages: &[KVSLIMPage],
+        pages: &[MSlimPage],
         existing_tail: Option<&(Tensor, Tensor)>,
         new_key: &Tensor,
         new_value: &Tensor,
@@ -3950,7 +3950,7 @@ impl KVSLIMKvCache {
 }
 
 fn state_score_uppers(
-    pages: &[KVSLIMPage],
+    pages: &[MSlimPage],
     query_values: &[f32],
     scale: f64,
 ) -> BTreeMap<usize, [f64; 16]> {
@@ -3963,7 +3963,7 @@ fn state_score_uppers(
 /// unread under `region_tolerance` (renormalized-omission bound). Nothing is
 /// skipped; geometry it cannot account for completely yields `Ok(0)`.
 fn llama_regional_k_tokens_skippable(
-    pages: &[KVSLIMPage],
+    pages: &[MSlimPage],
     regional_uppers: &BTreeMap<usize, [f64; 32]>,
     scores_by_head: &[Vec<f64>],
     tail_value_max: [f64; 8],
@@ -4067,7 +4067,7 @@ fn llama_regional_k_tokens_skippable(
 }
 
 fn state_score_uppers_generic<const Q: usize, const KV: usize>(
-    pages: &[KVSLIMPage],
+    pages: &[MSlimPage],
     query_values: &[f32],
     scale: f64,
 ) -> BTreeMap<usize, [f64; Q]> {
@@ -4701,7 +4701,7 @@ impl<const Q: usize, const KV: usize> IncrementalRegionCertificate<Q, KV> {
     }
 }
 
-impl AttentionCache for KVSLIMKvCache {
+impl AttentionCache for MSlimKvCache {
     fn sequence_tokens(&self) -> usize {
         self.sequence_tokens
     }
@@ -4941,7 +4941,7 @@ impl AttentionCache for KVSLIMKvCache {
                         .min(u128::from(u64::MAX)) as u64,
                 );
             }
-            sealed.push(KVSLIMPage {
+            sealed.push(MSlimPage {
                 token_start,
                 tokens: storage_frame_tokens,
                 certificate,
@@ -5112,8 +5112,8 @@ impl DecoderModel {
         self.eos.contains(&token)
     }
 
-    fn kvslim_cache(&self, storage_frame_tokens: usize) -> Result<KVSLIMKvCache> {
-        KVSLIMKvCache::try_new_with_geometry(
+    fn mslim_cache(&self, storage_frame_tokens: usize) -> Result<MSlimKvCache> {
+        MSlimKvCache::try_new_with_geometry(
             storage_frame_tokens,
             self.layers.len(),
             self.kv_heads,
@@ -5389,11 +5389,11 @@ impl From<DenseGeneration> for TorchGeneration {
 pub struct NativeStepDivergence {
     pub step: usize,
     pub dense_argmax: u32,
-    pub kvslim_argmax: u32,
+    pub mslim_argmax: u32,
     pub dense_logit_at_dense_argmax: f32,
-    pub kvslim_logit_at_dense_argmax: f32,
-    pub dense_logit_at_kvslim_argmax: f32,
-    pub kvslim_logit_at_kvslim_argmax: f32,
+    pub mslim_logit_at_dense_argmax: f32,
+    pub dense_logit_at_mslim_argmax: f32,
+    pub mslim_logit_at_mslim_argmax: f32,
     pub linf: f64,
 }
 
@@ -5407,17 +5407,17 @@ pub struct NativeInferenceParity {
     pub first_logit_step_above_1e3: Option<usize>,
     pub kv_sha256_equal: bool,
     pub dense_kv_sha256: String,
-    pub kvslim_kv_sha256: String,
+    pub mslim_kv_sha256: String,
     pub dense_tokens: Vec<u32>,
-    pub kvslim_tokens: Vec<u32>,
+    pub mslim_tokens: Vec<u32>,
     pub dense_text: String,
-    pub kvslim_text: String,
+    pub mslim_text: String,
     pub dense_prefill_seconds: f64,
-    pub kvslim_prefill_seconds: f64,
+    pub mslim_prefill_seconds: f64,
     pub certified_v_tokens_omitted: usize,
-    pub kvslim_kv_resident_bytes: usize,
+    pub mslim_kv_resident_bytes: usize,
     pub dense_kv_bf16_bytes: usize,
-    pub kvslim_kv_bf16_reference_bytes: usize,
+    pub mslim_kv_bf16_reference_bytes: usize,
     pub prompt_authority: &'static str,
     pub divergence: Option<NativeStepDivergence>,
 }
@@ -5439,21 +5439,21 @@ fn argmax_logit(logits: &[f32]) -> u32 {
         .unwrap_or(0)
 }
 
-fn first_step_divergence(step: usize, dense: &[f32], kvslim: &[f32]) -> NativeStepDivergence {
+fn first_step_divergence(step: usize, dense: &[f32], mslim: &[f32]) -> NativeStepDivergence {
     let dense_argmax = argmax_logit(dense);
-    let kvslim_argmax = argmax_logit(kvslim);
+    let mslim_argmax = argmax_logit(mslim);
     let mut linf = 0.0_f64;
-    for (left, right) in dense.iter().zip(kvslim) {
+    for (left, right) in dense.iter().zip(mslim) {
         linf = linf.max((*left as f64 - *right as f64).abs());
     }
     NativeStepDivergence {
         step,
         dense_argmax,
-        kvslim_argmax,
+        mslim_argmax,
         dense_logit_at_dense_argmax: dense[dense_argmax as usize],
-        kvslim_logit_at_dense_argmax: kvslim[dense_argmax as usize],
-        dense_logit_at_kvslim_argmax: dense[kvslim_argmax as usize],
-        kvslim_logit_at_kvslim_argmax: kvslim[kvslim_argmax as usize],
+        mslim_logit_at_dense_argmax: mslim[dense_argmax as usize],
+        dense_logit_at_mslim_argmax: dense[mslim_argmax as usize],
+        mslim_logit_at_mslim_argmax: mslim[mslim_argmax as usize],
         linf,
     }
 }
@@ -5634,7 +5634,7 @@ impl TorchModelRuntime {
         tokenizer_path: &Path,
     ) -> Result<String> {
         let mut digest = Sha256::new();
-        digest.update(b"kvslim-runtime-id-shards-v1");
+        digest.update(b"mslim-runtime-id-shards-v1");
         for relative in ["config.json", "tokenizer.json"] {
             let path = if relative == "tokenizer.json" {
                 tokenizer_path.to_path_buf()
@@ -5665,7 +5665,7 @@ impl TorchModelRuntime {
 
     fn prefix_digest(&self, prefix_ids: &[i64], storage_frame_tokens: usize) -> String {
         let mut digest = Sha256::new();
-        digest.update(b"kvslim-prefix-v1");
+        digest.update(b"mslim-prefix-v1");
         digest.update(self.model_identity.as_bytes());
         digest.update((storage_frame_tokens as u64).to_le_bytes());
         for token in prefix_ids {
@@ -5857,7 +5857,7 @@ impl TorchModelRuntime {
             .collect())
     }
 
-    /// Official configured-model chat template + dense BF16 KV. No KVSLIM cache,
+    /// Official configured-model chat template + dense BF16 KV. No M-SLIM cache,
     /// no default system, no Spanish/document rewrites.
     pub fn generate_messages_virgin_dense(
         &self,
@@ -5882,7 +5882,7 @@ impl TorchModelRuntime {
     }
 
     /// Dense BF16 attention on the same chat template, tokenizer and greedy
-    /// decoding as `generate_messages`. Isolates model errors from KVSLIM.
+    /// decoding as `generate_messages`. Isolates model errors from M-SLIM.
     pub fn generate_messages_dense(
         &self,
         messages: &[TorchChatMessage],
@@ -6318,7 +6318,7 @@ impl TorchModelRuntime {
             .then(|| self.prefix_digest(&prompt_ids[..prefix_tokens], storage_frame_tokens));
         let lookup_started = std::time::Instant::now();
         let restored = match (&self.prefix_cache_dir, &prefix_key) {
-            (Some(root), Some(key)) => KVSLIMKvCache::restore_prefix_geometry(
+            (Some(root), Some(key)) => MSlimKvCache::restore_prefix_geometry(
                 root,
                 key,
                 &self.model_identity,
@@ -6332,7 +6332,7 @@ impl TorchModelRuntime {
         };
         let prefix_cache_lookup_seconds = lookup_started.elapsed().as_secs_f64();
         let prefix_cache_hit = restored.is_some();
-        let mut cache = restored.unwrap_or(self.model.kvslim_cache(storage_frame_tokens)?);
+        let mut cache = restored.unwrap_or(self.model.mslim_cache(storage_frame_tokens)?);
         cache.exact_oracle_enabled = exact_oracle_enabled || shadow_metrics_enabled;
         cache.shadow_metrics = shadow_metrics_enabled.then(ShadowMetrics::default);
         cache.applied_mass_tolerance = applied_mass_tolerance;
@@ -7002,11 +7002,11 @@ impl TorchModelRuntime {
         })
     }
 
-    /// The same reference-drafter experiment on KVSLIM's real cold KV
+    /// The same reference-drafter experiment on M-SLIM's real cold KV
     /// path. Candidate blocks use exact length-one querywise SDPA while each
     /// cold page is materialized once per layer and block. Provisional K/V is
     /// kept outside cold storage until acceptance, enabling exact rollback.
-    pub fn generate_reference_speculative_kvslim(
+    pub fn generate_reference_speculative_mslim(
         &self,
         prompt_ids: &[i64],
         max_tokens: usize,
@@ -7016,7 +7016,7 @@ impl TorchModelRuntime {
         ensure!((1..=512).contains(&max_tokens), "max_tokens fuera de rango");
         ensure!(!prompt_ids.is_empty(), "prompt sin tokens");
         ensure!(chunk_size > 0, "chunk_size debe ser positivo");
-        let mut cache = self.model.kvslim_cache(storage_frame_tokens)?;
+        let mut cache = self.model.mslim_cache(storage_frame_tokens)?;
         let mut generated = Vec::<u32>::with_capacity(max_tokens);
         let mut prefill_seconds = 0.0_f64;
         let mut decode_seconds = 0.0_f64;
@@ -7150,13 +7150,13 @@ impl TorchModelRuntime {
             exact_k_tokens_scanned: Some(cache.exact_k_tokens_scanned),
             exact_v_tokens_materialized: Some(cache.exact_v_tokens_materialized),
             exact_cold_reads: Some(exact_cold_reads),
-            authority: "kvslim_cold_bf16_target_querywise_exact",
+            authority: "mslim_cold_bf16_target_querywise_exact",
             scope: "benchmark_only_reference_drafter_no_server_commit",
         })
     }
 
     /// Dense BF16 control using the same model, tokenizer, prompt chunks and
-    /// greedy decoding as KVSLIM. This is a benchmark oracle, not a
+    /// greedy decoding as M-SLIM. This is a benchmark oracle, not a
     /// second serving route.
     /// Optional GPU validation helper. Runs the original dense BF16 model
     /// with the exact same prompt tokens and already-generated autoregressive
@@ -7272,7 +7272,7 @@ impl TorchModelRuntime {
         })
     }
 
-    /// Same prompt token ids, greedy argmax, KVSLIM KV vs dense BF16 KV.
+    /// Same prompt token ids, greedy argmax, M-SLIM KV vs dense BF16 KV.
     /// If greedy tokens diverge, inspect logits and KV hashes at the first step.
     pub fn compare_native_inference(
         &self,
@@ -7280,7 +7280,7 @@ impl TorchModelRuntime {
         max_tokens: usize,
     ) -> Result<NativeInferenceParity> {
         let dense = self.generate_token_ids_dense(prompt_ids, max_tokens, 512)?;
-        let kvslim = self
+        let mslim = self
             .generate_token_ids_instrumented(
                 prompt_ids,
                 max_tokens,
@@ -7293,18 +7293,18 @@ impl TorchModelRuntime {
                 None,
             )?
             .0;
-        let steps = dense.step_logits.len().min(kvslim.step_logits.len());
+        let steps = dense.step_logits.len().min(mslim.step_logits.len());
         let mut max_abs_logit_difference = 0.0_f64;
         let mut first_logit_step_above_1e3 = None;
         for index in 0..steps {
             ensure!(
-                dense.step_logits[index].len() == kvslim.step_logits[index].len(),
-                "logits nativos y KVSLIM con vocabulario distinto"
+                dense.step_logits[index].len() == mslim.step_logits[index].len(),
+                "logits nativos y M-SLIM con vocabulario distinto"
             );
             let mut step_linf = 0.0_f64;
             for (left, right) in dense.step_logits[index]
                 .iter()
-                .zip(&kvslim.step_logits[index])
+                .zip(&mslim.step_logits[index])
             {
                 step_linf = step_linf.max((*left as f64 - *right as f64).abs());
             }
@@ -7316,16 +7316,16 @@ impl TorchModelRuntime {
         let first_token_mismatch = dense
             .token_ids
             .iter()
-            .zip(&kvslim.token_ids)
+            .zip(&mslim.token_ids)
             .position(|(left, right)| left != right)
             .or_else(|| {
-                (dense.token_ids.len() != kvslim.token_ids.len())
-                    .then_some(dense.token_ids.len().min(kvslim.token_ids.len()))
+                (dense.token_ids.len() != mslim.token_ids.len())
+                    .then_some(dense.token_ids.len().min(mslim.token_ids.len()))
             });
         let divergence = first_token_mismatch.and_then(|index| {
             let dense_logits = dense.step_logits.get(index)?;
-            let kvslim_logits = kvslim.step_logits.get(index)?;
-            Some(first_step_divergence(index, dense_logits, kvslim_logits))
+            let mslim_logits = mslim.step_logits.get(index)?;
+            Some(first_step_divergence(index, dense_logits, mslim_logits))
         });
         Ok(NativeInferenceParity {
             prompt_tokens: prompt_ids.len(),
@@ -7334,19 +7334,19 @@ impl TorchModelRuntime {
             max_abs_logit_difference,
             logit_steps_compared: steps,
             first_logit_step_above_1e3,
-            kv_sha256_equal: dense.kv_sha256 == kvslim.kv_sha256,
+            kv_sha256_equal: dense.kv_sha256 == mslim.kv_sha256,
             dense_kv_sha256: dense.kv_sha256,
-            kvslim_kv_sha256: kvslim.kv_sha256,
+            mslim_kv_sha256: mslim.kv_sha256,
             dense_tokens: dense.token_ids,
-            kvslim_tokens: kvslim.token_ids,
+            mslim_tokens: mslim.token_ids,
             dense_text: dense.content,
-            kvslim_text: kvslim.content,
+            mslim_text: mslim.content,
             dense_prefill_seconds: dense.prefill_seconds,
-            kvslim_prefill_seconds: kvslim.prefill_seconds,
-            certified_v_tokens_omitted: kvslim.certified_v_tokens_omitted,
-            kvslim_kv_resident_bytes: kvslim.kv_resident_bytes,
+            mslim_prefill_seconds: mslim.prefill_seconds,
+            certified_v_tokens_omitted: mslim.certified_v_tokens_omitted,
+            mslim_kv_resident_bytes: mslim.kv_resident_bytes,
             dense_kv_bf16_bytes: dense.kv_bf16_bytes,
-            kvslim_kv_bf16_reference_bytes: kvslim.kv_bf16_reference_bytes,
+            mslim_kv_bf16_reference_bytes: mslim.kv_bf16_reference_bytes,
             prompt_authority: "identical_prompt_ids_raw_chat_template_no_default_system",
             divergence,
         })
@@ -7634,7 +7634,7 @@ mod tests {
     }
 
     fn resident_test_page(
-        cache: &mut KVSLIMKvCache,
+        cache: &mut MSlimKvCache,
         token_start: usize,
         tokens: usize,
         seed: f32,
@@ -7648,10 +7648,10 @@ mod tests {
         .view([1, 8, tokens as i64, 128])
         .to_kind(Kind::BFloat16);
         let value = (&key * -0.5).to_kind(Kind::BFloat16);
-        let key_bits = KVSLIMKvCache::bf16_bits(&key).unwrap();
-        let value_bits = KVSLIMKvCache::bf16_bits(&value).unwrap();
-        let key_bytes = KVSLIMKvCache::u16_bytes(&key_bits);
-        let value_bytes = KVSLIMKvCache::u16_bytes(&value_bits);
+        let key_bits = MSlimKvCache::bf16_bits(&key).unwrap();
+        let value_bits = MSlimKvCache::bf16_bits(&value).unwrap();
+        let key_bytes = MSlimKvCache::u16_bytes(&key_bits);
+        let value_bytes = MSlimKvCache::u16_bytes(&value_bits);
         let committed = cache
             .exact_cold
             .append_page(
@@ -7668,7 +7668,7 @@ mod tests {
                 false,
             )
             .unwrap();
-        cache.layers[0].pages.push(KVSLIMPage {
+        cache.layers[0].pages.push(MSlimPage {
             token_start,
             tokens,
             certificate: PageAttentionCertificate {
@@ -7687,7 +7687,7 @@ mod tests {
 
     #[test]
     fn logical_kv_digest_covers_all_llama_heads_and_matches_dense_across_cold_and_tail() {
-        let mut cache = KVSLIMKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
         let mut dense = DenseKvCache::with_layers(1);
         let (cold_key, cold_value) = resident_test_page(&mut cache, 0, 16, 1.0);
         cache.sequence_tokens = 16;
@@ -7725,7 +7725,7 @@ mod tests {
 
     #[test]
     fn resident_committed_kv_reads_each_cold_page_once_and_matches_cat() {
-        let mut cache = KVSLIMKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
         cache.resident_kv_budget_bytes = 64 << 20;
         let first = resident_test_page(&mut cache, 0, 16, 1.0);
         let second = resident_test_page(&mut cache, 16, 16, -3.0);
@@ -7753,7 +7753,7 @@ mod tests {
 
     #[test]
     fn resident_committed_kv_respects_budget_and_falls_back_to_cold_reads() {
-        let mut cache = KVSLIMKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
         // One 16-token page fits (64 KiB), two do not.
         cache.resident_kv_budget_bytes = 2 * 8 * 16 * 128 * 2;
         let first = resident_test_page(&mut cache, 0, 16, 2.0);
@@ -7776,7 +7776,7 @@ mod tests {
             "ruta fría original"
         );
         // Budget 0 disables residency entirely (original behaviour).
-        let mut disabled = KVSLIMKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let mut disabled = MSlimKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
         disabled.resident_kv_budget_bytes = 0;
         let _ = resident_test_page(&mut disabled, 0, 16, 1.0);
         let _ = disabled.assemble_committed_layer(0).unwrap();
@@ -7787,7 +7787,7 @@ mod tests {
 
     #[test]
     fn dense_sdpa_accounting_covers_remainder_chunks_and_all_llama_layers() {
-        let mut cache = KVSLIMKvCache::try_new_with_geometry(512, 32, 8, 32, 128).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_geometry(512, 32, 8, 32, 128).unwrap();
         let mut sequence_tokens = 0usize;
         for query_tokens in [512usize, 512, 512, 512, 512, 512, 512, 416] {
             let attended_tokens = sequence_tokens + query_tokens;
@@ -7807,7 +7807,7 @@ mod tests {
 
     #[test]
     fn prefill_working_set_is_released_after_exact_cold_barrier() {
-        let mut cache = KVSLIMKvCache::try_new_with_storage_frame_tokens(16).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_storage_frame_tokens(16).unwrap();
         let query = Tensor::zeros([1, 16, 2, 128], (Kind::BFloat16, Device::Cpu));
         let key = Tensor::zeros([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
         let value = Tensor::zeros([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
@@ -7837,7 +7837,7 @@ mod tests {
     #[test]
     fn persistent_prefix_roundtrip_restores_verified_kv_and_axis() {
         let root = tempfile::tempdir().unwrap();
-        let mut cache = KVSLIMKvCache::try_new_with_storage_frame_tokens(16).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_storage_frame_tokens(16).unwrap();
         let query = Tensor::zeros([1, 16, 2, 128], (Kind::BFloat16, Device::Cpu));
         let key = Tensor::zeros([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
         let value = Tensor::zeros([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
@@ -7898,7 +7898,7 @@ mod tests {
         );
 
         let mut restored =
-            KVSLIMKvCache::restore_prefix(root.path(), "prefix-digest", "model-digest", 16)
+            MSlimKvCache::restore_prefix(root.path(), "prefix-digest", "model-digest", 16)
                 .unwrap()
                 .expect("prefijo persistido");
         assert_eq!(restored.sequence_tokens(), 2);
@@ -7924,7 +7924,7 @@ mod tests {
     #[test]
     fn restored_prefix_attends_suffix_without_copying_or_keeping_history_hot() {
         let root = tempfile::tempdir().unwrap();
-        let mut cache = KVSLIMKvCache::try_new_with_storage_frame_tokens(16).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_storage_frame_tokens(16).unwrap();
         let query = Tensor::zeros([1, 16, 2, 128], (Kind::BFloat16, Device::Cpu));
         let key = Tensor::zeros([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
         let value = Tensor::zeros([1, 2, 2, 128], (Kind::BFloat16, Device::Cpu));
@@ -7937,7 +7937,7 @@ mod tests {
             .persist_prefix(root.path(), "prefix-digest", "model-digest")
             .unwrap();
         let mut restored =
-            KVSLIMKvCache::restore_prefix(root.path(), "prefix-digest", "model-digest", 16)
+            MSlimKvCache::restore_prefix(root.path(), "prefix-digest", "model-digest", 16)
                 .unwrap()
                 .expect("prefijo persistido");
         assert_eq!(restored.prefix_copied_bytes, 0);
@@ -8158,7 +8158,7 @@ mod tests {
 
     #[test]
     fn cold_multitoken_rollback_truncates_only_unsealed_tails() {
-        let mut cache = KVSLIMKvCache::try_new_with_storage_frame_tokens(16).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_storage_frame_tokens(16).unwrap();
         for layer in &mut cache.layers {
             layer.tail = Some((
                 Tensor::zeros([1, 2, 5, 128], (Kind::BFloat16, Device::Cpu)),
@@ -8262,7 +8262,7 @@ mod tests {
 
     #[test]
     fn llama_regional_upper_bounds_cover_libtorch_fp32_matmul() {
-        let mut cache = KVSLIMKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
         let key_values = (0..8 * 128)
             .map(|index| {
                 let signed = (index % 29) as f32 - 14.0;
@@ -8280,7 +8280,7 @@ mod tests {
             .to_kind(Kind::BFloat16);
         let value = Tensor::ones([1, 8, 1, 128], (Kind::BFloat16, Device::Cpu));
         cache.observe_parallel_axis(&key).unwrap();
-        let page = KVSLIMPage {
+        let page = MSlimPage {
             token_start: 0,
             tokens: 1,
             certificate: cache.page_attention_certificate(&key, &value, 0).unwrap(),
@@ -8338,8 +8338,8 @@ mod tests {
     #[test]
     fn bf16_interval_endpoints_round_outward() {
         let values = [0.12345_f32, -0.12345_f32];
-        let lower = KVSLIMKvCache::outward_bf16_bounds(&values, true);
-        let upper = KVSLIMKvCache::outward_bf16_bounds(&values, false);
+        let lower = MSlimKvCache::outward_bf16_bounds(&values, true);
+        let upper = MSlimKvCache::outward_bf16_bounds(&values, false);
         for index in 0..values.len() {
             assert!(half::bf16::from_bits(lower[index]).to_f32() <= values[index]);
             assert!(half::bf16::from_bits(upper[index]).to_f32() >= values[index]);
@@ -8364,7 +8364,7 @@ mod tests {
         // Test the actual CPU libtorch SDPA and original physical ColdStore;
         // no Llama checkpoint/GPU is needed. The 32Q/8KV head geometry,
         // BF16 precision, and 128-dimensional RoPE Q/K match Llama 3.1 8B.
-        let mut cache = KVSLIMKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
+        let mut cache = MSlimKvCache::try_new_with_geometry(16, 1, 8, 32, 128).unwrap();
         let tokens = 16usize;
         let heads = 8usize;
         let dim = 128usize;
@@ -8405,10 +8405,10 @@ mod tests {
         let certificate = cache.page_attention_certificate(&k, &v, 0).unwrap();
         assert_eq!(certificate.value_abs_max_by_kv_head.len(), 8);
         assert_eq!(certificate.value_abs_max_by_kv_head, [1.0f32; 8]);
-        let key_bits = KVSLIMKvCache::bf16_bits(&k).unwrap();
-        let value_bits = KVSLIMKvCache::bf16_bits(&v).unwrap();
-        let bf16_k = KVSLIMKvCache::u16_bytes(&key_bits);
-        let bf16_v = KVSLIMKvCache::u16_bytes(&value_bits);
+        let key_bits = MSlimKvCache::bf16_bits(&k).unwrap();
+        let value_bits = MSlimKvCache::bf16_bits(&v).unwrap();
+        let bf16_k = MSlimKvCache::u16_bytes(&key_bits);
+        let bf16_v = MSlimKvCache::u16_bytes(&value_bits);
         let committed = cache
             .exact_cold
             .append_page(
@@ -8427,7 +8427,7 @@ mod tests {
             .unwrap();
         assert_eq!(committed.page_id, 0);
         cache.sequence_tokens = 16;
-        let page = KVSLIMPage {
+        let page = MSlimPage {
             token_start: 0,
             tokens: 16,
             certificate,
@@ -8454,7 +8454,7 @@ mod tests {
         let tailv = Tensor::from_slice(&vtdata)
             .view([1, 8, 1, 128])
             .to_kind(Kind::BFloat16);
-        let full = KVSLIMKvCache::scaled_attention(
+        let full = MSlimKvCache::scaled_attention(
             &q,
             &[k.shallow_clone(), tailk.shallow_clone()],
             &[v.shallow_clone(), tailv.shallow_clone()],

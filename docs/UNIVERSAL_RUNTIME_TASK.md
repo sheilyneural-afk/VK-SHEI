@@ -11,7 +11,7 @@ Completar la separación entre KV-SHEI y cualquier implementación concreta. El 
 - `external-routing`: el worker enruta Prefill/Decode/Snapshot/Restore al host externo.
 - `session-recovery`: persistencia, reinicio y restauración de sesión.
 - `e2e-real`: prueba con bundle real y generación real.
-- `benchmark`: comparación densa, KV reutilizada y KVSLIM.
+- `benchmark`: comparación densa, KV reutilizada y M-SLIM.
 - `production-gate`: solo se activa cuando todas las anteriores pasan.
 
 Las banderas son gates de validación, no sustitutos de funcionalidad. Una bandera no puede marcarse como completada por un mock.
@@ -31,7 +31,7 @@ Implementar un binario host que:
 
 ### Agente B — worker
 
-Cuando exista `--runtime-manifest` o `KVSLIM_RUNTIME_MANIFEST`:
+Cuando exista `--runtime-manifest` o `MSLIM_RUNTIME_MANIFEST`:
 
 1. validar el manifiesto;
 2. conectar al endpoint;

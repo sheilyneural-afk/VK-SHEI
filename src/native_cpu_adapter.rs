@@ -12,8 +12,8 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use half::bf16;
-use kvslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use memmap2::{Mmap, MmapOptions};
+use mslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use rayon::prelude::*;
 use safetensors::{Dtype, SafeTensors};
 use serde_json::{Value, json};
@@ -295,15 +295,15 @@ impl NativeCpuDecoder {
         let spec = bundle.spec;
         let weights = NativeWeightArchive::open(model_dir, &spec.weight_shards)?;
         let epsilon = config
-            .get("kvslim_epsilon")
+            .get("mslim_epsilon")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         let stage_tokens = config
-            .get("kvslim_stage_tokens")
+            .get("mslim_stage_tokens")
             .and_then(Value::as_u64)
             .map(usize::try_from)
             .transpose()
-            .context("kvslim_stage_tokens fuera de rango")?
+            .context("mslim_stage_tokens fuera de rango")?
             .unwrap_or(64);
         let geometry = AttentionGeometry::new(
             spec.attention.query_heads,
@@ -585,7 +585,7 @@ impl NativeCausalRuntime for NativeCpuDecoder {
         let stats = self.kv.storage_metrics();
         let lod = &self.kv.stats;
         json!({
-            "authority": "kvslim-cold-store",
+            "authority": "mslim-cold-store",
             "format": "exact-bf16",
             "pages": stats.pages,
             "committed_bytes": stats.committed_bytes,
@@ -721,7 +721,7 @@ impl ModelAdapter for NativeCpuModelAdapter {
     fn snapshot_kv(&self) -> Result<Vec<u8>> {
         let runtime = self.runtime.as_ref().context("CPU nativa no cargada")?;
         serde_json::to_vec(&json!({
-            "schema": "kvslim.runtime.replay-snapshot/v1",
+            "schema": "mslim.runtime.replay-snapshot/v1",
             "model_dir": self.model_dir,
             "tokens": runtime.session_tokens(),
         }))
@@ -731,8 +731,7 @@ impl ModelAdapter for NativeCpuModelAdapter {
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
         let value: Value = serde_json::from_slice(snapshot)?;
         ensure!(
-            value.get("schema").and_then(Value::as_str)
-                == Some("kvslim.runtime.replay-snapshot/v1"),
+            value.get("schema").and_then(Value::as_str) == Some("mslim.runtime.replay-snapshot/v1"),
             "snapshot no compatible"
         );
         let expected = value

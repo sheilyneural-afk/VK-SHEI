@@ -1,11 +1,11 @@
-# KVSLIM: núcleo universal y adaptadores de ejecución
+# M-SLIM: núcleo universal y adaptadores de ejecución
 
-KVSLIM es el nombre único del producto y de su API local. El núcleo trabaja con
+M-SLIM es el nombre único del producto y de su API local. El núcleo trabaja con
 metadatos de checkpoint, geometría K/V, serialización, integridad y almacenamiento
 sin fijar un proveedor, una marca o un modelo como identidad del sistema.
 
 El contrato ejecutable vive en el crate independiente
-`crates/kvslim-adapter-api`. Cada implementación se registra con backend,
+`crates/mslim-adapter-api`. Cada implementación se registra con backend,
 tipo de cómputo, prioridad y política de activación. El núcleo no presupone
 ninguna API, fabricante, proveedor ni runtime concreto. Un backend que dependa
 de hardware o bibliotecas externas debe quedar en modo explícito hasta
@@ -28,10 +28,10 @@ remoto. Puede existir un proveedor de catálogo opcional —Hugging Face u otro�
 para descubrir modelos, versiones, licencias y formatos, pero ese proveedor no
 forma parte del núcleo ni decide la compatibilidad. La autoridad es siempre el
 bundle que el usuario o la empresa ha importado dentro de `runtime/models/` y
-que KVSLIM ha verificado por contenido.
+que M-SLIM ha verificado por contenido.
 
 La dirección de producto es que el usuario no tenga que conocer de antemano el
-modelo correcto: KVSLIM debe detectar capacidades locales, consultar uno o
+modelo correcto: M-SLIM debe detectar capacidades locales, consultar uno o
 varios catálogos, descartar candidatos incompatibles y presentar una
 recomendación explicada. La recomendación no convierte un candidato remoto en
 autoridad. Antes de activarlo, el resolvedor debe descargarlo dentro del
@@ -41,22 +41,22 @@ cualquier comprobación, el candidato queda en `inspect-only`.
 
 Las credenciales privadas se gestionan como tokens de lectura de Hugging Face,
 nunca como contraseñas. El gestor opcional de credenciales vive en
-`kvslim-auth`; valida el token contra el servicio antes de una operación
+`mslim-auth`; valida el token contra el servicio antes de una operación
 autenticada, no lo incluye en diagnósticos y permite eliminarlo.
 
 La ejecución de un modelo concreto se organiza como un adaptador. Un adaptador
 puede declarar qué arquitectura, precisión, tokenizer, RoPE, operadores y formato
 de pesos admite. Si el adaptador no puede demostrar compatibilidad completa,
-KVSLIM debe rechazar la ejecución y permitir únicamente inspección; no debe
+M-SLIM debe rechazar la ejecución y permitir únicamente inspección; no debe
 simular compatibilidad ni seleccionar una arquitectura por nombre.
 
 Los perfiles concretos que aparecen en las pruebas históricas son datos de
-validación, no contratos públicos ni nombres de KVSLIM. Los checkpoints y sus
+validación, no contratos públicos ni nombres de M-SLIM. Los checkpoints y sus
 tokenizers deben residir exclusivamente bajo
 `deploy/local-production/runtime/models/<digest>` y se seleccionan mediante
 configuración y digest, nunca mediante rutas personales o absolutas.
 El bundle lo aporta el usuario o la empresa que tenga derecho a utilizarlo; el
-adaptador declara el formato aceptado y KVSLIM no convierte ni modifica el
+adaptador declara el formato aceptado y M-SLIM no convierte ni modifica el
 original durante la ejecución.
 
 Para incorporar una nueva arquitectura o hardware se requiere un adaptador explícito,

@@ -8,7 +8,7 @@ command -v jq >/dev/null || { echo "jq es necesario" >&2; exit 1; }
 command -v sha256sum >/dev/null || { echo "sha256sum es necesario" >&2; exit 1; }
 
 jq -e '
-  .schema == "kvslim.runtime.manifest/v1"
+  .schema == "mslim.runtime.manifest/v1"
   and (.id | type == "string" and length > 0)
   and (.version | type == "string" and length > 0)
   and .verified == true

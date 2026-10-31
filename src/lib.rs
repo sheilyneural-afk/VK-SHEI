@@ -36,7 +36,7 @@ pub mod torch_adapter;
 pub mod native_cpu_adapter;
 
 // Backend-neutral types and Hugging Face metadata inspection.
-pub use kvslim_adapter_api::{
+pub use mslim_adapter_api::{
     AdapterAvailability, AdapterCapabilities, AdapterDescriptor, AdapterSelection, AdapterStatus,
     ComputeKind, ModelAdapter, select_adapter, select_available_adapter,
 };

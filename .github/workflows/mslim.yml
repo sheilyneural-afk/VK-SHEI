@@ -1,0 +1,82 @@
+name: M-SLIM
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: mslim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked --lib
+      - run: cargo test --locked --bin mslim-calibrate
+      - run: cargo test --locked -p mslim-adapter-api
+
+  adapters:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "accelerator-backend"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile selected adapter surface
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo check --locked --all-targets --features "${{ matrix.features }}"
+          else
+            cargo check --locked --all-targets --no-default-features
+          fi
+
+  release-artifacts:
+    runs-on: ubuntu-latest
+    needs: [core, adapters]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --release --no-default-features --lib
+      - run: cargo build --locked --release --features accelerator-backend --bin mslim-runtime-worker
+      - run: cargo build --locked --release --features unified-router --bin mslim-server
+      - run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
+      - run: test -x target/release/mslim-runtime-worker && test -x target/release/mslim-server
+
+  physical:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Require a physical model bundle
+        env:
+          MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
+        run: test -n "$MSLIM_PHYSICAL_MODEL" && test -d "$MSLIM_PHYSICAL_MODEL"
+      - name: Physical accelerator tests
+        run: cargo test --locked --features accelerator-backend --all-targets -- --ignored --nocapture
+      - name: Block activation unless multi-step parity passes
+        env:
+          MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
+        run: cargo run --locked --release --features accelerator-backend --bin mslim-adapter-parity -- "$MSLIM_PHYSICAL_MODEL" --decode-steps 8
+      - name: Sustained calibration after parity
+        env:
+          MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
+        run: cargo run --locked --release --features accelerator-backend --bin mslim-calibrate -- "$MSLIM_PHYSICAL_MODEL" --force --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048
+
+  load:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --lib inference_worker -- --nocapture

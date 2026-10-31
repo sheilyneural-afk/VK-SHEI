@@ -11,16 +11,16 @@ source "$env_file"
 
 "$script_dir/verify-release.sh"
 
-if [ -n "${KVSLIM_RUNTIME_MANIFEST:-}" ]; then
-  [ -f "$KVSLIM_RUNTIME_MANIFEST" ] || { echo "runtime manifest missing: $KVSLIM_RUNTIME_MANIFEST" >&2; exit 1; }
-  "$script_dir/verify-runtime-manifest.sh" "$KVSLIM_RUNTIME_MANIFEST"
+if [ -n "${MSLIM_RUNTIME_MANIFEST:-}" ]; then
+  [ -f "$MSLIM_RUNTIME_MANIFEST" ] || { echo "runtime manifest missing: $MSLIM_RUNTIME_MANIFEST" >&2; exit 1; }
+  "$script_dir/verify-runtime-manifest.sh" "$MSLIM_RUNTIME_MANIFEST"
 fi
 
-binary="$root/deploy/local-production/runtime/bin/kvslim-server"
-: "${KVSLIM_GATEWAY_TOKEN:?KVSLIM_GATEWAY_TOKEN must be set}"
+binary="$root/deploy/local-production/runtime/bin/mslim-server"
+: "${MSLIM_GATEWAY_TOKEN:?MSLIM_GATEWAY_TOKEN must be set}"
 
-backend="${KVSLIM_BACKEND:-auto}"
-configured="${KVSLIM_WORKER_ENDPOINT:-}"
+backend="${MSLIM_BACKEND:-auto}"
+configured="${MSLIM_WORKER_ENDPOINT:-}"
 declare -a candidates=()
 if [ -n "$configured" ]; then
   candidates+=("$configured")
@@ -43,11 +43,11 @@ done
 
 if [ -z "$selected" ]; then
   echo "No hay ningún worker local certificado disponible." >&2
-  echo "KVSLIM no exige un backend concreto: inicia un worker compatible y vuelve a ejecutar este script." >&2
+  echo "M-SLIM no exige un backend concreto: inicia un worker compatible y vuelve a ejecutar este script." >&2
   exit 1
 fi
 
 exec "$binary" \
   --host 127.0.0.1 \
-  --port "${KVSLIM_PORT:-8088}" \
+  --port "${MSLIM_PORT:-8088}" \
   --worker "auto=$selected"

@@ -26,7 +26,7 @@ const FILE_HEADER_BYTES: u64 = 36;
 const FRAME_HEADER_BYTES: u64 = 72;
 const COMMIT_BYTES: u64 = 8;
 const MAX_FRAME_PAYLOAD: u64 = 512 * 1024 * 1024;
-const HASH_DOMAIN: &[u8] = b"kvslim-portable-kv-record-v1";
+const HASH_DOMAIN: &[u8] = b"mslim-portable-kv-record-v1";
 
 fn corrupt(msg: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, msg)
@@ -173,7 +173,7 @@ impl PortableKvStore {
         let mut prelude = [0u8; FILE_HEADER_BYTES as usize];
         file.read_exact(&mut prelude)?;
         if &prelude[..8] != FILE_MAGIC {
-            return Err(corrupt("not a KVSLIM portable KV store"));
+            return Err(corrupt("not a M-SLIM portable KV store"));
         }
         if u32::from_le_bytes(prelude[8..12].try_into().unwrap()) != VERSION {
             return Err(corrupt("unsupported portable KV store version"));

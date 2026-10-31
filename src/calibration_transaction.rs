@@ -1,4 +1,4 @@
-//! Transactional, fail-closed calibration lifecycle for KVSLIM profiles.
+//! Transactional, fail-closed calibration lifecycle for M-SLIM profiles.
 //!
 //! The candidate is evaluated in shadow before it can replace the active
 //! profile. Entering canary performs a checkpointed atomic activation; promotion
@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const RECEIPT_SCHEMA: &str = "kvslim.calibration_transaction.receipt/v1";
-const PROFILE_SCHEMA: &str = "kvslim.calibration_profile/v1";
+const RECEIPT_SCHEMA: &str = "mslim.calibration_transaction.receipt/v1";
+const PROFILE_SCHEMA: &str = "mslim.calibration_profile/v1";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub type CalibrationResult<T> = Result<T, CalibrationError>;

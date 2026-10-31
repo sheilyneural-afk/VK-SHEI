@@ -1,4 +1,4 @@
-// KVSLIM OpenCL C 1.2 device kernels: QK / softmax / PV.
+// M-SLIM OpenCL C 1.2 device kernels: QK / softmax / PV.
 // Q: f32 [QH,D]. K/V: raw little-endian BF16/F16/F32 [T,KVH,D].
 // Functional GPU reference only; no compression, not FlashAttention.
 
@@ -31,7 +31,7 @@ inline float load_scalar(__global const uchar *data, const uint index, const uin
     return as_float(bits); // FP16 -> FP32 exact decode
 }
 
-__kernel void kvslim_qk(
+__kernel void mslim_qk(
     __global const float *query, __global const uchar *keys,
     __global float *scores, const uint tokens, const uint query_heads,
     const uint kv_heads, const uint head_dim, const uint key_dtype) {
@@ -48,7 +48,7 @@ __kernel void kvslim_qk(
     scores[i] = dot * rsqrt((float)head_dim);
 }
 
-__kernel void kvslim_softmax(__global float *scores,
+__kernel void mslim_softmax(__global float *scores,
                                     const uint tokens, const uint query_heads) {
     const uint qh = (uint)get_global_id(0);
     if (qh >= query_heads) return;
@@ -66,7 +66,7 @@ __kernel void kvslim_softmax(__global float *scores,
         scores[start+t] /= denominator;
 }
 
-__kernel void kvslim_pv(
+__kernel void mslim_pv(
     __global const float *probabilities, __global const uchar *values,
     __global float *output, const uint tokens, const uint query_heads,
     const uint kv_heads, const uint head_dim, const uint value_dtype) {

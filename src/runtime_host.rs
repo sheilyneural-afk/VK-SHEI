@@ -1,6 +1,6 @@
 //! Generic IPC request dispatcher for one executable runtime session.
 use anyhow::{Result, bail};
-use kvslim_adapter_api::{GenerationRequest, RuntimeSession};
+use mslim_adapter_api::{GenerationRequest, RuntimeSession};
 use serde_json::{Value, json};
 
 use crate::generic_runtime::{IPC_SCHEMA, IpcOperation, IpcRequest, IpcResponse};
@@ -108,7 +108,7 @@ impl RuntimeHost {
                 ))
             }
             IpcOperation::RestoreKv => {
-                let receipt: kvslim_adapter_api::CacheReceipt = serde_json::from_value(
+                let receipt: mslim_adapter_api::CacheReceipt = serde_json::from_value(
                     request
                         .payload
                         .get("receipt")
@@ -142,7 +142,7 @@ impl RuntimeHost {
 mod tests {
     use super::*;
     use anyhow::Result;
-    use kvslim_adapter_api::{
+    use mslim_adapter_api::{
         AdapterCapabilities, CacheMode, GenerationResult, GenerationStats, ModelIdentity,
     };
     struct Fake {
@@ -171,8 +171,8 @@ mod tests {
         fn restore_kv(&mut self, _: &[u8]) -> Result<()> {
             Ok(())
         }
-        fn snapshot_receipt(&self) -> Result<kvslim_adapter_api::CacheReceipt> {
-            Ok(kvslim_adapter_api::CacheReceipt {
+        fn snapshot_receipt(&self) -> Result<mslim_adapter_api::CacheReceipt> {
+            Ok(mslim_adapter_api::CacheReceipt {
                 schema: "v1".into(),
                 operation: "snapshot".into(),
                 model_digest: self.id.model_digest.clone(),
@@ -185,11 +185,7 @@ mod tests {
                 mode: CacheMode::Exact,
             })
         }
-        fn restore_receipt(
-            &mut self,
-            r: &kvslim_adapter_api::CacheReceipt,
-            b: &[u8],
-        ) -> Result<()> {
+        fn restore_receipt(&mut self, r: &mslim_adapter_api::CacheReceipt, b: &[u8]) -> Result<()> {
             if r.model_digest != self.id.model_digest || b.is_empty() {
                 bail!("invalid receipt or snapshot")
             }

@@ -4,19 +4,19 @@ export LC_ALL=C
 
 # Real external-runtime certification:
 #   provider (resident/stream) -> HTTP worker -> SessionStore -> worker restart -> restore
-# The model is never hard-coded. Set KVSLIM_MODEL_DIR to a verified local bundle.
+# The model is never hard-coded. Set MSLIM_MODEL_DIR to a verified local bundle.
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-model="${KVSLIM_MODEL_DIR:?Set KVSLIM_MODEL_DIR to a verified model bundle}"
-port="${KVSLIM_EXTERNAL_E2E_PORT:-18790}"
-socket="${KVSLIM_EXTERNAL_E2E_SOCKET:-/tmp/kvslim-real-provider-e2e.sock}"
-weight_mode="${KVSLIM_WEIGHT_MODE:-auto}"
-timeout_secs="${KVSLIM_EXTERNAL_E2E_TIMEOUT_SECS:-600}"
+model="${MSLIM_MODEL_DIR:?Set MSLIM_MODEL_DIR to a verified model bundle}"
+port="${MSLIM_EXTERNAL_E2E_PORT:-18790}"
+socket="${MSLIM_EXTERNAL_E2E_SOCKET:-/tmp/mslim-real-provider-e2e.sock}"
+weight_mode="${MSLIM_WEIGHT_MODE:-auto}"
+timeout_secs="${MSLIM_EXTERNAL_E2E_TIMEOUT_SECS:-600}"
 output_root="$root/deploy/local-production/runtime/validation/external-e2e"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-out_dir="${KVSLIM_EXTERNAL_E2E_OUTPUT:-$output_root/$run_id}"
-session_store="${KVSLIM_EXTERNAL_E2E_SESSION_STORE:-$out_dir/sessions}"
-cold_dir="${KVSLIM_EXTERNAL_E2E_COLD_DIR:-$out_dir/coldstore}"
+out_dir="${MSLIM_EXTERNAL_E2E_OUTPUT:-$output_root/$run_id}"
+session_store="${MSLIM_EXTERNAL_E2E_SESSION_STORE:-$out_dir/sessions}"
+cold_dir="${MSLIM_EXTERNAL_E2E_COLD_DIR:-$out_dir/coldstore}"
 provider_log="$out_dir/provider.log"
 worker_log="$out_dir/worker.log"
 manifest="$out_dir/runtime-manifest.json"
@@ -39,21 +39,21 @@ cleanup() {
 trap cleanup EXIT
 
 cargo build --offline --locked --features accelerator-backend \
-  --bin kvslim-runtime-provider --bin kvslim-runtime-worker
+  --bin mslim-runtime-provider --bin mslim-runtime-worker
 
-provider="$root/deploy/local-production/runtime/build-target/debug/kvslim-runtime-provider"
-worker="$root/deploy/local-production/runtime/build-target/debug/kvslim-runtime-worker"
+provider="$root/deploy/local-production/runtime/build-target/debug/mslim-runtime-provider"
+worker="$root/deploy/local-production/runtime/build-target/debug/mslim-runtime-worker"
 
 python3 - "$manifest" "$socket" <<'PY'
 import json, sys
 path, endpoint = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as f:
     json.dump({
-        "schema": "kvslim.runtime.manifest/v1",
+        "schema": "mslim.runtime.manifest/v1",
         "id": "real-runtime-provider",
         "capabilities": ["prefill", "decode", "reset_session", "snapshot_kv", "restore_kv"],
         "priority": 100,
-        "protocol": "kvslim.runtime.ipc/v1",
+        "protocol": "mslim.runtime.ipc/v1",
         "endpoint": endpoint,
     }, f)
 PY
@@ -69,7 +69,7 @@ done
 [ -S "$socket" ] || { cat "$provider_log" >&2; exit 1; }
 
 start_worker() {
-  nohup env KVSLIM_SESSION_STORE="$session_store" "$worker" \
+  nohup env MSLIM_SESSION_STORE="$session_store" "$worker" \
     --model "$model" --runtime-manifest "$manifest" --port "$port" \
     --timeout-secs "$timeout_secs" >"$worker_log" 2>&1 < /dev/null &
   worker_pid=$!
@@ -122,7 +122,7 @@ z = "0" * 64
 body = {
     "messages": [],
     "continuity": {
-        "schema": "kvslim.continuity.request/v1",
+        "schema": "mslim.continuity.request/v1",
         "operation": "snapshot",
         "opaque_session_handle": session_handle,
         "expected_generation": 0,
@@ -162,7 +162,7 @@ z = "0" * 64
 body = {
     "messages": [],
     "continuity": {
-        "schema": "kvslim.continuity.request/v1",
+        "schema": "mslim.continuity.request/v1",
         "operation": "resume",
         "opaque_session_handle": session_handle,
         "expected_generation": 0,

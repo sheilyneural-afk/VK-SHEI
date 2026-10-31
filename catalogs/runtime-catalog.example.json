@@ -1,5 +1,5 @@
 {
-  "schema": "kvslim.runtime.catalog/v1",
+  "schema": "mslim.runtime.catalog/v1",
   "catalog_id": "official-runtime-sources",
   "entries": [
     {"id":"llvm-cpu","source_page":"https://llvm.org/","artifact_url":null,"sha256":null,"requires_system_driver":false},

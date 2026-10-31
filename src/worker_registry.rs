@@ -1,4 +1,4 @@
-//! Capability-based registry for KVSLIM inference workers.
+//! Capability-based registry for M-SLIM inference workers.
 //!
 //! The registry is deliberately independent of HTTP, model names and
 //! accelerator vendors. A worker advertises measured capabilities; routing

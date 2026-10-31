@@ -81,7 +81,7 @@ fn rank_one(
         reasons.push("biblioteca con formato conocido por el ecosistema local".into());
     }
     let supported_by_declared_adapter = host.adapters.iter().any(|status| {
-        status.availability == kvslim_adapter_api::AdapterAvailability::RuntimeAvailable
+        status.availability == mslim_adapter_api::AdapterAvailability::RuntimeAvailable
             && candidate.model_type.as_deref().is_some_and(|model_type| {
                 status.descriptor.supported_model_types.is_empty()
                     || status
@@ -206,16 +206,16 @@ mod tests {
             context_kv_core_available: true,
             inference_adapter_available: adapter,
             adapters: if adapter {
-                vec![kvslim_adapter_api::AdapterStatus {
-                    descriptor: kvslim_adapter_api::AdapterDescriptor {
+                vec![mslim_adapter_api::AdapterStatus {
+                    descriptor: mslim_adapter_api::AdapterDescriptor {
                         id: "test".into(),
                         backend: "test".into(),
-                        compute: kvslim_adapter_api::ComputeKind::Any,
+                        compute: mslim_adapter_api::ComputeKind::Any,
                         priority: 1,
-                        activation: kvslim_adapter_api::ActivationPolicy::Explicit,
+                        activation: mslim_adapter_api::ActivationPolicy::Explicit,
                         supported_model_types: vec!["llama".into()],
                     },
-                    availability: kvslim_adapter_api::AdapterAvailability::RuntimeAvailable,
+                    availability: mslim_adapter_api::AdapterAvailability::RuntimeAvailable,
                     reason: "test".into(),
                 }]
             } else {

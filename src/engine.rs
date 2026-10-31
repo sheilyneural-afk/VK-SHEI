@@ -1,4 +1,4 @@
-//! Public KVSLIM engine boundary.
+//! Public M-SLIM engine boundary.
 //!
 //! This module owns the model-adapter lifecycle used by the local engine. It
 //! deliberately has no HTTP, provider, model-family, or accelerator-specific
@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use kvslim_adapter_api::{AdapterCapabilities, ModelAdapter};
+use mslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub enum EngineState {
     Loaded,
 }
 
-/// The KVSLIM execution engine for one loaded model session.
+/// The M-SLIM execution engine for one loaded model session.
 pub struct KvslimEngine {
     adapter: Box<dyn ModelAdapter>,
     state: EngineState,
@@ -43,7 +43,7 @@ impl KvslimEngine {
     pub fn inspect(&mut self, model_dir: &Path, config: &Value) -> Result<()> {
         self.adapter
             .inspect(model_dir, config)
-            .context("KVSLIM engine model inspection failed")?;
+            .context("M-SLIM engine model inspection failed")?;
         self.state = EngineState::Inspected;
         Ok(())
     }
@@ -51,11 +51,11 @@ impl KvslimEngine {
     pub fn load(&mut self, model_dir: &Path, config: &Value) -> Result<()> {
         ensure!(
             self.state == EngineState::Inspected,
-            "KVSLIM engine must inspect the model before loading it"
+            "M-SLIM engine must inspect the model before loading it"
         );
         self.adapter
             .load(model_dir, config)
-            .context("KVSLIM engine model load failed")?;
+            .context("M-SLIM engine model load failed")?;
         self.state = EngineState::Loaded;
         Ok(())
     }
@@ -63,49 +63,49 @@ impl KvslimEngine {
     pub fn prefill(&mut self, input: &[u32]) -> Result<Value> {
         ensure!(
             self.state == EngineState::Loaded,
-            "KVSLIM engine is not loaded"
+            "M-SLIM engine is not loaded"
         );
-        self.adapter.prefill(input).context("KVSLIM prefill failed")
+        self.adapter.prefill(input).context("M-SLIM prefill failed")
     }
 
     pub fn decode(&mut self, token_id: u32) -> Result<u32> {
         ensure!(
             self.state == EngineState::Loaded,
-            "KVSLIM engine is not loaded"
+            "M-SLIM engine is not loaded"
         );
         self.adapter
             .decode(token_id)
-            .context("KVSLIM decode failed")
+            .context("M-SLIM decode failed")
     }
 
     pub fn snapshot_kv(&self) -> Result<Vec<u8>> {
         ensure!(
             self.state == EngineState::Loaded,
-            "KVSLIM engine is not loaded"
+            "M-SLIM engine is not loaded"
         );
         self.adapter
             .snapshot_kv()
-            .context("KVSLIM KV snapshot failed")
+            .context("M-SLIM KV snapshot failed")
     }
 
     pub fn last_logits(&self) -> Result<Option<Vec<f32>>> {
         ensure!(
             self.state == EngineState::Loaded,
-            "KVSLIM engine is not loaded"
+            "M-SLIM engine is not loaded"
         );
         self.adapter
             .last_logits()
-            .context("KVSLIM logits capture failed")
+            .context("M-SLIM logits capture failed")
     }
 
     pub fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
         ensure!(
             self.state == EngineState::Loaded,
-            "KVSLIM engine is not loaded"
+            "M-SLIM engine is not loaded"
         );
         self.adapter
             .restore_kv(snapshot)
-            .context("KVSLIM KV restore failed")
+            .context("M-SLIM KV restore failed")
     }
 }
 

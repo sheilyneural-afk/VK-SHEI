@@ -1,4 +1,4 @@
-//! configured-model query projection into KVSLIM's parallel search dimension.
+//! configured-model query projection into M-SLIM's parallel search dimension.
 //!
 //! Every Q head is preserved independently and mapped only to the KV head
 //! that serves it. This avoids cancellation of a rare but important query.

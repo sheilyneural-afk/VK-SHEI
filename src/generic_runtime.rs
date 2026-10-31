@@ -3,7 +3,7 @@
 //! This boundary intentionally contains no accelerator/vendor concepts. A runtime
 //! is selected only by the operations it proves it can execute.
 use anyhow::{Result, bail};
-use kvslim_adapter_api::RuntimeSession;
+use mslim_adapter_api::RuntimeSession;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -37,7 +37,7 @@ pub struct RuntimeManifest {
 }
 
 impl RuntimeManifest {
-    pub const SCHEMA: &'static str = "kvslim.runtime.manifest/v1";
+    pub const SCHEMA: &'static str = "mslim.runtime.manifest/v1";
 
     pub fn validate(&self) -> Result<()> {
         if self.schema != Self::SCHEMA {
@@ -174,7 +174,7 @@ pub struct IpcResponse {
     pub error: Option<String>,
 }
 
-pub const IPC_SCHEMA: &str = "kvslim.runtime.ipc/v1";
+pub const IPC_SCHEMA: &str = "mslim.runtime.ipc/v1";
 
 pub fn encode_ipc(request: &IpcRequest) -> Result<Vec<u8>> {
     ensure_ipc_schema(&request.schema)?;

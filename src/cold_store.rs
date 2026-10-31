@@ -1,4 +1,4 @@
-//! Auditable append-only cold storage for KVSLIM encoded KV pages.
+//! Auditable append-only cold storage for M-SLIM encoded KV pages.
 //!
 //! The caller supplies exact BF16 byte payloads.
 //! This module never transforms model weights or changes KV semantics. Each
@@ -941,7 +941,7 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "kvslim-cold-{name}-{}-{}",
+            "mslim-cold-{name}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

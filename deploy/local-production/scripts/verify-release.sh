@@ -15,12 +15,12 @@ fail() { echo "VERIFY-FAIL: $*" >&2; exit 1; }
 # shellcheck disable=SC1090
 source "$env_file"
 
-[ "${KVSLIM_HOST:-}" = "127.0.0.1" ] || fail "host must be 127.0.0.1"
-case "${KVSLIM_ENABLE_LOD:-}" in
+[ "${MSLIM_HOST:-}" = "127.0.0.1" ] || fail "host must be 127.0.0.1"
+case "${MSLIM_ENABLE_LOD:-}" in
   true|false) ;;
-  *) fail "KVSLIM_ENABLE_LOD must be true or false" ;;
+  *) fail "MSLIM_ENABLE_LOD must be true or false" ;;
 esac
-[ "${KVSLIM_COLDSTORE_FORMAT:-}" = "TSKVPG04" ] || fail "unsupported ColdStore format"
+[ "${MSLIM_COLDSTORE_FORMAT:-}" = "TSKVPG04" ] || fail "unsupported ColdStore format"
 
 is_inside_project() {
   case "$1" in
@@ -29,34 +29,34 @@ is_inside_project() {
   esac
 }
 
-for value in "${KVSLIM_MODEL_DIR:-}" "${KVSLIM_COLDSTORE_DIR:-}" "${KVSLIM_RECEIPTS_DIR:-}" "${KVSLIM_LOG_DIR:-}"; do
+for value in "${MSLIM_MODEL_DIR:-}" "${MSLIM_COLDSTORE_DIR:-}" "${MSLIM_RECEIPTS_DIR:-}" "${MSLIM_LOG_DIR:-}"; do
   [ -n "$value" ] || fail "empty runtime path"
   case "$value" in /*) path="$value" ;; *) path="$root/$value" ;; esac
   is_inside_project "$path" || fail "path escapes project: $path"
 done
 
-binary="$runtime/bin/kvslim-server"
-worker_binary="$runtime/bin/kvslim-runtime-worker"
+binary="$runtime/bin/mslim-server"
+worker_binary="$runtime/bin/mslim-runtime-worker"
 [ -f "$binary" ] || fail "missing binary: $binary"
 [ -x "$binary" ] || fail "binary is not executable: $binary"
 [ -f "$worker_binary" ] || fail "missing worker binary: $worker_binary"
 [ -x "$worker_binary" ] || fail "worker binary is not executable: $worker_binary"
 
-case "${KVSLIM_MODEL_DIR:-}" in
-  /*) model_path="$KVSLIM_MODEL_DIR" ;;
-  *) model_path="$root/$KVSLIM_MODEL_DIR" ;;
+case "${MSLIM_MODEL_DIR:-}" in
+  /*) model_path="$MSLIM_MODEL_DIR" ;;
+  *) model_path="$root/$MSLIM_MODEL_DIR" ;;
 esac
 case "$model_path" in "$runtime"/*) ;; *) fail "model path is outside runtime" ;; esac
 [ -d "$model_path" ] || fail "missing model directory: $model_path"
 
 actual_binary=$(sha256sum "$binary" | awk '{print $1}')
-[ "$actual_binary" = "${KVSLIM_BINARY_DIGEST:-}" ] || fail "binary digest mismatch"
+[ "$actual_binary" = "${MSLIM_BINARY_DIGEST:-}" ] || fail "binary digest mismatch"
 actual_worker_binary=$(sha256sum "$worker_binary" | awk '{print $1}')
-[ "$actual_worker_binary" = "${KVSLIM_WORKER_BINARY_DIGEST:-}" ] ||
+[ "$actual_worker_binary" = "${MSLIM_WORKER_BINARY_DIGEST:-}" ] ||
   fail "worker binary digest mismatch"
 
 model_digest=$(find "$model_path" -type f -not -path '*/.git/*' -print0 | sort -z | sha256sum | awk '{print $1}')
-[ "$model_digest" = "${KVSLIM_MODEL_DIGEST:-}" ] || fail "model tree digest mismatch"
+[ "$model_digest" = "${MSLIM_MODEL_DIGEST:-}" ] || fail "model tree digest mismatch"
 
 if find "$model_path" -type f -perm /022 -print -quit | grep -q .; then
   fail "model files must not be group/world writable"
@@ -66,5 +66,5 @@ echo "VERIFY-OK: local release is structurally valid"
 echo "binary_sha256=$actual_binary"
 echo "worker_binary_sha256=$actual_worker_binary"
 echo "model_tree_sha256=$model_digest"
-echo "host=$KVSLIM_HOST"
-echo "lod=$KVSLIM_ENABLE_LOD"
+echo "host=$MSLIM_HOST"
+echo "lod=$MSLIM_ENABLE_LOD"

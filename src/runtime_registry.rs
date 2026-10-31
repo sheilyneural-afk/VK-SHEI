@@ -2,7 +2,7 @@
 //! Concrete implementations register capabilities; selection never matches
 //! vendor/backend names.
 use anyhow::{Result, bail};
-use kvslim_adapter_api::{
+use mslim_adapter_api::{
     AdapterAvailability, AdapterSelection, AdapterStatus, ComputeKind, ModelAdapter,
     select_available_adapter,
 };
@@ -68,12 +68,12 @@ mod tests {
     impl RuntimeFactory for F {
         fn status(&self) -> AdapterStatus {
             AdapterStatus {
-                descriptor: kvslim_adapter_api::AdapterDescriptor {
+                descriptor: mslim_adapter_api::AdapterDescriptor {
                     id: "test-runtime".into(),
                     backend: "generic".into(),
                     compute: ComputeKind::Any,
                     priority: 1,
-                    activation: kvslim_adapter_api::ActivationPolicy::Default,
+                    activation: mslim_adapter_api::ActivationPolicy::Default,
                     supported_model_types: Vec::new(),
                 },
                 availability: AdapterAvailability::RuntimeAvailable,

@@ -82,7 +82,7 @@ impl Drop for HipWeight {
 impl HipRuntime {
     pub fn new() -> Result<Self> {
         let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("native/libkvslim_hipblaslt_bridge.so");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("native/libmslim_hipblaslt_bridge.so");
         ensure!(
             path.is_file(),
             "Native HIP bridge absent at {} (compile for gfx1103)",

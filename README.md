@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="assets/vkslim-title.svg" alt="M-SLIM (SLIM MEMORY)" width="900">
+  <img src="assets/mslim-title.svg" alt="M-SLIM (SLIM MEMORY)" width="900">
 </h1>
 
 <p align="center">
@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sheilyneural-afk/VK-SHEI/actions/workflows/kvslim.yml"><img src="https://github.com/sheilyneural-afk/VK-SHEI/actions/workflows/kvslim.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/sheilyneural-afk/VK-SHEI/actions/workflows/mslim.yml"><img src="https://github.com/sheilyneural-afk/VK-SHEI/actions/workflows/mslim.yml/badge.svg" alt="CI"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-edition%202024-orange?logo=rust" alt="Rust 2024"></a>
   <img src="https://img.shields.io/badge/version-0.4.0-blue" alt="Version 0.4.0">
   <img src="https://img.shields.io/badge/licence-see%20repository-lightgrey" alt="License information">
@@ -33,7 +33,7 @@ La conclusión correcta es: **el flujo funcional de inferencia, memoria, snapsho
 
 ## Qué es
 
-KV-SHEI es el repositorio de **M-SLIM (SLIM MEMORY)**. El runtime Rust aparece técnicamente como KVSLIM y proporciona una base local para organizar contexto, almacenar estado K/V y conectar runtimes de inferencia mediante contratos verificables.
+KV-SHEI es el repositorio de **M-SLIM (SLIM MEMORY)**. El runtime Rust aparece técnicamente como M-SLIM y proporciona una base local para organizar contexto, almacenar estado K/V y conectar runtimes de inferencia mediante contratos verificables.
 
 El núcleo está diseñado alrededor de cuatro ideas:
 
@@ -81,13 +81,13 @@ El flujo importante es deliberadamente explícito: un catálogo puede encontrar 
 | Continuidad semántica | `SessionStore` con generaciones, hashes de estado, `CURRENT` atómico y rechazo de replay divergente | [`src/session_store.rs`](src/session_store.rs) |
 | Continuidad física | `SessionCoordinator` expone snapshot/restore de la KV del runtime y separa esa responsabilidad de la memoria semántica | [`src/session_coordinator.rs`](src/session_coordinator.rs) |
 | Contrato de runtime | Manifests, capacidades, selección por probe, handles de tensor y protocolo IPC versionado | [`src/generic_runtime.rs`](src/generic_runtime.rs), [`src/runtime_host.rs`](src/runtime_host.rs) |
-| Contrato de adaptadores | `ModelAdapter`, `RuntimeSession`, generación, reset, snapshot, restore y recibos verificables | [`crates/kvslim-adapter-api/src/lib.rs`](crates/kvslim-adapter-api/src/lib.rs) |
+| Contrato de adaptadores | `ModelAdapter`, `RuntimeSession`, generación, reset, snapshot, restore y recibos verificables | [`crates/mslim-adapter-api/src/lib.rs`](crates/mslim-adapter-api/src/lib.rs) |
 | Model bundles | Validación de `config.json`, tokenizer, shards SafeTensors, geometría, nombres, dtypes físicos y layout del decoder | [`src/model_bundle.rs`](src/model_bundle.rs) |
 | Catálogo y selección | Inventario efímero del host; diferencia entre compilado, disponible, no disponible y pendiente de probe | [`src/adapter_catalog.rs`](src/adapter_catalog.rs) |
 | Grafo documental | Páginas originales, `PageMicroMetadata`, spans, números, referencias explícitas, vecinos y recuperación acotada | [`src/document_graph.rs`](src/document_graph.rs) |
 | Recuperación con evidencia | Modos `focused` y `exhaustive`, candidatos diferidos y marca explícita de cobertura no exhaustiva | [`src/document_graph.rs`](src/document_graph.rs) |
 | LOD y certificados | Ruta densa exacta cuando `epsilon = 0`; rutas aproximadas solo cuando el certificado autoriza el descarte | [`src/gpu_canonical_lod.rs`](src/gpu_canonical_lod.rs), [`src/attention_certificate.rs`](src/attention_certificate.rs) |
-| Servicio local | Worker en loopback, gateway, endpoints de salud/capacidades/modelos y subconjunto HTTP compatible con OpenAI | [`src/bin/kvslim-runtime-worker.rs`](src/bin/kvslim-runtime-worker.rs), [`src/bin/kvslim-gateway.rs`](src/bin/kvslim-gateway.rs) |
+| Servicio local | Worker en loopback, gateway, endpoints de salud/capacidades/modelos y subconjunto HTTP compatible con OpenAI | [`src/bin/mslim-runtime-worker.rs`](src/bin/mslim-runtime-worker.rs), [`src/bin/mslim-gateway.rs`](src/bin/mslim-gateway.rs) |
 
 ## Qué ha logrado realmente
 
@@ -171,18 +171,18 @@ deploy/local-production/scripts/cargo-local.sh test --locked --lib --no-default-
 
 # Smoke test de la referencia CPU y del contrato de inspección.
 deploy/local-production/scripts/cargo-local.sh run --locked \
-  --no-default-features --bin kvslim-inspect -- --self-test
+  --no-default-features --bin mslim-inspect -- --self-test
 ```
 
 La guía operativa completa está en [`deploy/local-production/README.md`](deploy/local-production/README.md). El wrapper local evita que el proyecto dependa de rutas globales para `CARGO_HOME`, `CARGO_TARGET_DIR` y temporales.
 
 ## Documentar y consultar un repositorio o corpus
 
-El binario `kvslim-document` crea un grafo lossless; no genera un resumen que sustituya al original:
+El binario `mslim-document` crea un grafo lossless; no genera un resumen que sustituya al original:
 
 ```bash
 # Construir desde texto paginado.
-deploy/local-production/scripts/cargo-local.sh run --locked --bin kvslim-document -- \\
+deploy/local-production/scripts/cargo-local.sh run --locked --bin mslim-document -- \\
   build-text \\
   --document-id proyecto \\
   --version REVISION_O_DIGEST \\
@@ -191,7 +191,7 @@ deploy/local-production/scripts/cargo-local.sh run --locked --bin kvslim-documen
   --page-characters 4000
 
 # Recuperación determinista con páginas originales y digests.
-deploy/local-production/scripts/cargo-local.sh run --locked --bin kvslim-document -- \\
+deploy/local-production/scripts/cargo-local.sh run --locked --bin mslim-document -- \\
   query \\
   --graph graph.json \\
   --text "¿dónde se valida la continuidad?" \\
@@ -231,7 +231,7 @@ deploy/local-production/scripts/run-local-runtime.sh
 
 `verify-release.sh` comprueba rutas, digests del binario y del worker, digest del árbol del modelo, permisos de solo lectura, bind loopback y formato de `ColdStore`. El servidor actual no debe exponerse a una red compartida sin una capa de autenticación y transporte adecuada.
 
-El worker puede hablar con un runtime externo mediante un manifest IPC. El manifest debe demostrar como mínimo `prefill`, `decode`, `reset_session`, `snapshot_kv` y `restore_kv`; si falta una de esas capacidades, el arranque se rechaza. El proveedor real que existe hoy se encuentra en [`src/bin/kvslim-runtime-provider.rs`](src/bin/kvslim-runtime-provider.rs) y utiliza el adapter acelerado compilado para ese perfil.
+El worker puede hablar con un runtime externo mediante un manifest IPC. El manifest debe demostrar como mínimo `prefill`, `decode`, `reset_session`, `snapshot_kv` y `restore_kv`; si falta una de esas capacidades, el arranque se rechaza. El proveedor real que existe hoy se encuentra en [`src/bin/mslim-runtime-provider.rs`](src/bin/mslim-runtime-provider.rs) y utiliza el adapter acelerado compilado para ese perfil.
 
 ## Pruebas y qué certifican
 
@@ -250,23 +250,23 @@ Los tiempos no son una estimación: están registrados en `generation.json`. En 
 
 Los targets disponibles están declarados en [`Cargo.toml`](Cargo.toml). Entre los más útiles:
 
-- `kvslim-inspect`: inspección de bundle y smoke test CPU; no ejecuta un LLM completo por sí solo.
-- `kvslim-models`: enumera bundles bajo el runtime local.
-- `kvslim-import-model`: importa y digiere un bundle local (`model-import`).
-- `kvslim-validate-model`: valida un bundle con las capacidades de modelo compiladas.
-- `kvslim-adapters`: muestra adaptadores compilados y su estado.
-- `kvslim-autoconfigure`: calcula un perfil a partir de bundles y capacidades observadas.
-- `kvslim-runtime-host`: host IPC genérico; su modo de prueba usa una sesión determinista.
-- `kvslim-runtime-provider`: proveedor externo del perfil acelerado actual.
-- `kvslim-runtime-worker`: HTTP del worker; requiere `accelerator-backend` en la configuración actual.
-- `kvslim-server`: gateway HTTP; requiere `unified-router`.
-- `kvslim-document`: construcción y consulta del grafo documental lossless.
+- `mslim-inspect`: inspección de bundle y smoke test CPU; no ejecuta un LLM completo por sí solo.
+- `mslim-models`: enumera bundles bajo el runtime local.
+- `mslim-import-model`: importa y digiere un bundle local (`model-import`).
+- `mslim-validate-model`: valida un bundle con las capacidades de modelo compiladas.
+- `mslim-adapters`: muestra adaptadores compilados y su estado.
+- `mslim-autoconfigure`: calcula un perfil a partir de bundles y capacidades observadas.
+- `mslim-runtime-host`: host IPC genérico; su modo de prueba usa una sesión determinista.
+- `mslim-runtime-provider`: proveedor externo del perfil acelerado actual.
+- `mslim-runtime-worker`: HTTP del worker; requiere `accelerator-backend` en la configuración actual.
+- `mslim-server`: gateway HTTP; requiere `unified-router`.
+- `mslim-document`: construcción y consulta del grafo documental lossless.
 
 ## Mapa del repositorio
 
 ```text
 KV-SHEI/
-├── crates/kvslim-adapter-api/    contrato estable de adapters y sesiones
+├── crates/mslim-adapter-api/    contrato estable de adapters y sesiones
 ├── src/                          núcleo Rust, KV, continuidad, catálogo e IPC
 │   ├── cold_store.rs             páginas BF16 append-only y auditoría
 │   ├── document_graph.rs         micro-metadatos y evidencia original
@@ -299,7 +299,7 @@ La arquitectura ya separa esas piezas. El README no las presenta como terminadas
 - [Contrato de adaptadores](docs/MODEL_ADAPTERS.md)
 - [Documentación del núcleo](docs/README.md)
 - [Tarea de runtime universal](docs/UNIVERSAL_RUNTIME_TASK.md)
-- [Workflow de CI](.github/workflows/kvslim.yml)
+- [Workflow de CI](.github/workflows/mslim.yml)
 
 <p align="center">
   <sub>M-SLIM (SLIM MEMORY) · KV-SHEI · documentación alineada con el código fuente y sus pruebas actuales.</sub>

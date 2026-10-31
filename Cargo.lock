@@ -975,41 +975,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kvslim"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "axum",
- "half",
- "hex",
- "kvslim-adapter-api",
- "libloading",
- "memmap2",
- "minijinja",
- "opencl3",
- "rayon",
- "reqwest",
- "safetensors",
- "serde",
- "serde_json",
- "sha2",
- "tch",
- "tempfile",
- "tokenizers",
- "tokio",
-]
-
-[[package]]
-name = "kvslim-adapter-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1171,6 +1136,41 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "mslim"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "half",
+ "hex",
+ "libloading",
+ "memmap2",
+ "minijinja",
+ "mslim-adapter-api",
+ "opencl3",
+ "rayon",
+ "reqwest",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tch",
+ "tempfile",
+ "tokenizers",
+ "tokio",
+]
+
+[[package]]
+name = "mslim-adapter-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

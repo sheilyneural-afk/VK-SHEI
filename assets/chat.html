@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>KVSLIM chat</title>
+    <title>M-SLIM chat</title>
     <style>
       :root {
         --bg: #111318;
@@ -206,7 +206,7 @@
   <body>
     <main>
       <header>
-        <h1>KVSLIM <a href="/runtime" style="color:#6ea8ff;font-size:13px;font-weight:500">runtime local</a></h1>
+        <h1>M-SLIM <a href="/runtime" style="color:#6ea8ff;font-size:13px;font-weight:500">runtime local</a></h1>
         <div id="status">comprobando motor…</div>
       </header>
       <div id="log"></div>
@@ -340,10 +340,10 @@
           if (!system.dataset.userEdited) {
             if (/llama/i.test(modelName)) {
               system.value =
-                "Eres el asistente de KVSLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. No pidas aclaraciones si ya se entiende.";
+                "Eres el asistente de M-SLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. No pidas aclaraciones si ya se entiende.";
             } else if (/minicpm/i.test(modelName) || !system.value.trim()) {
               system.value =
-                "Eres el asistente de KVSLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. Si hay texto de referencia, responde solo con datos de ese texto.";
+                "Eres el asistente de M-SLIM. Responde de forma directa y breve, en el idioma del usuario. No repitas la pregunta. Si hay texto de referencia, responde solo con datos de ese texto.";
             }
           }
         } catch (error) {

@@ -1,4 +1,4 @@
-// KVSLIM: full BF16 Llama/configured-model forward kernels (OpenCL C 1.2).
+// M-SLIM: full BF16 Llama/configured-model forward kernels (OpenCL C 1.2).
 // Original model weights preserved as raw BF16. No quantization or Python.
 // Inference-only, single autoregressive token at each kernel launch.
 // Supports grouped-query attention and Llama SwiGLU, RMSNorm, RoPE.
@@ -548,8 +548,8 @@ __kernel void llm_prefill_pv(
 // accumulation order and the original 128-lane binary tree reduction
 // for each output, so GPU BF16 logits remain bit-exact.
 // Different from the old per-(row,token) launch (no weight reuse).
-#define KVSLIM_WEIGHT_REUSE_TOKENS 16u
-#define KVSLIM_WEIGHT_REUSE_TOKENS8 8u
+#define MSLIM_WEIGHT_REUSE_TOKENS 16u
+#define MSLIM_WEIGHT_REUSE_TOKENS8 8u
 __kernel __attribute__((reqd_work_group_size(128,1,1)))
 void llm_prefill_gemv_reuse8(
     __global const ushort *weights,
@@ -562,11 +562,11 @@ void llm_prefill_gemv_reuse8(
     const uint row=(uint)get_group_id(0);
     const uint tile=(uint)get_group_id(1);
     const uint tid=(uint)get_local_id(0);
-    const uint first=tile*KVSLIM_WEIGHT_REUSE_TOKENS8;
+    const uint first=tile*MSLIM_WEIGHT_REUSE_TOKENS8;
     if (row>=out_dim || first>=tokens) return;
-    const uint length=min((uint)KVSLIM_WEIGHT_REUSE_TOKENS8,tokens-first);
+    const uint length=min((uint)MSLIM_WEIGHT_REUSE_TOKENS8,tokens-first);
     float acc[8];
-    for(uint i=0u;i<KVSLIM_WEIGHT_REUSE_TOKENS8;i++) acc[i]=0.0f;
+    for(uint i=0u;i<MSLIM_WEIGHT_REUSE_TOKENS8;i++) acc[i]=0.0f;
     const uint woffset=row*in_dim;
     for(uint d=tid;d<in_dim;d+=128u) {
         const float w=read_bf16(weights[woffset+d]);
@@ -606,11 +606,11 @@ void llm_prefill_gemv_reuse16(
     const uint row=(uint)get_group_id(0);
     const uint tile=(uint)get_group_id(1);
     const uint tid=(uint)get_local_id(0);
-    const uint first=tile*KVSLIM_WEIGHT_REUSE_TOKENS;
+    const uint first=tile*MSLIM_WEIGHT_REUSE_TOKENS;
     if (row>=out_dim || first>=tokens) return;
-    const uint length=min((uint)KVSLIM_WEIGHT_REUSE_TOKENS,tokens-first);
+    const uint length=min((uint)MSLIM_WEIGHT_REUSE_TOKENS,tokens-first);
     float acc[16];
-    for(uint i=0u;i<KVSLIM_WEIGHT_REUSE_TOKENS;i++) acc[i]=0.0f;
+    for(uint i=0u;i<MSLIM_WEIGHT_REUSE_TOKENS;i++) acc[i]=0.0f;
     const uint woffset=row*in_dim;
     for(uint d=tid;d<in_dim;d+=128u) {
         const float w=read_bf16(weights[woffset+d]);
@@ -640,7 +640,7 @@ void llm_prefill_gemv_reuse16(
 // Same operation, but reuses the same BF16 row across 32 tokens. The
 // larger private accumulator and scratch may reduce occupancy; benchmark
 // on the actual Radeon instead of assuming it is faster.
-#define KVSLIM_WEIGHT_REUSE_TOKENS32 32u
+#define MSLIM_WEIGHT_REUSE_TOKENS32 32u
 __kernel __attribute__((reqd_work_group_size(128,1,1)))
 void llm_prefill_gemv_reuse32(
     __global const ushort *weights,
@@ -653,9 +653,9 @@ void llm_prefill_gemv_reuse32(
     const uint row=(uint)get_group_id(0);
     const uint tile=(uint)get_group_id(1);
     const uint tid=(uint)get_local_id(0);
-    const uint first=tile*KVSLIM_WEIGHT_REUSE_TOKENS32;
+    const uint first=tile*MSLIM_WEIGHT_REUSE_TOKENS32;
     if(row>=out_dim||first>=tokens)return;
-    const uint length=min((uint)KVSLIM_WEIGHT_REUSE_TOKENS32,tokens-first);
+    const uint length=min((uint)MSLIM_WEIGHT_REUSE_TOKENS32,tokens-first);
     float acc[32];
     for(uint i=0u;i<32u;i++) acc[i]=0.0f;
     const uint woffset=row*in_dim;

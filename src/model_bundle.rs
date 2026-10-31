@@ -126,7 +126,7 @@ impl ModelBundle {
         let tokenizer = Tokenizer::from_file(self.root.join("tokenizer.json"))
             .map_err(|error| anyhow::anyhow!("tokenizer.json inválido: {error}"))?;
         let encoded = tokenizer
-            .encode("KVSLIM conformance probe", true)
+            .encode("M-SLIM conformance probe", true)
             .map_err(|error| anyhow::anyhow!("no se pudo tokenizar la prueba: {error}"))?;
         let ids = encoded.get_ids().to_vec();
         ensure!(

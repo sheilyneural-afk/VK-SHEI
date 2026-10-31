@@ -8,11 +8,11 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 #[allow(unused_imports)]
-use kvslim_adapter_api::{
+use mslim_adapter_api::{
     ActivationPolicy, AdapterDescriptor, AdapterSelection, ComputeKind, select_adapter,
     select_available_adapter,
 };
-use kvslim_adapter_api::{AdapterAvailability, AdapterStatus, ModelAdapter};
+use mslim_adapter_api::{AdapterAvailability, AdapterStatus, ModelAdapter};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HostCapabilities {

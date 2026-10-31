@@ -124,7 +124,7 @@ impl<O: Send + 'static> ConversionWorker<O> {
             let encoder = encoder.clone();
             handles.push(
                 thread::Builder::new()
-                    .name(format!("kvslim-kv-converter-{index}"))
+                    .name(format!("mslim-kv-converter-{index}"))
                     .spawn(move || {
                         loop {
                             let job = match jobs.lock() {

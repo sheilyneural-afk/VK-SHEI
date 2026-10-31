@@ -10,12 +10,12 @@ El núcleo no debe decidir ni nombrar proveedores concretos. Los runtimes físic
 
 ## Banderas de activación
 
-- `KVSLIM_RUNTIME_MANIFEST`: manifiesto del runtime externo.
-- `KVSLIM_RUNTIME_REQUIRED=1`: obliga a usar runtime externo; si no existe o falla, arranque fail-closed.
-- `KVSLIM_RUNTIME_E2E=1`: activa la prueba completa de socket y generación.
-- `KVSLIM_RUNTIME_ALLOW_LOCAL_FALLBACK=0`: por defecto no se permite sustituir silenciosamente el runtime externo.
-- `KVSLIM_RUNTIME_SOCKET`: endpoint Unix del host.
-- `KVSLIM_TEST_MODEL_DIR`: bundle de prueba autorizado.
+- `MSLIM_RUNTIME_MANIFEST`: manifiesto del runtime externo.
+- `MSLIM_RUNTIME_REQUIRED=1`: obliga a usar runtime externo; si no existe o falla, arranque fail-closed.
+- `MSLIM_RUNTIME_E2E=1`: activa la prueba completa de socket y generación.
+- `MSLIM_RUNTIME_ALLOW_LOCAL_FALLBACK=0`: por defecto no se permite sustituir silenciosamente el runtime externo.
+- `MSLIM_RUNTIME_SOCKET`: endpoint Unix del host.
+- `MSLIM_TEST_MODEL_DIR`: bundle de prueba autorizado.
 
 ## Entregables obligatorios
 

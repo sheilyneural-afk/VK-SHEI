@@ -1,4 +1,4 @@
-# Entorno local de producción de KVSLIM
+# Entorno local de producción de M-SLIM
 
 ## Catálogo e instalación de runtimes
 
@@ -29,7 +29,7 @@ defecto.
   `ColdStore` forman una generación compatible.
 - El servicio debe escuchar únicamente en `127.0.0.1`.
 - El endpoint no se considera productivo para red compartida: el servidor actual
-  de KVSLIM no implementa autenticación.
+  de M-SLIM no implementa autenticación.
 - `health` significa proceso vivo; `ready` solo se acepta después de validar el
   binario, el modelo, la configuración y el almacenamiento local.
 - El LOD positivo queda desactivado en el perfil seguro local hasta certificarlo
@@ -74,19 +74,19 @@ La instalación de una release debe seguir este orden:
 El usuario no debe instalar manualmente dependencias del proyecto. Cargo las
 mantiene en `runtime/cargo-home` y el build en `runtime/build-target`. Los
 drivers del sistema son la única excepción: no se pueden empaquetar de forma
-universal dentro de KVSLIM y deben existir ya en el sistema operativo. Si un
-driver o runtime no está disponible, KVSLIM lo informa y deja el núcleo de
+universal dentro de M-SLIM y deben existir ya en el sistema operativo. Si un
+driver o runtime no está disponible, M-SLIM lo informa y deja el núcleo de
 contexto/KV utilizable, sin fingir que el modelo puede ejecutarse.
 
 Los modelos y runtimes con licencia o distribución restringida requieren una
-acción explícita del usuario. KVSLIM puede descargar y verificar el artefacto
+acción explícita del usuario. M-SLIM puede descargar y verificar el artefacto
 cuando el manifiesto autorizado contiene su origen, versión y SHA-256, pero no
 debe descubrir URLs arbitrarias ni aceptar archivos sin hash.
 
 ## Modelo local
 
 El modelo lo aporta el usuario o la empresa que tenga derecho a utilizarlo.
-KVSLIM no impone una arquitectura, una marca, un proveedor ni un único formato
+M-SLIM no impone una arquitectura, una marca, un proveedor ni un único formato
 de pesos. Cada adaptador declara los formatos que entiende y rechaza el bundle
 si no puede demostrar compatibilidad.
 
@@ -101,7 +101,7 @@ deploy/local-production/runtime/models/<sha256-del-bundle>/
 ```
 
 El usuario puede introducirlo mediante una importación local o mediante una
-descarga declarada en un manifiesto autorizado. En ambos casos KVSLIM calcula y
+descarga declarada en un manifiesto autorizado. En ambos casos M-SLIM calcula y
 comprueba el digest antes de activarlo, lo abre en modo solo lectura y registra
 la referencia por digest, nunca por un nombre ambiguo o una ruta externa.
 
@@ -114,7 +114,7 @@ Para consultar qué bundles existen y qué puede inspeccionarse localmente:
 
 ```bash
 deploy/local-production/scripts/cargo-local.sh run --locked \
-  --no-default-features --bin kvslim-models
+  --no-default-features --bin mslim-models
 ```
 
 La salida solo enumera bundles bajo `runtime/models/`. No escanea el sistema,
@@ -127,7 +127,7 @@ pero la descarga requerirá autorización y el modelo solo será válido despué
 de importarse y verificarse localmente. Un registro remoto nunca será la
 autoridad de ejecución.
 
-La capa de catálogo permite que KVSLIM encuentre candidatos por el usuario:
+La capa de catálogo permite que M-SLIM encuentre candidatos por el usuario:
 detecta primero las capacidades locales y después filtra por formato,
 arquitectura, memoria y adaptador. Una recomendación remota no se activa por sí
 sola; el resolvedor debe importar y probar el bundle dentro del proyecto antes
@@ -137,7 +137,7 @@ Para consultar y ordenar candidatos en función del equipo actual:
 
 ```bash
 deploy/local-production/scripts/cargo-local.sh run --locked \
-  --features model-catalog --bin kvslim-recommend -- \
+  --features model-catalog --bin mslim-recommend -- \
   "text-generation" 20
 ```
 
@@ -150,7 +150,7 @@ automáticamente el mejor candidato:
 
 ```bash
 deploy/local-production/scripts/cargo-local.sh run --locked \
-  --features model-catalog --bin kvslim-download-model -- \
+  --features model-catalog --bin mslim-download-model -- \
   --auto "text-generation"
 ```
 
@@ -162,9 +162,9 @@ Las operaciones privadas usan un token de lectura, nunca una contraseña:
 
 ```bash
 printf '%s\n' 'hf_TU_TOKEN' | deploy/local-production/scripts/cargo-local.sh run \
-  --locked --features model-catalog --bin kvslim-auth -- store
+  --locked --features model-catalog --bin mslim-auth -- store
 deploy/local-production/scripts/cargo-local.sh run --locked \
-  --features model-catalog --bin kvslim-auth -- validate
+  --features model-catalog --bin mslim-auth -- validate
 ```
 
 Para importar un modelo que ya posee el usuario o la empresa, sin dejarlo
@@ -172,7 +172,7 @@ fuera del proyecto:
 
 ```bash
 deploy/local-production/scripts/cargo-local.sh run --locked \
-  --features model-import --bin kvslim-import-model -- \
+  --features model-import --bin mslim-import-model -- \
   /ruta/autorizada/al/bundle
 ```
 
@@ -256,7 +256,7 @@ por nombre sin verificación.
 Después construye el binario con el perfil que corresponda y colócalo en:
 
 ```text
-deploy/local-production/runtime/bin/kvslim-server
+deploy/local-production/runtime/bin/mslim-server
 ```
 
 La verificación es obligatoria:
@@ -285,7 +285,7 @@ reinicio del worker y restore físico) se usa. Por defecto selecciona `auto`,
 que mantiene los pesos residentes cuando caben y evita recargarlos por capa:
 
 ```bash
-KVSLIM_MODEL_DIR="$PWD/deploy/local-production/runtime/models/<digest>" \
+MSLIM_MODEL_DIR="$PWD/deploy/local-production/runtime/models/<digest>" \
   scripts/e2e-worker-external-restart.sh
 ```
 

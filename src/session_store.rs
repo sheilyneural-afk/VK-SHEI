@@ -169,7 +169,7 @@ mod tests {
     use super::*;
     #[test]
     fn restart_roundtrip_and_atomic_current() {
-        let d = std::env::temp_dir().join(format!("kvslim-session-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("mslim-session-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let s = SessionStore::open(&d).unwrap();
         s.prepare_and_commit("abc", 0, serde_json::json!({"next":"one"}))
@@ -186,7 +186,7 @@ mod tests {
     }
     #[test]
     fn rejects_generation_replay() {
-        let d = std::env::temp_dir().join(format!("kvslim-session-replay-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("mslim-session-replay-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let s = SessionStore::open(&d).unwrap();
         s.prepare_and_commit("abc", 0, serde_json::json!({"x":1}))

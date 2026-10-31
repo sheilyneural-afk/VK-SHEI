@@ -7,13 +7,13 @@ set -euo pipefail
 # It does not claim model inference; the external runtime must provide that.
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-sock="${KVSLIM_E2E_SOCKET:-/tmp/kvslim-runtime-e2e.sock}"
-log="${KVSLIM_E2E_LOG:-${root}/deploy/local-production/runtime/logs/runtime-e2e.log}"
+sock="${MSLIM_E2E_SOCKET:-/tmp/mslim-runtime-e2e.sock}"
+log="${MSLIM_E2E_LOG:-${root}/deploy/local-production/runtime/logs/runtime-e2e.log}"
 mkdir -p "$(dirname -- "$log")"
 rm -f "$sock" "$log"
 
 cargo run --offline --locked --features accelerator-backend \
-  --bin kvslim-runtime-host -- --socket "$sock" >"$log" 2>&1 &
+  --bin mslim-runtime-host -- --socket "$sock" >"$log" 2>&1 &
 host_pid=$!
 cleanup() {
   kill "$host_pid" 2>/dev/null || true
@@ -37,7 +37,7 @@ sock.connect(sys.argv[1])
 
 def call(operation, request_id, payload=None, session_id=None):
     request = {
-        "schema": "kvslim.runtime.ipc/v1",
+        "schema": "mslim.runtime.ipc/v1",
         "operation": operation,
         "request_id": request_id,
         "session_id": session_id,

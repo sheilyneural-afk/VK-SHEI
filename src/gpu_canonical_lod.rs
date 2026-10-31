@@ -1,4 +1,4 @@
-//! GPU adapter for the EXISTING CPU KVSLIM LOD components.
+//! GPU adapter for the EXISTING CPU M-SLIM LOD components.
 //!
 //! REUSES (no parallel 4-bit/index or cold-store implementation):
 //!  - adaptive_extent::ParallelContextAxis: original 4-bit fingerprints,
@@ -168,7 +168,7 @@ impl CanonicalGpuLod {
                 (None, store)
             }
             None => {
-                let directory = Builder::new().prefix("kvslim-gpu-canonical-").tempdir()?;
+                let directory = Builder::new().prefix("mslim-gpu-canonical-").tempdir()?;
                 let store = ColdStore::create(directory.path().join("pages-exact.kv"), 0)?;
                 (Some(directory), store)
             }
@@ -682,7 +682,7 @@ impl CanonicalGpuLod {
 
     /// Scores must be read from the real GPU QK kernel BEFORE softmax.
     /// The selection and certification functions are the exact same
-    /// functions used by the original KVSLIM CPU.
+    /// functions used by the original M-SLIM CPU.
     pub fn select(
         &mut self,
         layer: usize,

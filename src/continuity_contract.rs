@@ -1,16 +1,16 @@
 //! Versioned, provider-neutral continuity contracts for physical KV sessions.
 //!
 //! The caller owns the mapping from governed identity to the opaque handle.
-//! KVSLIM sees no tenant, principal, prompt text, model weights, or store path.
+//! M-SLIM sees no tenant, principal, prompt text, model weights, or store path.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{error::Error, fmt};
 
-pub const CONTINUITY_REQUEST_SCHEMA: &str = "kvslim.continuity.request/v1";
-pub const CACHE_RECEIPT_SCHEMA: &str = "kvslim.continuity.cache-receipt/v1";
-const REQUEST_HASH_DOMAIN: &[u8] = b"kvslim-continuity-request-v1\0";
-const RECEIPT_HASH_DOMAIN: &[u8] = b"kvslim-continuity-cache-receipt-v1\0";
+pub const CONTINUITY_REQUEST_SCHEMA: &str = "mslim.continuity.request/v1";
+pub const CACHE_RECEIPT_SCHEMA: &str = "mslim.continuity.cache-receipt/v1";
+const REQUEST_HASH_DOMAIN: &[u8] = b"mslim-continuity-request-v1\0";
+const RECEIPT_HASH_DOMAIN: &[u8] = b"mslim-continuity-cache-receipt-v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractError {
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn request_validation_is_fail_closed() {
         let mut value = request(ContinuityOperation::Resume);
-        value.schema = "kvslim.continuity.request/v2".into();
+        value.schema = "mslim.continuity.request/v2".into();
         assert!(value.validate_at(1_000).is_err());
 
         let mut value = request(ContinuityOperation::Resume);

@@ -1,6 +1,6 @@
-# Documentación mínima de KVSLIM
+# Documentación mínima de M-SLIM
 
-KVSLIM mantiene una documentación deliberadamente pequeña para que el árbol de
+M-SLIM mantiene una documentación deliberadamente pequeña para que el árbol de
 producción no dependa de informes históricos, corpus ni benchmarks concretos.
 
 - [MODEL_ADAPTERS.md](MODEL_ADAPTERS.md): contrato universal de configuración y

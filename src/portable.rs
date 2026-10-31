@@ -512,10 +512,10 @@ impl ExactKvFrames {
     }
 
     /// Logical digest of dtype, shapes and original bytes, independent of
-    /// the runtime allocator. This is not the legacy KVSLIM KV SHA.
+    /// the runtime allocator. This is not the legacy M-SLIM KV SHA.
     pub fn digest_sha256(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(b"kvslim-portable-exact-kv-v1");
+        hasher.update(b"mslim-portable-exact-kv-v1");
         for n in [
             self.geometry.query_heads,
             self.geometry.kv_heads,

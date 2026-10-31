@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use kvslim_adapter_api::ModelAdapter;
+use mslim_adapter_api::ModelAdapter;
 use serde::Serialize;
 use serde_json::Value;
 

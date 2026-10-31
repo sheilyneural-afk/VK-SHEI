@@ -72,6 +72,6 @@ jq -n \
   --arg checksum_url "$checksum_url" \
   --arg sha256 "$actual_sha" \
   --arg path "$destination" \
-  '{schema:"kvslim.runtime.manifest/v1",id:$id,version:$version,platform:$platform,architecture:$arch,artifact_url:$artifact_url,checksum_url:$checksum_url,sha256:$sha256,path:$path,verified:true}' \
+  '{schema:"mslim.runtime.manifest/v1",id:$id,version:$version,platform:$platform,architecture:$arch,artifact_url:$artifact_url,checksum_url:$checksum_url,sha256:$sha256,path:$path,verified:true}' \
   > "$manifest"
 printf 'runtime verificado: %s %s\nmanifest: %s\nsha256: %s\n' "$runtime_id" "$version" "$manifest" "$actual_sha"
