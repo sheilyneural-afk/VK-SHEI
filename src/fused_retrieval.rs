@@ -18,20 +18,17 @@
 
 use crate::{
     document_graph::{
-        DocumentGraph, EvidencePage, RetrievalBudget, RetrievalPhase, RetrievalScope, signal_terms,
-        tokenize,
+        DocumentGraph, EvidencePage, RetrievalBudget, RetrievalPhase, RetrievalScope,
     },
     page_fusion::{
         MAXIMUM_LIMIT, PageCandidate, PageChannel, PageFusion, PageFusionRequest, fuse_pages,
     },
+    stem_index::StemIndex,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-
-const BM25_K1: f64 = 1.2;
-const BM25_B: f64 = 0.75;
 
 pub const ROUTING_CHANNEL: &str = "routing";
 pub const BM25_CHANNEL: &str = "bm25";
@@ -43,6 +40,8 @@ pub struct FusedRetrievalConfig {
     pub rrf_k: u32,
     /// Maximum pages the BM25 channel proposes.
     pub bm25_candidates: usize,
+    /// Pseudo-relevance feedback stems added to the BM25 query (0 disables).
+    pub expansion_terms: usize,
 }
 
 impl Default for FusedRetrievalConfig {
@@ -52,6 +51,7 @@ impl Default for FusedRetrievalConfig {
             bm25_weight: 1.0,
             rrf_k: 60,
             bm25_candidates: 64,
+            expansion_terms: 0,
         }
     }
 }
@@ -72,60 +72,16 @@ pub fn bm25_ranking(graph: &DocumentGraph, query: &str, limit: usize) -> Result<
     ensure!(!query.trim().is_empty(), "retrieval query cannot be empty");
     ensure!(limit > 0, "limit must be positive");
     graph.verify_original_authority()?;
-    Ok(bm25_scores(graph, query, limit))
+    Ok(bm25_scores(graph, query, limit, 0))
 }
 
-fn bm25_scores(graph: &DocumentGraph, query: &str, limit: usize) -> Vec<(u32, f64)> {
-    let terms = signal_terms(query);
-    if terms.is_empty() {
-        return Vec::new();
-    }
-    let mut stats = Vec::new();
-    for page in graph.pages() {
-        let tokens = tokenize(&page.original_text);
-        let mut frequencies = BTreeMap::<&str, u32>::new();
-        for token in &tokens {
-            if let Some(term) = terms.get(token.as_str()) {
-                *frequencies.entry(term.as_str()).or_default() += 1;
-            }
-        }
-        stats.push((page.page_number, tokens.len() as f64, frequencies));
-    }
-    let pages = stats.len() as f64;
-    let total_length = stats.iter().map(|(_, length, _)| *length).sum::<f64>();
-    let average_length = if total_length > 0.0 {
-        total_length / pages
-    } else {
-        1.0
-    };
-    let mut document_frequency = BTreeMap::<&str, f64>::new();
-    for (_, _, frequencies) in &stats {
-        for term in frequencies.keys() {
-            *document_frequency.entry(term).or_default() += 1.0;
-        }
-    }
-    let mut scored = stats
-        .iter()
-        .filter_map(|(page_number, length, frequencies)| {
-            let mut score = 0.0;
-            for (term, &frequency) in frequencies {
-                let df = document_frequency[term];
-                let idf = (1.0 + (pages - df + 0.5) / (df + 0.5)).ln();
-                let tf = f64::from(frequency);
-                score += idf * tf * (BM25_K1 + 1.0)
-                    / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * length / average_length));
-            }
-            (score > 0.0).then_some((*page_number, score))
-        })
-        .collect::<Vec<_>>();
-    scored.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    scored.truncate(limit);
-    scored
+fn bm25_scores(
+    graph: &DocumentGraph,
+    query: &str,
+    limit: usize,
+    expansion_terms: usize,
+) -> Vec<(u32, f64)> {
+    StemIndex::build(graph).search(query, limit, expansion_terms)
 }
 
 /// Retrieves a bounded evidence phase from the fused order of the routing and
@@ -163,7 +119,7 @@ pub fn retrieve_fused(
         .map(|page| (page.page_number, (page.routing_score, page.graph_distance)))
         .collect::<BTreeMap<_, _>>();
 
-    let bm25 = bm25_scores(graph, query, config.bm25_candidates);
+    let bm25 = bm25_scores(graph, query, config.bm25_candidates, config.expansion_terms);
     let routing_channel = PageChannel {
         channel_id: ROUTING_CHANNEL.into(),
         weight: config.routing_weight,

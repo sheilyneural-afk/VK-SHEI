@@ -820,15 +820,6 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Terms that carry routing signal: the filter used for page micro-metadata
-/// (at least three bytes and not a stopword) plus every number token.
-pub(crate) fn signal_terms(text: &str) -> BTreeSet<String> {
-    tokenize(text)
-        .into_iter()
-        .filter(|token| (token.len() >= 3 && !is_stopword(token)) || is_number_token(token))
-        .collect()
-}
-
 fn normalize_text(text: &str) -> String {
     tokenize(text).join(" ")
 }

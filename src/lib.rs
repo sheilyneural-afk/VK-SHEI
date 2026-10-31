@@ -39,6 +39,7 @@ pub mod runtime_registry;
 pub mod session_coordinator;
 pub mod session_store;
 pub mod shadow_metrics;
+pub mod stem_index;
 #[cfg(feature = "torch-backend")]
 pub mod torch_runtime;
 
