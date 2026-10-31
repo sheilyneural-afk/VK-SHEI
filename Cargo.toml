@@ -142,6 +142,11 @@ name = "kvslim-runtime-host"
 path = "src/bin/kvslim-runtime-host.rs"
 
 [[bin]]
+name = "kvslim-runtime-proxy"
+path = "src/bin/kvslim-runtime-proxy.rs"
+required-features = ["http-server"]
+
+[[bin]]
 name = "kvslim-server"
 path = "src/bin/kvslim-gateway.rs"
 required-features = ["unified-router"]
