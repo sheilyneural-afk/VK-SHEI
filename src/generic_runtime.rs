@@ -31,6 +31,8 @@ pub struct RuntimeManifest {
     pub capabilities: BTreeSet<Capability>,
     pub priority: u32,
     pub protocol: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 impl RuntimeManifest {
@@ -234,6 +236,7 @@ mod tests {
                 capabilities: caps,
                 priority: 1,
                 protocol: "v1".into(),
+                endpoint: None,
             })))
             .unwrap();
         assert_eq!(

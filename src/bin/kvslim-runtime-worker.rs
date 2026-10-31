@@ -14,8 +14,10 @@ use axum::{
 };
 use kvslim::{
     continuity_contract::ContinuityRequest,
+    generic_runtime::{IPC_SCHEMA, IpcOperation, IpcRequest, RuntimeManifest},
     gpu_canonical_lod::CanonicalGpuLodConfig,
     inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
+    ipc_transport::IpcClient,
     model_config::ModelSpec,
     opencl_llm::{OpenClGeneration, OpenClLlm, WeightMode},
 };
@@ -327,6 +329,8 @@ struct AppState {
     gpu_decode_fused_kernels: bool,
     gpu_exact_hot_fused_attention: bool,
     timeout: Duration,
+    runtime_manifest: Option<String>,
+    runtime_session_id: Option<String>,
 }
 
 async fn index() -> Html<&'static str> {
@@ -339,6 +343,8 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "engine":"kvslim-engine",
         "model":state.model_id,
         "model_directory": state.model_dir,
+        "runtime_manifest": state.runtime_manifest,
+        "runtime_session_id": state.runtime_session_id,
         "running_backend": "rust-opencl-runtime",
         "device":state.gpu_device,
         "weight_mode":state.weight_mode,
@@ -636,10 +642,15 @@ async fn main() -> Result<()> {
     let mut fused_decode = false;
     let mut exact_hot_fused = true;
     let mut allow_network = false;
+    let mut runtime_manifest_path = std::env::var_os("KVSLIM_RUNTIME_MANIFEST").map(PathBuf::from);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--model" => model = args.next().context("missing --model")?.into(),
+            "--runtime-manifest" => {
+                runtime_manifest_path =
+                    Some(args.next().context("missing --runtime-manifest")?.into());
+            }
             "--host" => host = args.next().context("missing --host")?,
             "--port" => port = args.next().context("missing --port")?.parse()?,
             "--max-context-tokens" => {
@@ -795,6 +806,49 @@ async fn main() -> Result<()> {
         .context("model path must have a stable directory name")?
         .to_owned();
     let started = Instant::now();
+    let (runtime_manifest, runtime_session_id) = if let Some(path) = runtime_manifest_path {
+        let manifest = RuntimeManifest::from_json_file(&path)
+            .with_context(|| format!("load runtime manifest {}", path.display()))?;
+        let endpoint = manifest
+            .endpoint
+            .as_deref()
+            .context("runtime manifest endpoint is required")?;
+        let mut client = IpcClient::connect(endpoint, Duration::from_secs(timeout_secs.max(1)))?;
+        let probe = IpcRequest {
+            schema: IPC_SCHEMA.into(),
+            operation: IpcOperation::Probe,
+            request_id: format!("probe-{}", started.elapsed().as_nanos()),
+            session_id: None,
+            tensors: Vec::new(),
+            payload: json!({"model_dir": model.display().to_string()}),
+        };
+        let response = client.request(&probe)?;
+        ensure!(
+            response.ok,
+            "runtime probe rejected: {}",
+            response.error.unwrap_or_else(|| "unknown error".into())
+        );
+        let open = IpcRequest {
+            schema: IPC_SCHEMA.into(),
+            operation: IpcOperation::OpenSession,
+            request_id: format!("open-{}", started.elapsed().as_nanos()),
+            session_id: None,
+            tensors: Vec::new(),
+            payload: json!({"model_dir": model.display().to_string(), "model_id": model_id}),
+        };
+        let response = client.request(&open)?;
+        ensure!(
+            response.ok,
+            "runtime session open rejected: {}",
+            response.error.unwrap_or_else(|| "unknown error".into())
+        );
+        let session_id = response
+            .session_id
+            .context("runtime open_session returned no session_id")?;
+        (Some(manifest.id), Some(session_id))
+    } else {
+        (None, None)
+    };
     let mut engine = if let Some(config) = lod {
         OpenClLlm::load_with_canonical_lod(&model, max_context, mode, config)?
     } else {
@@ -883,6 +937,8 @@ async fn main() -> Result<()> {
         gpu_decode_fused_kernels,
         gpu_exact_hot_fused_attention,
         timeout: Duration::from_secs(timeout_secs.max(1)),
+        runtime_manifest,
+        runtime_session_id,
     };
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
