@@ -138,6 +138,10 @@ path = "src/bin/kvslim-runtime-worker.rs"
 required-features = ["accelerator-backend"]
 
 [[bin]]
+name = "kvslim-runtime-host"
+path = "src/bin/kvslim-runtime-host.rs"
+
+[[bin]]
 name = "kvslim-server"
 path = "src/bin/kvslim-gateway.rs"
 required-features = ["unified-router"]
