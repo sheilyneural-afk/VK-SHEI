@@ -1096,4 +1096,54 @@ mod tests {
         fs::write(path, b"changed").unwrap();
         assert!(tx.promote("operator").is_err());
     }
+    #[test]
+    fn measured_decimal_times_survive_receipt_replay() {
+        let (_dir, path, mut tx) = transaction();
+        let mut base = observation("active", 4.954511420406614, true);
+        base.latency_p95_ms = 4883.16112;
+        let mut candidate = observation("candidate", 15.74695350653615, true);
+        candidate.latency_p95_ms = 1464.1582419999997;
+        tx.propose().unwrap();
+        tx.begin_shadow().unwrap();
+        assert!(tx.complete_shadow(&base, &candidate).unwrap().accepted);
+        tx.begin_canary().unwrap();
+        assert!(tx.complete_canary(&base, &candidate).unwrap().accepted);
+        tx.promote("decimal-regression").unwrap();
+        let receipts = verify_receipt_chain(tx.receipt_path()).unwrap();
+        let measured = receipts
+            .iter()
+            .find(|r| r.event == "canary_passed_awaiting_promotion")
+            .unwrap();
+        assert_eq!(
+            measured.details["candidate"]["latency_p95_ms"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            candidate.latency_p95_ms.to_bits()
+        );
+        drop(tx);
+        assert!(!pending_profile_path(&path).exists());
+    }
+
+    #[test]
+    fn finite_json_floats_keep_their_bits() {
+        let mut bits = 0x937a_fc05_631b_890d_u64;
+        for _ in 0..4096 {
+            bits = bits
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let value = f64::from_bits(bits);
+            if !value.is_finite() {
+                continue;
+            }
+            let encoded = serde_json::to_vec(&value).unwrap();
+            let decoded: f64 = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(
+                value.to_bits(),
+                decoded.to_bits(),
+                "{}",
+                String::from_utf8_lossy(&encoded)
+            );
+        }
+    }
 }

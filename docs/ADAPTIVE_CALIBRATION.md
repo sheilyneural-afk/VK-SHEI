@@ -195,6 +195,10 @@ hacer una recuperación explícita después de comprobar que no existe un escrit
 vivo; alternativamente iniciar una campaña nueva en otro directorio. No borre
 estos archivos para forzar la aceptación de un candidato sin verificarlo.
 
+La lectura JSON usa `float_roundtrip`: los decimales medidos deben conservar
+sus bits al releer los recibos y verificar sus hashes. Hay una regresión con el
+valor físico que detectó el problema y una prueba de 4096 patrones de bits.
+
 Los hashes detectan cambios accidentales, no sustituyen permisos de archivos o
 firmas de una autoridad separada. Un propietario con control completo del
 filesystem también puede reescribir la evidencia.

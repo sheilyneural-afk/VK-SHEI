@@ -98,6 +98,7 @@ pub fn implementation_digest() -> &'static str {
             include_str!("calibration_predictor.rs"),
             include_str!("prefill_calibration.rs"),
             include_str!("../Cargo.lock"),
+            include_str!("../Cargo.toml"),
         ] {
             hash.update((source.len() as u64).to_le_bytes());
             hash.update(source.as_bytes());
