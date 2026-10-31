@@ -22,25 +22,25 @@ use super::kv_cache::{
     DecoderModel, DenseKvCache, DeterministicSuffixDrafter, LayerOutputTrace, MslimKvCache,
     reference_draft,
 };
-use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicBool, Ordering};
-use super::weight_io::WeightArchive;
 #[cfg(test)]
 use super::kv_cache::{
     IncrementalRegionCertificate, MslimPage, PageAttentionCertificate, PageStorage,
     exact_oracle_min_tolerance_candidate, exact_oracle_omissible_tokens, omitted_region_bounds,
     select_token_indices, state_score_uppers_generic,
 };
+use super::weight_io::WeightArchive;
 #[cfg(test)]
 use super::weight_io::WeightFile;
 #[cfg(test)]
 use crate::attention_certificate::certified;
 #[cfg(test)]
 use crate::cold_store::PageGeometry;
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TorchChatMessage {
@@ -2290,7 +2290,11 @@ impl DecoderLayer {
         ]);
     }
 
-    pub(super) fn load(weights: &WeightArchive, layer: usize, geometry: &DecoderGeometry) -> Result<Self> {
+    pub(super) fn load(
+        weights: &WeightArchive,
+        layer: usize,
+        geometry: &DecoderGeometry,
+    ) -> Result<Self> {
         let p = format!("model.layers.{layer}");
         let hidden = geometry.hidden;
         let query_out = geometry.query_out();
