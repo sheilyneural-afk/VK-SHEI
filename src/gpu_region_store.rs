@@ -27,6 +27,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use half::bf16;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::PathBuf};
 use tempfile::{Builder, TempDir};
 
@@ -329,6 +330,42 @@ impl GpuRegionStore {
 
     pub fn layer_tokens(&self, layer: usize) -> usize {
         self.pages.get(layer).map_or(0, Vec::len)
+    }
+
+    /// Validation-only SHA-256 of the complete logical BF16 K/V state.
+    /// The serialization is identical to `OpenClLlm::logical_kv_sha256`:
+    /// K then V, layer-major, with every tensor ordered
+    /// `[1, kv_heads, tokens, head_dim]`.
+    pub fn logical_kv_sha256(&mut self) -> Result<String> {
+        let tokens = self.axis.token_len();
+        ensure!(
+            self.pages.iter().all(|layer| layer.len() == tokens),
+            "canonical ColdStore layers do not share a complete causal prefix"
+        );
+        let positions = (0..tokens).collect::<Vec<_>>();
+        let head_bytes = self.geometry.head_dim * 2;
+        let token_bytes = self.geometry.kv_elements_per_token() * 2;
+        let mut hash = Sha256::new();
+        hash.update(b"mslim-dense-kv-state-v1");
+        hash.update((tokens as u64).to_le_bytes());
+        for layer in 0..self.pages.len() {
+            for token_major in [
+                self.read_keys(layer, &positions)?,
+                self.read_values(layer, &positions)?,
+            ] {
+                ensure!(
+                    token_major.len() == tokens * token_bytes,
+                    "canonical ColdStore logical K/V shape mismatch"
+                );
+                for head in 0..self.geometry.kv_heads {
+                    for token in 0..tokens {
+                        let start = (token * self.geometry.kv_heads + head) * head_bytes;
+                        hash.update(&token_major[start..start + head_bytes]);
+                    }
+                }
+            }
+        }
+        Ok(format!("{:x}", hash.finalize()))
     }
 
     /// Single-token decode uses the exact same canonical ColdStore page

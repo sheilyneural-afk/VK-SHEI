@@ -1,9 +1,9 @@
-//! Project-local physical certification runner.
+//! Project-local physical conformance runner.
 //!
-//! The production gate runs the current conformance path
-//! collection. It validates the canonical model/adaptor path once and records
-//! the measured result. Diagnostic conformance and benchmark tests remain
-//! separate from release certification.
+//! It invokes `mslim-validate-model` once and records inspect, load, prefill,
+//! decode, snapshot and restore results for the selected adapter. The receipt
+//! does not replace the four-route validation matrix, calibration, gateway E2E
+//! or release installation checks.
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;

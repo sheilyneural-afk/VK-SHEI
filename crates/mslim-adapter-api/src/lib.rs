@@ -142,6 +142,13 @@ pub trait ModelAdapter: Send {
     fn last_logits(&self) -> Result<Option<Vec<f32>>> {
         Ok(None)
     }
+    /// Returns a validation-only description of the complete logical BF16 K/V
+    /// state. Implementations must hash K then V, layer-major, and must return
+    /// `None` when they cannot prove that contract. This is deliberately
+    /// separate from the opaque lifecycle snapshot.
+    fn kv_integrity_report(&mut self) -> Result<Option<Value>> {
+        Ok(None)
+    }
     fn snapshot_kv(&self) -> Result<Vec<u8>>;
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()>;
 }

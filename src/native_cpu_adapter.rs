@@ -145,6 +145,7 @@ trait NativeCausalRuntime: Send {
     fn last_logits(&self) -> Option<Vec<f32>>;
     fn session_tokens(&self) -> &[u32];
     fn kv_report(&self) -> Value;
+    fn kv_integrity_report(&mut self) -> Result<Value>;
     fn reset(&mut self) -> Result<()>;
 }
 
@@ -219,6 +220,10 @@ fn softmax(values: &mut [f32]) {
     }
 }
 
+fn attention_scale(head_dim: usize) -> f32 {
+    (head_dim as f32).sqrt().recip()
+}
+
 fn auto_hot_kv_budget() -> usize {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
@@ -251,7 +256,7 @@ fn dense_attention_bf16(
     );
     let head_bytes = head_dim * 2;
     let group = query_heads / kv_heads;
-    let scale = (head_dim as f32).sqrt().recip();
+    let scale = attention_scale(head_dim);
     let mut output = vec![0.0_f32; query_heads * head_dim];
     output
         .par_chunks_mut(head_dim)
@@ -368,6 +373,11 @@ impl NativeCpuDecoder {
             .iter()
             .flat_map(|&x| bf16::from_f32(x).to_bits().to_le_bytes())
             .collect::<Vec<_>>();
+        // Keep the exact same f32 operation as `dense_attention_bf16`.
+        // Division by sqrt(dim) is mathematically equivalent but rounds
+        // differently and used to make the ColdStore route diverge from the
+        // hot-dense reference even when every BF16 K/V byte was identical.
+        let scale = attention_scale(g.head_dim);
         let regional = self.kv.plan_micro_regions(layer, &query_bytes)?;
         let scored_positions = regional
             .as_ref()
@@ -389,7 +399,7 @@ impl NativeCpuDecoder {
                         a * bf16::from_bits(u16::from_le_bytes([value[0], value[1]])).to_f32()
                     })
                     .sum::<f32>();
-                *score = dot / (g.head_dim as f32).sqrt();
+                *score = dot * scale;
             }
         }
         let (positions, mut selected_scores) = if regional.is_some() {
@@ -617,6 +627,17 @@ impl NativeCausalRuntime for NativeCpuDecoder {
         })
     }
 
+    fn kv_integrity_report(&mut self) -> Result<Value> {
+        Ok(json!({
+            "schema": "mslim.logical-kv-integrity/v1",
+            "authority": "canonical-bf16-coldstore",
+            "serialization": "k-then-v-layer-major-head-token-dim",
+            "tokens": self.tokens.len(),
+            "layers": self.spec.num_hidden_layers,
+            "logical_kv_sha256": self.kv.logical_kv_sha256()?,
+        }))
+    }
+
     fn reset(&mut self) -> Result<()> {
         let g = self.spec.attention;
         self.kv = GpuRegionStore::new(
@@ -716,6 +737,15 @@ impl ModelAdapter for NativeCpuModelAdapter {
 
     fn last_logits(&self) -> Result<Option<Vec<f32>>> {
         Ok(self.runtime.as_ref().and_then(|r| r.last_logits()))
+    }
+
+    fn kv_integrity_report(&mut self) -> Result<Option<Value>> {
+        Ok(Some(
+            self.runtime
+                .as_mut()
+                .context("CPU nativa no cargada")?
+                .kv_integrity_report()?,
+        ))
     }
 
     fn snapshot_kv(&self) -> Result<Vec<u8>> {

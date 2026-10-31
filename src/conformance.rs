@@ -24,7 +24,7 @@ pub struct AdapterConformanceReport {
     /// This does not assert that physical K/V tensor bytes were persisted.
     pub kv_snapshot: bool,
     pub kv_restore: bool,
-    pub snapshot_contract: &'static str,
+    pub snapshot_contract: String,
     pub physical_kv_persistence_verified: bool,
     pub logits_captured: bool,
     pub status: &'static str,
@@ -36,6 +36,114 @@ pub struct LogitParityReport {
     pub exact: bool,
     pub within_tolerance: bool,
     pub max_abs_difference: f32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LogitDistributionReport {
+    pub compared: usize,
+    pub exact: bool,
+    pub max_abs_difference: f32,
+    pub mean_abs_difference: f64,
+    pub p95_abs_difference: f32,
+    pub kl_reference_to_candidate: f64,
+    pub reference_top1: usize,
+    pub candidate_top1: usize,
+    pub top1_equal: bool,
+    pub reference_top1_top2_margin: f32,
+    pub candidate_top1_top2_margin: f32,
+}
+
+fn top_two(values: &[f32]) -> (usize, f32, f32) {
+    let mut first = (usize::MAX, f32::NEG_INFINITY);
+    let mut second = f32::NEG_INFINITY;
+    for (index, &value) in values.iter().enumerate() {
+        if value > first.1 {
+            second = first.1;
+            first = (index, value);
+        } else if value > second {
+            second = value;
+        }
+    }
+    (first.0, first.1, second)
+}
+
+/// Distribution-aware diagnostic for backend and same-backend comparisons.
+/// KL is computed with a stable softmax in f64 and is not used as an implicit
+/// activation threshold; policy must compare it with a predeclared limit.
+pub fn compare_logit_distributions(
+    reference: &[f32],
+    candidate: &[f32],
+) -> Result<LogitDistributionReport> {
+    ensure!(!reference.is_empty(), "reference logits are empty");
+    ensure!(
+        reference.len() == candidate.len(),
+        "logit vocabularies differ"
+    );
+    ensure!(
+        reference
+            .iter()
+            .chain(candidate)
+            .all(|value| value.is_finite()),
+        "logit comparison requires finite values"
+    );
+    let mut differences = reference
+        .iter()
+        .zip(candidate)
+        .map(|(left, right)| (left - right).abs())
+        .collect::<Vec<_>>();
+    let max_abs_difference = differences.iter().copied().fold(0.0_f32, f32::max);
+    let mean_abs_difference = differences
+        .iter()
+        .map(|&value| f64::from(value))
+        .sum::<f64>()
+        / differences.len() as f64;
+    differences.sort_by(f32::total_cmp);
+    let p95_index = ((differences.len() - 1) * 95) / 100;
+    let p95_abs_difference = differences[p95_index];
+
+    let reference_max = reference.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let candidate_max = candidate.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let reference_exp = reference
+        .iter()
+        .map(|&value| f64::from(value - reference_max).exp())
+        .collect::<Vec<_>>();
+    let candidate_exp = candidate
+        .iter()
+        .map(|&value| f64::from(value - candidate_max).exp())
+        .collect::<Vec<_>>();
+    let reference_sum = reference_exp.iter().sum::<f64>();
+    let candidate_sum = candidate_exp.iter().sum::<f64>();
+    ensure!(
+        reference_sum.is_finite() && candidate_sum.is_finite(),
+        "logit softmax normalization is not finite"
+    );
+    let reference_log_sum = reference_sum.ln() + f64::from(reference_max);
+    let candidate_log_sum = candidate_sum.ln() + f64::from(candidate_max);
+    let kl_reference_to_candidate = reference_exp
+        .iter()
+        .zip(reference.iter().zip(candidate))
+        .map(|(&left, (&reference_logit, &candidate_logit))| {
+            let p = left / reference_sum;
+            p * ((f64::from(reference_logit) - reference_log_sum)
+                - (f64::from(candidate_logit) - candidate_log_sum))
+        })
+        .sum::<f64>()
+        .max(0.0);
+    let (reference_top1, reference_first, reference_second) = top_two(reference);
+    let (candidate_top1, candidate_first, candidate_second) = top_two(candidate);
+    Ok(LogitDistributionReport {
+        compared: reference.len(),
+        exact: reference == candidate,
+        max_abs_difference,
+        mean_abs_difference,
+        p95_abs_difference,
+        kl_reference_to_candidate,
+        reference_top1,
+        candidate_top1,
+        top1_equal: reference_top1 == candidate_top1,
+        reference_top1_top2_margin: reference_first - reference_second,
+        candidate_top1_top2_margin: candidate_first - candidate_second,
+    })
 }
 
 /// Compares logits produced by two real adapter executions. Missing vectors
@@ -85,18 +193,14 @@ pub fn run_adapter_conformance(
         "conformance probe cannot be empty"
     );
     let mut engine = MslimEngine::new(adapter);
-    let capabilities = engine.capabilities().clone();
+    let declared_capabilities = engine.capabilities().clone();
     ensure!(
-        capabilities.supports_prefill,
+        declared_capabilities.supports_prefill,
         "adapter does not support prefill"
     );
     ensure!(
-        capabilities.supports_decode,
+        declared_capabilities.supports_decode,
         "adapter does not support decode"
-    );
-    ensure!(
-        capabilities.supports_kv_restore,
-        "adapter does not support KV restore"
     );
     ensure!(
         engine.state() == EngineState::Created,
@@ -111,6 +215,11 @@ pub fn run_adapter_conformance(
         "inspect did not advance state"
     );
     engine.load(model_dir, config).context("conformance load")?;
+    let capabilities = engine.capabilities().clone();
+    ensure!(
+        capabilities.supports_kv_restore,
+        "loaded adapter configuration does not support KV restore"
+    );
     ensure!(
         engine.state() == EngineState::Loaded,
         "load did not advance state"
@@ -135,6 +244,17 @@ pub fn run_adapter_conformance(
         !snapshot.is_empty(),
         "adapter returned an empty KV snapshot"
     );
+    let snapshot_schema = serde_json::from_slice::<Value>(&snapshot)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("schema")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let physical_kv_persistence_verified =
+        snapshot_schema.as_deref() == Some("mslim.runtime.physical-coldstore-snapshot/v1");
+    let snapshot_contract = snapshot_schema.unwrap_or_else(|| "opaque-non-json-snapshot".into());
     engine
         .restore_kv(&snapshot)
         .context("conformance restore")?;
@@ -155,8 +275,8 @@ pub fn run_adapter_conformance(
         decode: true,
         kv_snapshot: true,
         kv_restore: true,
-        snapshot_contract: "opaque-logical-replay-not-physical-kv-proof",
-        physical_kv_persistence_verified: false,
+        snapshot_contract,
+        physical_kv_persistence_verified,
         logits_captured,
         status: "passed",
     })
@@ -164,7 +284,7 @@ pub fn run_adapter_conformance(
 
 #[cfg(test)]
 mod tests {
-    use super::compare_logits;
+    use super::{compare_logit_distributions, compare_logits};
 
     #[test]
     fn logit_parity_reports_exact_and_tolerance_separately() {
@@ -172,5 +292,15 @@ mod tests {
         assert!(!report.exact);
         assert!(report.within_tolerance);
         assert!(report.max_abs_difference > 0.0);
+    }
+
+    #[test]
+    fn distribution_report_captures_tail_and_top_token() {
+        let report = compare_logit_distributions(&[0.0, 3.0, 1.0], &[0.1, 2.9, 1.0]).unwrap();
+        assert_eq!(report.reference_top1, 1);
+        assert!(report.top1_equal);
+        assert!(report.max_abs_difference > 0.0);
+        assert!(report.p95_abs_difference > 0.0);
+        assert!(report.kl_reference_to_candidate >= 0.0);
     }
 }

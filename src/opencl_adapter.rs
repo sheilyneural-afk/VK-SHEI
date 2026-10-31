@@ -14,12 +14,42 @@ use crate::gpu_region_store::GpuRegionConfig;
 use crate::model_bundle::ModelBundle;
 use crate::opencl_llm::{OpenClLlm, WeightMode};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenClKvMode {
+    Dense,
+    ExactColdStore,
+}
+
+impl OpenClKvMode {
+    fn parse(config: &Value) -> Result<Self> {
+        match config
+            .get("mslim_kv_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("exact-coldstore")
+        {
+            "dense" => Ok(Self::Dense),
+            "exact-coldstore" => Ok(Self::ExactColdStore),
+            other => anyhow::bail!(
+                "unsupported mslim_kv_mode: {other}; expected dense or exact-coldstore"
+            ),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dense => "dense",
+            Self::ExactColdStore => "exact-coldstore",
+        }
+    }
+}
+
 pub struct OpenClModelAdapter {
     capabilities: AdapterCapabilities,
     model_dir: Option<PathBuf>,
     runtime: Option<OpenClLlm>,
     last_logits: Option<Vec<f32>>,
     cached_prompt: Vec<u32>,
+    kv_mode: OpenClKvMode,
 }
 
 impl Default for OpenClModelAdapter {
@@ -37,6 +67,7 @@ impl Default for OpenClModelAdapter {
             runtime: None,
             last_logits: None,
             cached_prompt: Vec::new(),
+            kv_mode: OpenClKvMode::ExactColdStore,
         }
     }
 }
@@ -72,10 +103,15 @@ impl ModelAdapter for OpenClModelAdapter {
             .and_then(Value::as_u64)
             .context("model configuration must declare a context limit")?
             as usize;
+        let kv_mode = OpenClKvMode::parse(config)?;
         let epsilon = config
             .get("mslim_lod_epsilon")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
+        ensure!(
+            kv_mode == OpenClKvMode::ExactColdStore || epsilon == 0.0,
+            "dense OpenCL mode cannot declare a positive LOD epsilon"
+        );
         let stage_tokens = config
             .get("mslim_stage_tokens")
             .and_then(Value::as_u64)
@@ -90,7 +126,9 @@ impl ModelAdapter for OpenClModelAdapter {
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
-        let cold_directory = if let Some(root) = cold_directory_root {
+        let cold_directory = if kv_mode == OpenClKvMode::ExactColdStore
+            && let Some(root) = cold_directory_root
+        {
             fs::create_dir_all(&root).context("create canonical ColdStore root")?;
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -117,50 +155,58 @@ impl ModelAdapter for OpenClModelAdapter {
             "stream" => WeightMode::Stream,
             other => anyhow::bail!("unsupported mslim_weight_mode: {other}"),
         };
-        let mut runtime = OpenClLlm::load_with_gpu_region(model_dir, max_tokens, mode, lod)
-            .context("load exact canonical accelerator model adapter")?;
+        let mut runtime = match kv_mode {
+            OpenClKvMode::Dense => OpenClLlm::load(model_dir, max_tokens, mode)
+                .context("load dense accelerator model adapter")?,
+            OpenClKvMode::ExactColdStore => {
+                OpenClLlm::load_with_gpu_region(model_dir, max_tokens, mode, lod)
+                    .context("load exact canonical accelerator model adapter")?
+            }
+        };
         let prefill_batch = config
             .get("mslim_prefill_batch_tokens")
             .and_then(Value::as_u64)
             .map(usize::try_from)
             .transpose()
             .context("mslim_prefill_batch_tokens fuera de rango")?
-            .unwrap_or_else(|| max_tokens.min(128).max(1));
+            .unwrap_or_else(|| max_tokens.clamp(1, 128));
         runtime.set_batch_prefill_tokens(Some(prefill_batch))?;
 
-        let hot_tokens = config
-            .get("mslim_hot_v_tokens")
-            .and_then(Value::as_u64)
-            .map(usize::try_from)
-            .transpose()
-            .context("mslim_hot_v_tokens fuera de rango")?
-            .unwrap_or_else(|| max_tokens.min(512));
-        runtime.set_exact_hot_v_tokens(hot_tokens)?;
-        let replay_tokens = config
-            .get("mslim_prompt_replay_tokens")
-            .and_then(Value::as_u64)
-            .map(usize::try_from)
-            .transpose()
-            .context("mslim_prompt_replay_tokens fuera de rango")?
-            .unwrap_or(if mode == WeightMode::Resident {
-                hot_tokens
-            } else {
-                0
-            })
-            .min(hot_tokens);
-        runtime.set_verified_gpu_prompt_replay(replay_tokens)?;
-        let shared_prefix = config
-            .get("mslim_shared_prefix")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-            && replay_tokens >= 32;
-        runtime.set_verified_gpu_prefix_replay(shared_prefix)?;
-        runtime.set_deferred_cold_commit(
-            config
-                .get("mslim_deferred_cold_commit")
+        if kv_mode == OpenClKvMode::ExactColdStore {
+            let hot_tokens = config
+                .get("mslim_hot_v_tokens")
+                .and_then(Value::as_u64)
+                .map(usize::try_from)
+                .transpose()
+                .context("mslim_hot_v_tokens fuera de rango")?
+                .unwrap_or_else(|| max_tokens.min(512));
+            runtime.set_exact_hot_v_tokens(hot_tokens)?;
+            let replay_tokens = config
+                .get("mslim_prompt_replay_tokens")
+                .and_then(Value::as_u64)
+                .map(usize::try_from)
+                .transpose()
+                .context("mslim_prompt_replay_tokens fuera de rango")?
+                .unwrap_or(if mode == WeightMode::Resident {
+                    hot_tokens
+                } else {
+                    0
+                })
+                .min(hot_tokens);
+            runtime.set_verified_gpu_prompt_replay(replay_tokens)?;
+            let shared_prefix = config
+                .get("mslim_shared_prefix")
                 .and_then(Value::as_bool)
-                .unwrap_or(mode == WeightMode::Resident),
-        )?;
+                .unwrap_or(true)
+                && replay_tokens >= 32;
+            runtime.set_verified_gpu_prefix_replay(shared_prefix)?;
+            runtime.set_deferred_cold_commit(
+                config
+                    .get("mslim_deferred_cold_commit")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(mode == WeightMode::Resident),
+            )?;
+        }
         runtime.set_exact_hot_fused_attention(
             config
                 .get("mslim_exact_hot_fused_attention")
@@ -185,7 +231,8 @@ impl ModelAdapter for OpenClModelAdapter {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
         )?;
-        self.capabilities.supports_kv_restore = physical_restore;
+        self.capabilities.supports_kv_restore = kv_mode == OpenClKvMode::Dense || physical_restore;
+        self.kv_mode = kv_mode;
         self.model_dir = Some(model_dir.to_owned());
         self.runtime = Some(runtime);
         self.last_logits = None;
@@ -277,7 +324,41 @@ impl ModelAdapter for OpenClModelAdapter {
         Ok(self.last_logits.clone())
     }
 
+    fn kv_integrity_report(&mut self) -> Result<Option<Value>> {
+        let runtime = self
+            .runtime
+            .as_mut()
+            .context("OpenCL adapter is not loaded")?;
+        Ok(Some(json!({
+            "schema": "mslim.logical-kv-integrity/v1",
+            "authority": if self.kv_mode == OpenClKvMode::Dense {
+                "dense-device-bf16-kv"
+            } else {
+                "canonical-bf16-coldstore"
+            },
+            "serialization": "k-then-v-layer-major-head-token-dim",
+            "mode": self.kv_mode.label(),
+            "tokens": runtime.position(),
+            "layers": runtime.spec().num_hidden_layers,
+            "logical_kv_sha256": runtime.canonical_kv_sha256()?,
+        })))
+    }
+
     fn snapshot_kv(&self) -> Result<Vec<u8>> {
+        if self.kv_mode == OpenClKvMode::Dense {
+            let runtime = self
+                .runtime
+                .as_ref()
+                .context("OpenCL adapter is not loaded")?;
+            return serde_json::to_vec(&json!({
+                "schema": "mslim.runtime.replay-snapshot/v1",
+                "model_dir": self.model_dir,
+                "tokens": runtime.session_token_ids(),
+                "authority": "logical-token-replay",
+                "kv_mode": self.kv_mode.label(),
+            }))
+            .context("serialize dense OpenCL logical replay snapshot");
+        }
         ensure!(
             self.capabilities.supports_kv_restore,
             "physical OpenCL K/V snapshots require mslim_cold_directory"
@@ -292,11 +373,52 @@ impl ModelAdapter for OpenClModelAdapter {
             "cold_directory": runtime.active_cold_directory(),
             "tokens": runtime.session_token_ids(),
             "authority": "canonical-bf16-coldstore",
+            "kv_mode": self.kv_mode.label(),
         }))
         .context("serialize physical OpenCL ColdStore snapshot handle")
     }
 
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
+        if self.kv_mode == OpenClKvMode::Dense {
+            let envelope: Value = serde_json::from_slice(snapshot)
+                .context("parse dense OpenCL logical replay snapshot")?;
+            ensure!(
+                envelope.get("schema").and_then(Value::as_str)
+                    == Some("mslim.runtime.replay-snapshot/v1"),
+                "unsupported dense OpenCL snapshot schema"
+            );
+            let expected_dir = envelope
+                .get("model_dir")
+                .and_then(Value::as_str)
+                .context("dense OpenCL snapshot missing model identity")?;
+            ensure!(
+                self.model_dir.as_deref() == Some(Path::new(expected_dir)),
+                "dense OpenCL snapshot model identity mismatch"
+            );
+            let tokens = envelope
+                .get("tokens")
+                .and_then(Value::as_array)
+                .context("dense OpenCL snapshot missing token history")?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|token| u32::try_from(token).ok())
+                        .context("invalid token in dense OpenCL snapshot")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let runtime = self
+                .runtime
+                .as_mut()
+                .context("OpenCL adapter is not loaded")?;
+            runtime.reset_session()?;
+            for &token in &tokens {
+                runtime.forward_token(token, false)?;
+            }
+            self.last_logits = None;
+            self.cached_prompt = tokens;
+            return Ok(());
+        }
         ensure!(
             self.capabilities.supports_kv_restore,
             "physical OpenCL K/V restore requires mslim_cold_directory"
@@ -369,5 +491,18 @@ mod tests {
         assert!(!adapter.capabilities().supports_kv_restore);
         assert!(!adapter.capabilities().supports_streaming);
         assert!(adapter.snapshot_kv().is_err());
+    }
+
+    #[test]
+    fn kv_mode_is_explicit_and_fail_closed() {
+        assert_eq!(
+            OpenClKvMode::parse(&json!({"mslim_kv_mode": "dense"})).unwrap(),
+            OpenClKvMode::Dense
+        );
+        assert_eq!(
+            OpenClKvMode::parse(&json!({"mslim_kv_mode": "exact-coldstore"})).unwrap(),
+            OpenClKvMode::ExactColdStore
+        );
+        assert!(OpenClKvMode::parse(&json!({"mslim_kv_mode": "automatic"})).is_err());
     }
 }

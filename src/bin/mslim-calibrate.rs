@@ -1,6 +1,10 @@
 //! Measure sustained execution and persist observations, never inferred claims.
 
 use anyhow::{Context, Result, bail, ensure};
+use mslim::calibration_contract::{
+    CALIBRATION_RECEIPT_SCHEMA, CALIBRATION_RECEIPT_STATUS, LOGICAL_REPLAY_SNAPSHOT_KIND,
+    PHYSICAL_COLDSTORE_SNAPSHOT_KIND, validate_calibration_receipt,
+};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -11,7 +15,6 @@ use std::{
 };
 
 const DEFAULT_CONTEXTS: &[usize] = &[1, 128, 512, 2_048];
-const SNAPSHOT_KIND: &str = "logical-replay-token-history";
 
 #[derive(Debug, Serialize)]
 struct CalibrationReceipt {
@@ -26,7 +29,7 @@ struct CalibrationReceipt {
     decode_tokens_per_run: usize,
     context_samples: Vec<ContextSample>,
     snapshot_contract: SnapshotContract,
-    parity_gate: &'static str,
+    validation_matrix_gate: &'static str,
     peak_rss_bytes: Option<u64>,
     checks: Vec<&'static str>,
     status: &'static str,
@@ -48,7 +51,7 @@ struct ContextSample {
     decode_tokens: usize,
     decode_micros: Distribution,
     decode_tokens_per_second_median: f64,
-    logical_replay_snapshot_bytes: usize,
+    snapshot_handle_bytes: usize,
     peak_rss_bytes: Option<u64>,
     status: &'static str,
 }
@@ -91,17 +94,37 @@ fn main() -> Result<()> {
 
     let destination = root.join("deploy/local-production/runtime/calibration");
     let path = destination.join(format!("{digest}.json"));
-    let config: Value = serde_json::from_slice(&fs::read(bundle.join("config.json"))?)?;
+    let mut config: Value = serde_json::from_slice(&fs::read(bundle.join("config.json"))?)?;
     let selection = mslim::adapter_catalog::select_available_for_model(&bundle, None, None)?;
-    let parity_gate = require_passing_parity_if_accelerated(&root, digest, &selection.adapter_id)?;
+    let validation_matrix_gate =
+        require_passing_validation_matrix_if_accelerated(&root, digest, &selection.adapter_id)?;
+    let calibration_coldstore = if selection.adapter_id == "accelerator-runtime" {
+        let temporary_root = root.join("deploy/local-production/runtime/tmp");
+        fs::create_dir_all(&temporary_root)?;
+        let coldstore = tempfile::Builder::new()
+            .prefix("calibration-coldstore-")
+            .tempdir_in(&temporary_root)?;
+        config["mslim_kv_mode"] = Value::String("exact-coldstore".into());
+        config["mslim_lod_epsilon"] = Value::from(0.0);
+        config["mslim_cold_directory"] =
+            Value::String(coldstore.path().to_string_lossy().into_owned());
+        Some(coldstore)
+    } else {
+        None
+    };
     let host = mslim::adapter_catalog::host_capabilities();
+    let mut identity_config = config.clone();
+    if calibration_coldstore.is_some() {
+        identity_config["mslim_cold_directory"] =
+            Value::String("temporary-calibration-namespace".into());
+    }
     let identity_input = serde_json::json!({
         "model_digest": digest,
-        "config": config,
+        "config": identity_config,
         "adapter": selection,
         "host": host,
         "engine_schema": "mslim.engine/v1",
-        "benchmark_schema": "mslim.calibration_receipt/v2",
+        "benchmark_schema": CALIBRATION_RECEIPT_SCHEMA,
         "warmups": options.warmups,
         "repeats": options.repeats,
         "decode_tokens": options.decode_tokens,
@@ -113,9 +136,7 @@ fn main() -> Result<()> {
     {
         let existing: Value = serde_json::from_slice(&bytes)
             .with_context(|| format!("calibración existente inválida: {}", path.display()))?;
-        if existing.get("schema").and_then(Value::as_str) == Some("mslim.calibration_receipt/v2")
-            && existing.get("status").and_then(Value::as_str)
-                == Some("measured-sustained-execution")
+        if validate_calibration_receipt(&existing, digest).is_ok()
             && existing.get("identity_digest").and_then(Value::as_str) == Some(&identity_digest)
         {
             println!("{}", serde_json::to_string_pretty(&existing)?);
@@ -183,14 +204,14 @@ fn main() -> Result<()> {
             decode_tokens_per_second_median: rate(options.decode_tokens, decode.median),
             prefill_micros: prefill,
             decode_micros: decode,
-            logical_replay_snapshot_bytes: snapshot_bytes,
+            snapshot_handle_bytes: snapshot_bytes,
             peak_rss_bytes: peak_rss_bytes(),
             status: "measured",
         });
     }
 
     let receipt = CalibrationReceipt {
-        schema: "mslim.calibration_receipt/v2",
+        schema: CALIBRATION_RECEIPT_SCHEMA,
         bundle: digest.to_owned(),
         adapter: selection.adapter_id,
         identity_digest,
@@ -201,23 +222,35 @@ fn main() -> Result<()> {
         decode_tokens_per_run: options.decode_tokens,
         context_samples,
         snapshot_contract: SnapshotContract {
-            kind: SNAPSHOT_KIND,
-            physical_kv_persisted: false,
+            kind: if calibration_coldstore.is_some() {
+                PHYSICAL_COLDSTORE_SNAPSHOT_KIND
+            } else {
+                LOGICAL_REPLAY_SNAPSHOT_KIND
+            },
+            physical_kv_persisted: calibration_coldstore.is_some(),
             restore_latency_measured_as_physical_kv_hydration: false,
-            note: "La interfaz actual conserva una receta lógica de replay; esta calibración no afirma persistencia ni hidratación física de tensores KV.",
+            note: if calibration_coldstore.is_some() {
+                "La calibración usa un namespace ColdStore temporal exacto; no mide la latencia de restore por separado."
+            } else {
+                "La calibración conserva una receta lógica de replay; no afirma persistencia física de tensores K/V."
+            },
         },
-        parity_gate,
+        validation_matrix_gate,
         peak_rss_bytes: peak_rss_bytes(),
         checks: vec![
             "inspect",
             "load",
-            "parity_receipt_gate",
+            "same_backend_validation_matrix_gate",
             "warmup",
             "repeated_prefill",
             "sustained_decode",
-            "logical_replay_snapshot",
+            if calibration_coldstore.is_some() {
+                "physical_coldstore_snapshot_restore"
+            } else {
+                "logical_replay_snapshot_restore"
+            },
         ],
-        status: "measured-sustained-execution",
+        status: CALIBRATION_RECEIPT_STATUS,
     };
     fs::create_dir_all(&destination)?;
     let temporary = tempfile::NamedTempFile::new_in(&destination)?;
@@ -251,7 +284,7 @@ fn run_once(
     Ok((prefill_micros, decode_micros, logical_snapshot.len()))
 }
 
-fn require_passing_parity_if_accelerated(
+fn require_passing_validation_matrix_if_accelerated(
     root: &Path,
     digest: &str,
     adapter_id: &str,
@@ -261,27 +294,48 @@ fn require_passing_parity_if_accelerated(
     }
     let path = root
         .join("deploy/local-production/runtime/validation")
-        .join(format!("adapter-parity-{digest}.json"));
+        .join(format!("validation-matrix-{digest}.json"));
     let receipt: Value = serde_json::from_slice(&fs::read(&path).with_context(|| {
         format!(
-            "falta la paridad obligatoria del acelerador: {}",
+            "falta la matriz obligatoria de validación del acelerador: {}",
             path.display()
         )
     })?)
-    .context("recibo de paridad inválido")?;
+    .context("matriz de validación inválida")?;
     ensure!(
-        receipt.get("schema").and_then(Value::as_str) == Some("mslim.adapter-parity/v2"),
-        "la paridad del acelerador no usa el contrato v2"
+        receipt.get("schema").and_then(Value::as_str) == Some("mslim.validation-matrix/v1"),
+        "la validación del acelerador no usa el contrato de matriz v1"
     );
     ensure!(
         receipt.get("status").and_then(Value::as_str) == Some("passed"),
-        "la paridad del acelerador falló; se prohíbe calibrarlo para activación"
+        "la matriz del acelerador falló; se prohíbe calibrarlo para activación"
     );
     ensure!(
         receipt.get("bundle_sha256").and_then(Value::as_str) == Some(digest),
-        "el recibo de paridad pertenece a otro bundle"
+        "la matriz de validación pertenece a otro bundle"
     );
-    Ok("passed")
+    ensure!(
+        receipt
+            .pointer("/determinism/all_passed")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "la matriz no demuestra determinismo de las cuatro rutas"
+    );
+    ensure!(
+        receipt
+            .pointer("/same_backend/all_passed")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "la matriz no demuestra exactitud densa contra ColdStore dentro de cada backend"
+    );
+    ensure!(
+        receipt
+            .pointer("/snapshot_contract/accelerator_exact_physical_snapshot")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "la matriz no demuestra snapshot físico del ColdStore acelerado"
+    );
+    Ok("same-backend-and-kv-integrity-passed")
 }
 
 fn distribution(mut samples: Vec<u128>) -> Result<Distribution> {
@@ -339,13 +393,20 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
         }
     }
     ensure!(
-        (1..=20).contains(&options.repeats),
-        "--repeats debe ser 1..=20"
+        (3..=20).contains(&options.repeats),
+        "--repeats debe ser 3..=20"
     );
-    ensure!(options.warmups <= 10, "--warmups debe ser 0..=10");
     ensure!(
-        (1..=512).contains(&options.decode_tokens),
-        "--decode-tokens debe ser 1..=512"
+        (1..=10).contains(&options.warmups),
+        "--warmups debe ser 1..=10"
+    );
+    ensure!(
+        (8..=512).contains(&options.decode_tokens),
+        "--decode-tokens debe ser 8..=512"
+    );
+    ensure!(
+        options.contexts.len() >= 2,
+        "--contexts debe incluir al menos dos longitudes distintas"
     );
     Ok(options)
 }
@@ -382,7 +443,9 @@ fn peak_rss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{distribution, parse_contexts};
+    use super::{distribution, parse_contexts, require_passing_validation_matrix_if_accelerated};
+    use serde_json::json;
+    use std::fs;
 
     #[test]
     fn contexts_are_sorted_and_deduplicated() {
@@ -396,5 +459,46 @@ mod tests {
         assert_eq!(values.median, 30);
         assert_eq!(values.p95, 50);
         assert_eq!(values.maximum, 50);
+    }
+
+    #[test]
+    fn accelerator_calibration_requires_same_backend_integrity_not_cross_backend_bits() {
+        let root = tempfile::tempdir().unwrap();
+        let digest = "a".repeat(64);
+        let directory = root
+            .path()
+            .join("deploy/local-production/runtime/validation");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("validation-matrix-{digest}.json"));
+        let mut receipt = json!({
+            "schema": "mslim.validation-matrix/v1",
+            "status": "passed",
+            "bundle_sha256": digest,
+            "determinism": {"all_passed": true},
+            "same_backend": {"all_passed": true},
+            "snapshot_contract": {"accelerator_exact_physical_snapshot": true},
+            "cross_backend_diagnostic": {"all_logits_exact": false},
+        });
+        fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert_eq!(
+            require_passing_validation_matrix_if_accelerated(
+                root.path(),
+                &digest,
+                "accelerator-runtime"
+            )
+            .unwrap(),
+            "same-backend-and-kv-integrity-passed"
+        );
+
+        receipt["same_backend"]["all_passed"] = json!(false);
+        fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(
+            require_passing_validation_matrix_if_accelerated(
+                root.path(),
+                &digest,
+                "accelerator-runtime"
+            )
+            .is_err()
+        );
     }
 }

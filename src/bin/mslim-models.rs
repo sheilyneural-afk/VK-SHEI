@@ -6,6 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -131,20 +132,7 @@ fn bundle_integrity(path: &std::path::Path, directory_name: &str) -> String {
     if directory_name.len() != 64 || !directory_name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return "invalid-directory-digest".into();
     }
-    let manifest = match std::fs::read(path.join("bundle-manifest.json")) {
-        Ok(bytes) => bytes,
-        Err(_) => return "missing-manifest".into(),
-    };
-    let value: serde_json::Value = match serde_json::from_slice(&manifest) {
-        Ok(value) => value,
-        Err(_) => return "invalid-manifest".into(),
-    };
-    if value.get("schema").and_then(serde_json::Value::as_str) != Some("mslim.model_bundle/v1")
-        || value
-            .get("bundle_sha256")
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(|digest| !digest.eq_ignore_ascii_case(directory_name))
-    {
+    if mslim::model_bundle::validated_bundle_manifest(path).is_err() {
         return "manifest-mismatch".into();
     }
     let mut files = Vec::new();
@@ -153,15 +141,25 @@ fn bundle_integrity(path: &std::path::Path, directory_name: &str) -> String {
     }
     files.sort();
     let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
     for relative in files {
         let name = relative.to_string_lossy().replace('\\', "/");
-        let bytes = match fs::read(path.join(&relative)) {
-            Ok(bytes) => bytes,
+        let mut file = match fs::File::open(path.join(&relative)) {
+            Ok(file) => file,
             Err(_) => return "unreadable-bundle".into(),
         };
         hasher.update(name.as_bytes());
         hasher.update([0]);
-        hasher.update(bytes);
+        loop {
+            let read = match file.read(&mut buffer) {
+                Ok(read) => read,
+                Err(_) => return "unreadable-bundle".into(),
+            };
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
         hasher.update([0]);
     }
     if hex::encode(hasher.finalize()).eq_ignore_ascii_case(directory_name) {

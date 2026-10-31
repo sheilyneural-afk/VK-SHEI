@@ -1,40 +1,26 @@
-# Entorno local de producción de M-SLIM
+# Entorno local de M-SLIM
 
-## Catálogo e instalación de runtimes
+El nombre del directorio es `local-production`, pero su existencia no demuestra
+que haya una release instalada ni un servicio activo. Este árbol aísla modelos,
+binarios, estado, recibos y compilación dentro del proyecto.
 
-El catálogo de runtimes está en `../../catalogs/runtime-catalog.example.json`. No contiene binarios ni hashes inventados: cada release concreta debe aportar una URL HTTPS y un fichero oficial de checksums.
+## Estado inspeccionado
 
-Para resolver e instalar un artefacto:
+A fecha de la revisión documental del 31 de octubre de 2026:
 
-```bash
-deploy/local-production/scripts/resolve-runtime-manifest.sh \\
-  <runtime-id> <version> <artifact-url> <checksum-url> \\
-  <ruta-relativa-dentro-de-runtime>
-```
+- existe un bundle local bajo `runtime/models/`;
+- existe una matriz actual `mslim.validation-matrix/v1` que pasó para una
+  configuración exacta concreta;
+- no se conservan calibraciones, certificaciones ni E2E anteriores;
+- no existe todavía un recibo general `mslim.validation_receipt/v1` para el
+  bundle;
+- `runtime/bin/` no contiene los binarios declarados por la release;
+- no hay procesos M-SLIM activos;
+- el gateway y el worker no aceptan actualmente el mismo contrato de
+  calibración.
 
-El script descarga el artefacto, obtiene el SHA-256 del fichero oficial, verifica la coincidencia y genera un manifest en `runtime/manifests/`.
-
-Los drivers del sistema no se instalan automáticamente. Si un runtime requiere driver, el instalador se detiene y pide la instalación administrativa.
-
-Este directorio define el entorno local aislado para ejecutar `KV-SHEI` como un
-servicio controlado dentro del propio proyecto. No usa `/opt`, `/var`, el home
-del usuario, un repositorio externo ni rutas de modelos descubiertas por
-defecto.
-
-## Principios
-
-- Los artefactos activos viven bajo `deploy/local-production/runtime/`.
-- Los modelos se instalan por digest y se leen en modo solo lectura.
-- El binario, el modelo, el tokenizer, la configuración y el formato de
-  `ColdStore` forman una generación compatible.
-- El servicio debe escuchar únicamente en `127.0.0.1`.
-- El endpoint no se considera productivo para red compartida: el servidor actual
-  de M-SLIM no implementa autenticación.
-- `health` significa proceso vivo; `ready` solo se acepta después de validar el
-  binario, el modelo, la configuración y el almacenamiento local.
-- El LOD positivo queda desactivado en el perfil seguro local hasta certificarlo
-  con el modelo y el hardware concretos.
-- No se mezclan modelos, K/V, estado de sesión, logs ni artefactos de build.
+Por esas razones, este layout no debe describirse ahora como una release
+instalada o arrancable de extremo a extremo.
 
 ## Layout
 
@@ -42,133 +28,36 @@ defecto.
 deploy/local-production/
 ├── README.md
 ├── env.example
-├── local-production.env          # generado localmente; no versionar secretos
+├── local-production.env          # configuración local; no versionar secretos
 ├── manifest.example.json
+├── manifest.json                 # identidad esperada de la release local
 ├── runtime/
-│   ├── bin/                      # binario release validado
-│   ├── models/<model-digest>/    # pesos y tokenizer, solo lectura
-│   ├── coldstore/<worker-id>/    # K/V activo del worker
-│   ├── state/                    # estado operativo local no cognitivo
+│   ├── bin/                      # binarios instalados; puede estar vacío
+│   ├── models/<digest>/          # bundles importados
+│   ├── coldstore/                # páginas K/V persistentes
+│   ├── sessions/                 # SessionStore
+│   ├── calibration/              # recibos de calibración
+│   ├── validation/               # matrices y E2E
+│   ├── receipts/
 │   ├── logs/
-│   └── receipts/
+│   ├── cargo-home/               # registro y caché local de Cargo
+│   └── build-target/             # artefactos de compilación
 └── scripts/
-    ├── install-layout.sh
-    ├── install-artifact.sh
-    ├── verify-release.sh
-    ├── run-local-runtime.sh
-    └── cargo-local.sh
 ```
 
-El script `install-layout.sh` prepara automáticamente todo el layout dentro de
-este árbol. No instala drivers en el sistema ni usa rutas externas.
-
-La instalación de una release debe seguir este orden:
-
-1. preparar el layout local;
-2. obtener el manifiesto de artefactos autorizado para la release;
-3. descargar cada binario, runtime o modelo únicamente dentro de `runtime/`;
-4. verificar SHA-256 y, cuando exista, la firma del manifiesto;
-5. inspeccionar el modelo y sondear las capacidades del equipo;
-6. activar solo un adaptador que haya pasado esas comprobaciones.
-
-El usuario no debe instalar manualmente dependencias del proyecto. Cargo las
-mantiene en `runtime/cargo-home` y el build en `runtime/build-target`. Los
-drivers del sistema son la única excepción: no se pueden empaquetar de forma
-portable dentro de M-SLIM y deben existir ya en el sistema operativo. Si un
-driver o runtime no está disponible, M-SLIM lo informa y deja el núcleo de
-contexto/KV utilizable, sin fingir que el modelo puede ejecutarse.
-
-Los modelos y runtimes con licencia o distribución restringida requieren una
-acción explícita del usuario. M-SLIM puede descargar y verificar el artefacto
-cuando el manifiesto autorizado contiene su origen, versión y SHA-256, pero no
-debe descubrir URLs arbitrarias ni aceptar archivos sin hash.
+`install-layout.sh` crea los directorios. No instala drivers ni una release.
 
 ## Modelo local
 
-El modelo lo aporta el usuario o la empresa que tenga derecho a utilizarlo.
-M-SLIM no impone una arquitectura, una marca, un proveedor ni un único formato
-de pesos. Cada adaptador declara los formatos que entiende y rechaza el bundle
-si no puede demostrar compatibilidad.
-
-El bundle activo debe vivir dentro del proyecto:
+El bundle activo debe estar dentro de:
 
 ```text
-deploy/local-production/runtime/models/<sha256-del-bundle>/
-├── config.json
-├── tokenizer.json o tokenizer.model
-├── pesos del modelo en el formato declarado por el adaptador
-└── manifiesto de integridad
+deploy/local-production/runtime/models/<digest>/
 ```
 
-El usuario puede introducirlo mediante una importación local o mediante una
-descarga declarada en un manifiesto autorizado. En ambos casos M-SLIM calcula y
-comprueba el digest antes de activarlo, lo abre en modo solo lectura y registra
-la referencia por digest, nunca por un nombre ambiguo o una ruta externa.
-
-No se copia un modelo a una carpeta global del sistema. No se usa una ruta de
-usuario como autoridad de producción y no se modifica el bundle durante la
-ejecución. Si el modelo necesita conversión, se genera otro bundle versionado y
-verificable; el original se conserva intacto.
-
-Para consultar qué bundles existen y qué puede inspeccionarse localmente:
-
-```bash
-deploy/local-production/scripts/cargo-local.sh run --locked \
-  --no-default-features --bin mslim-models
-```
-
-La salida solo enumera bundles bajo `runtime/models/`. No escanea el sistema,
-no envía información a una red y no recomienda ejecución hasta que el sondeo
-del runtime y la validación del adaptador hayan pasado.
-
-Este comando no consulta catálogos remotos. Si en el futuro se habilita un
-proveedor de descubrimiento, podrá proponer modelos desde un registro externo,
-pero la descarga requerirá autorización y el modelo solo será válido después
-de importarse y verificarse localmente. Un registro remoto nunca será la
-autoridad de ejecución.
-
-La capa de catálogo permite que M-SLIM encuentre candidatos por el usuario:
-detecta primero las capacidades locales y después filtra por formato,
-arquitectura, memoria y adaptador. Una recomendación remota no se activa por sí
-sola; el resolvedor debe importar y probar el bundle dentro del proyecto antes
-de declararlo utilizable.
-
-Para consultar y ordenar candidatos en función del equipo actual:
-
-```bash
-deploy/local-production/scripts/cargo-local.sh run --locked \
-  --features model-catalog --bin mslim-recommend -- \
-  "text-generation" 20
-```
-
-La salida contiene el inventario efímero del host, la puntuación, los motivos y
-las exclusiones de cada candidato. No descarga modelos ni marca ninguno como
-ejecutable.
-
-Cuando exista un adaptador local sondeado, la descarga puede seleccionar
-automáticamente el mejor candidato:
-
-```bash
-deploy/local-production/scripts/cargo-local.sh run --locked \
-  --features model-catalog --bin mslim-download-model -- \
-  --auto "text-generation"
-```
-
-El modo automático se detiene si no hay adaptador local disponible. Descargar
-un candidato no equivale todavía a certificarlo: la carga real y la prueba de
-KV siguen siendo obligatorias antes de activarlo.
-
-Las operaciones privadas usan un token de lectura, nunca una contraseña:
-
-```bash
-printf '%s\n' 'hf_TU_TOKEN' | deploy/local-production/scripts/cargo-local.sh run \
-  --locked --features model-catalog --bin mslim-auth -- store
-deploy/local-production/scripts/cargo-local.sh run --locked \
-  --features model-catalog --bin mslim-auth -- validate
-```
-
-Para importar un modelo que ya posee el usuario o la empresa, sin dejarlo
-fuera del proyecto:
+`mslim-import-model` rechaza enlaces simbólicos, calcula un digest determinista,
+crea `bundle-manifest.json` y copia el bundle al layout local. El origen no se
+modifica.
 
 ```bash
 deploy/local-production/scripts/cargo-local.sh run --locked \
@@ -176,18 +65,38 @@ deploy/local-production/scripts/cargo-local.sh run --locked \
   /ruta/autorizada/al/bundle
 ```
 
-El importador inspecciona la configuración antes de copiar, rechaza enlaces
-simbólicos, calcula un digest determinista sobre las rutas y bytes, genera
-`bundle-manifest.json` y activa el resultado como
-`runtime/models/<digest>`. El origen nunca se modifica y el bundle activo no se
-selecciona por nombre.
+`mslim-models` enumera bundles locales; no demuestra que un adapter pueda
+cargarlos:
 
-Para instalar un artefacto autorizado, la release debe declararlo primero en
-`manifest.example.json` (copiado como manifiesto de la release) con `id`,
-`kind`, `source`, `destination`, `version`, `sha256`, `required` y la política
-de licencia. No se deben pasar destinos o URLs improvisados a una release.
+```bash
+deploy/local-production/scripts/cargo-local.sh run --locked \
+  --no-default-features --bin mslim-models
+```
 
-El instalador de un artefacto individual se usa así:
+## Catálogo remoto
+
+La feature `model-catalog` puede consultar candidatos y ordenarlos según el
+inventario local. Una recomendación no descarga ni activa automáticamente un
+modelo.
+
+```bash
+deploy/local-production/scripts/cargo-local.sh run --locked \
+  --features model-catalog --bin mslim-recommend -- \
+  "text-generation" 20
+```
+
+`mslim-download-model --auto` se detiene si no encuentra un adapter disponible.
+Después de descargar siguen siendo obligatorias la inspección del bundle, la
+carga real y la validación del perfil.
+
+Las operaciones privadas usan el token de lectura gestionado por `mslim-auth`.
+El token no debe aparecer en manifests, logs ni documentación.
+
+## Instalación de artefactos
+
+`install-artifact.sh` acepta una URL HTTPS, un SHA-256 esperado y un destino
+relativo dentro de `runtime/`. Descarga a un temporal, verifica el hash y mueve
+el archivo de forma atómica. No ejecuta el artefacto ni instala drivers.
 
 ```bash
 deploy/local-production/scripts/install-artifact.sh \
@@ -196,102 +105,166 @@ deploy/local-production/scripts/install-artifact.sh \
   runtimes/<runtime>/<archivo>
 ```
 
-El instalador solo acepta HTTPS, rechaza destinos absolutos o que escapen de
-`runtime/`, descarga a un temporal local, verifica SHA-256 y mueve el archivo
-de forma atómica. No instala drivers, no ejecuta el archivo descargado y no
-acepta una descarga cuyo hash no coincida.
+`resolve-runtime-manifest.sh` requiere que la release proporcione la URL del
+artefacto y un fichero oficial de checksums. El catálogo de ejemplo no contiene
+una release instalable por sí solo.
 
-## Cargo incremental y recuperable
+## Compilación local
 
-Usa siempre el wrapper local para que el registro de crates, descargas,
-checkouts, temporales y `target` permanezcan dentro del proyecto:
+El wrapper mantiene Cargo, temporales y `target` dentro del proyecto:
 
 ```bash
 deploy/local-production/scripts/cargo-local.sh fetch --locked
-deploy/local-production/scripts/cargo-local.sh check --locked --no-default-features
-deploy/local-production/scripts/cargo-local.sh test --locked --lib --no-default-features
+deploy/local-production/scripts/cargo-local.sh check \
+  --locked --no-default-features
+deploy/local-production/scripts/cargo-local.sh test \
+  --locked --lib --no-default-features
 ```
 
-El `Cargo.lock` fija las versiones. El mantenimiento normal reutiliza el
-registro y el target incremental; Cargo recompila únicamente las cajas
-afectadas y sus dependientes. No se debe borrar `runtime/cargo-home` ni
-`runtime/build-target` para conservar el entorno de compilación. La limpieza, si fuese necesaria,
-debe hacerse por perfil y conservar el registro de crates y el target de
-desarrollo.
+No es necesario borrar `runtime/cargo-home` ni `runtime/build-target` para una
+compilación normal. Son cachés recuperables y permiten compilación incremental.
 
-## Perfil inicial recomendado
+## Configuración
 
-El primer perfil local es automático y portable:
-
-```text
-backend              = auto / runtime compatible validado
-lod                  = desactivado
-host                 = 127.0.0.1
-port                 = 8088
-max_context_tokens   = explícito por entorno
-max_new_tokens       = explícito por entorno
-model                = ruta absoluta dentro de runtime/models
-```
-
-Los aceleradores se incorporan como workers separados cuando el dispositivo,
-el runtime, el modelo y las pruebas físicas del nodo local hayan sido
-verificados. Ningún runtime concreto forma parte del contrato público ni es
-requisito del perfil local.
-No se permite un fallback silencioso CPU/GPU.
-
-## Preparación
-
-Desde la raíz de `KV-SHEI`:
+La plantilla se copia de forma explícita:
 
 ```bash
 deploy/local-production/scripts/install-layout.sh
-cp deploy/local-production/env.example deploy/local-production/local-production.env
+cp deploy/local-production/env.example \
+  deploy/local-production/local-production.env
 ```
 
-El instalador debe colocar el modelo dentro de
-`deploy/local-production/runtime/models/<digest>` y registrar sus hashes en el
-manifiesto antes de arrancar. No se aceptan rutas externas ni modelos elegidos
-por nombre sin verificación.
+Hay que reemplazar todos los valores `REPLACE_WITH_*` y registrar los digests
+de los binarios y del árbol del modelo. `MSLIM_GATEWAY_TOKEN` es obligatorio
+para el gateway.
 
-Después construye el binario con el perfil que corresponda y colócalo en:
+El perfil incluido activa varias optimizaciones exactas. La matriz actual no
+las cubre todas a la vez: su configuración congelada desactiva replay de prompt,
+prefijo compartido, commit diferido y unroll4. Antes de instalar ese perfil como
+release hay que repetir la validación con la combinación efectiva o reducir el
+perfil a la configuración ya medida.
 
-```text
-deploy/local-production/runtime/bin/mslim-server
-```
+`MSLIM_ENABLE_LOD=true` con `MSLIM_LOD_EPSILON=0` crea la ruta exacta sin
+descarte. Un valor positivo no está autorizado por la matriz actual.
 
-La verificación es obligatoria:
+## Qué comprueba `verify-release.sh`
+
+El script comprueba:
+
+- que existen `local-production.env` y `manifest.json`;
+- que `MSLIM_HOST` es `127.0.0.1`;
+- que `MSLIM_ENABLE_LOD` es `true` o `false`;
+- que `MSLIM_COLDSTORE_FORMAT` es `TSKVPG04`;
+- que las rutas configuradas permanecen dentro del proyecto;
+- que existen y son ejecutables `mslim-server` y
+  `mslim-runtime-worker`;
+- que sus SHA-256 coinciden con las variables del entorno;
+- que el digest del árbol del modelo coincide;
+- que los archivos del modelo no son escribibles por grupo u otros usuarios.
+
+No comprueba:
+
+- que el contenido de `manifest.json` coincida con todas las variables;
+- que el worker y el gateway acepten el mismo schema de calibración;
+- que el driver o el dispositivo funcionen;
+- que el modelo pueda cargarse;
+- que el worker esté listo;
+- que la matriz corresponda al perfil efectivo;
+- que la API genere una respuesta.
+
+Por tanto, `VERIFY-OK` significa “estructura y hashes básicos válidos”, no
+“servicio listo”.
+
+## Worker y gateway
+
+`run-local-worker.sh` inicia el worker OpenCL en `127.0.0.1`, construyendo sus
+argumentos a partir de `local-production.env`. El worker no implementa
+autenticación y no debe exponerse fuera de loopback.
+
+`run-local-runtime.sh` llama a `run-auto-runtime.sh`. Este último:
+
+1. ejecuta `verify-release.sh`;
+2. valida un manifest externo si se configuró;
+3. busca un worker local que responda a `/ready` y `/v1/capabilities`;
+4. inicia el gateway autenticado.
+
+El gateway exige un bearer token para `/v1/models`, `/v1/capabilities` y
+`/v1/chat/completions`; `/health` y `/ready` no requieren token. Tanto gateway
+como workers aceptados deben usar loopback.
+
+### Bloqueo actual de calibración
+
+La ruta no está cerrada en el código actual:
+
+| Componente | Contrato aceptado |
+|---|---|
+| `mslim-calibrate` | genera `mslim.calibration_receipt/v3`, estado `measured-sustained-execution` |
+| Worker | `mslim.calibration_receipt/v2` o `/v3`, estado `measured-sustained-execution` |
+| Gateway | `mslim.calibration_receipt/v1`, estado `measured-basic-execution` |
+| `mslim-autoconfigure` | `mslim.calibration_receipt/v1`, estado `measured-basic-execution` |
+| Recibo local | no existe hasta unificar el contrato |
+
+El gateway rechaza un worker que no cumpla su contrato. Antes de documentar el
+arranque como operativo hay que unificar esos schemas, generar una calibración
+actual, instalar los binarios y ejecutar un E2E por el gateway.
+
+### Recibo general del bundle
+
+`mslim-validate-model` escribe
+`runtime/validation/<bundle-digest>.json` con schema
+`mslim.validation_receipt/v1`. `mslim-models` y `mslim-autoconfigure` exigen ese
+schema. No se conserva ahora ningún recibo general del bundle.
+
+La matriz `validation-matrix-<digest>.json` no sustituye este recibo: valida la
+relación densa/ColdStore, mientras que el recibo general identifica un adapter y
+registra inspect, load, prefill, decode, snapshot y restore. Antes de generar un
+perfil automático hay que volver a ejecutar `mslim-validate-model` y después
+`mslim-calibrate` con los contratos unificados.
+
+## Matriz exacta
+
+La validación física actual se ejecuta así:
 
 ```bash
-deploy/local-production/scripts/verify-release.sh
+deploy/local-production/scripts/cargo-local.sh run --locked --release \
+  --features accelerator-backend,native-cpu-backend \
+  --bin mslim-adapter-parity -- \
+  deploy/local-production/runtime/models/<digest> \
+  --decode-steps 8
 ```
 
-El script falla si falta el manifiesto, si las rutas escapan del proyecto, si
-el binario o el modelo no coinciden con sus hashes, si el modelo es escribible,
-si el bind no es loopback o si el formato de ColdStore no está declarado.
+El recibo queda en `runtime/validation/validation-matrix-<digest>.json`. El gate
+depende de determinismo, exactitud densa/ColdStore dentro de cada backend y
+snapshot físico GPU. CPU/GPU se conserva como diagnóstico. Consulte
+[`../../docs/VALIDATION.md`](../../docs/VALIDATION.md).
 
-## Estado de producción
+## E2E con proveedor externo
 
-El arranque se divide en dos procesos: el worker local (puerto interno 8188) y
-el gateway autenticado (puerto público local 8088). El worker no se publica a
-la red; los clientes usan únicamente el gateway.
-
-```bash
-deploy/local-production/scripts/run-local-worker.sh
-deploy/local-production/scripts/run-local-runtime.sh
-```
-
-Para certificar la ruta externa completa (proveedor real, HTTP, snapshot,
-reinicio del worker y restore físico) se usa. Por defecto selecciona `auto`,
-que mantiene los pesos residentes cuando caben y evita recargarlos por capa:
+`scripts/e2e-worker-external-restart.sh` compila y arranca un proveedor y un
+worker, genera un token, crea un snapshot, reinicia únicamente el worker y
+restaura la sesión contra el proveedor que permaneció activo.
 
 ```bash
 MSLIM_MODEL_DIR="$PWD/deploy/local-production/runtime/models/<digest>" \
   scripts/e2e-worker-external-restart.sh
 ```
 
-El script crea un ColdStore y un SessionStore aislados por ejecución y guarda
-las métricas en `deploy/local-production/runtime/validation/`. En la máquina de
-referencia la ruta pasó el E2E real con restore exacto de 351 bytes; el mismo
-ensayo midió 103,56 s por un token en modo `stream`. Eso certifica la conexión y
-la continuidad, pero no constituye todavía un objetivo de rendimiento de
-producción: falta comparar perfiles y backends en el hardware final.
+No se conserva ningún resultado E2E anterior. La siguiente ejecución deberá
+generar evidencia nueva y sustituible, sin acumular directorios de intentos.
+
+No existe en ese script una prueba de reinicio del proveedor. Si se necesita
+recuperación tras caída completa, debe añadirse un ensayo separado que reinicie
+worker y proveedor y restaure desde estado persistente.
+
+## Seguridad y alcance
+
+- Worker y gateway están restringidos a loopback por sus scripts y validaciones.
+- El gateway usa bearer token, pero no TLS. Loopback sigue siendo obligatorio.
+- Los drivers son externos al proyecto.
+- Un health positivo no sustituye readiness, calibración, matriz ni generación
+  E2E.
+- Los recibos locales están ignorados por Git; para reproducibilidad hay que
+  conservar su hash y la identidad exacta del árbol que los produjo.
+- La matriz actual no incluye esa identidad del árbol; debe añadirse a futuros
+  recibos o conservarse externamente junto a ellos.
+- Los nuevos recibos deben usar únicamente el contrato `mslim.*` vigente.

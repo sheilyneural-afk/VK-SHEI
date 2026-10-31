@@ -155,16 +155,9 @@ fn main() -> Result<()> {
     let session: Box<dyn RuntimeSession> = Box::new(DeterministicSession::new());
     let listener = UnixListener::bind(&socket).context("bind runtime IPC socket")?;
     println!("generic runtime host listening on {}", socket.display());
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                if let Err(error) = serve_connection(stream, session, &session_id) {
-                    eprintln!("connection failed: {error:#}");
-                }
-                break;
-            }
-            Err(error) => return Err(error.into()),
-        }
+    let (stream, _) = listener.accept().context("accept runtime IPC client")?;
+    if let Err(error) = serve_connection(stream, session, &session_id) {
+        eprintln!("connection failed: {error:#}");
     }
     Ok(())
 }

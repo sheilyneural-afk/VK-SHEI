@@ -88,7 +88,7 @@ fn main() -> Result<()> {
         .tempdir_in(runtime_root.join("tmp"))?;
     copy_bundle(&source, temporary.path(), &files)?;
     let manifest = BundleManifest {
-        schema: "mslim.model_bundle/v1",
+        schema: mslim::model_bundle::MODEL_BUNDLE_MANIFEST_SCHEMA,
         bundle_sha256: digest.clone(),
         files: files
             .iter()

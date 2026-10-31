@@ -98,6 +98,26 @@ impl MslimEngine {
             .context("M-SLIM logits capture failed")
     }
 
+    pub fn kv_integrity_report(&mut self) -> Result<Option<Value>> {
+        ensure!(
+            self.state == EngineState::Loaded,
+            "M-SLIM engine is not loaded"
+        );
+        self.adapter
+            .kv_integrity_report()
+            .context("M-SLIM KV integrity report failed")
+    }
+
+    pub fn reset_session(&mut self) -> Result<()> {
+        ensure!(
+            self.state == EngineState::Loaded,
+            "M-SLIM engine is not loaded"
+        );
+        self.adapter
+            .reset_session()
+            .context("M-SLIM session reset failed")
+    }
+
     pub fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
         ensure!(
             self.state == EngineState::Loaded,

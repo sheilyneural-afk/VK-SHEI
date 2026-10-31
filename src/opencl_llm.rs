@@ -560,13 +560,13 @@ impl GpuEngine {
             let program = Program::create_and_build_from_source(&context, shader, build_options)
                 .map_err(anyhow::Error::msg)
                 .context("GPU full-LLM shader compilation failed")?;
-            if let Ok(binaries) = program.get_binaries() {
-                if let Some(binary) = binaries.first() {
-                    let _ = fs::create_dir_all(&cache_root);
-                    let temporary = cache_path.with_extension("tmp");
-                    if fs::write(&temporary, binary).is_ok() {
-                        let _ = fs::rename(temporary, &cache_path);
-                    }
+            if let Ok(binaries) = program.get_binaries()
+                && let Some(binary) = binaries.first()
+            {
+                let _ = fs::create_dir_all(&cache_root);
+                let temporary = cache_path.with_extension("tmp");
+                if fs::write(&temporary, binary).is_ok() {
+                    let _ = fs::rename(temporary, &cache_path);
                 }
             }
             program
@@ -1796,21 +1796,10 @@ impl OpenClLlm {
         let architecture_digest =
             digest_bytes(&serde_json::to_vec(&spec).context("serialize model architecture")?);
         let tokenizer_digest = digest_file(&model_dir.join("tokenizer.json"))?;
-        // Prefer the verified bundle manifest. Re-reading and hashing every
-        // multi-gigabyte shard during startup made model loading needlessly
-        // expensive; the manifest is the integrity authority for an installed bundle.
-        let model_digest = fs::read(model_dir.join("bundle-manifest.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| {
-                value
-                    .get("bundle_sha256")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| {
-                digest_file(&model_dir.join("config.json")).unwrap_or_else(|_| "unverified".into())
-            });
+        // Import or explicit inventory verification owns the expensive content
+        // hash. Startup still rejects legacy schemas, digest mismatches and
+        // manifest/file inventory drift before loading weights.
+        let model_digest = crate::model_bundle::validated_bundle_digest(model_dir)?;
         ensure!(
             spec.model_type == "llama",
             "only bias-free LlamaForCausalLM supported"
@@ -1862,13 +1851,13 @@ impl OpenClLlm {
             "layer count outside resource budget"
         );
         let vocab = spec.vocab_size.context("vocab_size missing")?;
-        let eos_token_ids = checkpoint_eos_token_ids(model_dir.as_ref(), vocab)?;
+        let eos_token_ids = checkpoint_eos_token_ids(model_dir, vocab)?;
         ensure!(
             vocab <= 300_000,
             "vocabulary exceeds tested resource budget"
         );
         let engine = GpuEngine::new(hip_enabled)?;
-        let checkpoint = CheckpointShards::open(model_dir.as_ref(), &spec.weight_shards)?;
+        let checkpoint = CheckpointShards::open(model_dir, &spec.weight_shards)?;
 
         let embedding = GpuWeight::load(
             &engine,
@@ -3209,6 +3198,32 @@ impl OpenClLlm {
             }
         }
         Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// Validation-only digest for either dense device K/V or canonical
+    /// ColdStore-backed K/V. Both branches use the exact same logical byte
+    /// order, so equality proves that the storage route preserved BF16 K/V.
+    pub fn canonical_kv_sha256(&mut self) -> Result<String> {
+        self.engine
+            .queue
+            .finish()
+            .context("GPU KV barrier before canonical digest")?;
+        if self.deferred_cold_active {
+            self.flush_deferred_cold()?;
+        }
+        if let Some(lod) = self.lod.as_mut() {
+            ensure!(
+                lod.config().epsilon == 0.0,
+                "canonical KV digest is reserved for exact epsilon-zero mode"
+            );
+            ensure!(
+                lod.axis().token_len() == self.position,
+                "canonical ColdStore axis is not aligned with GPU position"
+            );
+            lod.logical_kv_sha256()
+        } else {
+            self.logical_kv_sha256()
+        }
     }
 
     fn run_layer(

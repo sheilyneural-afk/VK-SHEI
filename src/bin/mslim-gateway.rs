@@ -162,15 +162,6 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
         .get("model_metadata")
         .or_else(|| capabilities.get("worker_capabilities"))
         .is_some_and(Value::is_object);
-    let has_calibration = capabilities
-        .get("calibration")
-        .and_then(Value::as_object)
-        .is_some_and(|calibration| {
-            calibration.get("schema").and_then(Value::as_str)
-                == Some("mslim.calibration_receipt/v1")
-                && calibration.get("status").and_then(Value::as_str)
-                    == Some("measured-basic-execution")
-        });
     let model_digest = capabilities
         .get("model_digest")
         .and_then(Value::as_str)
@@ -180,27 +171,20 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
         .and_then(Value::as_str)
         .and_then(|value| value.trim_end_matches('/').rsplit('/').next())
         .filter(|value| !value.trim().is_empty());
-    let calibration_digest = capabilities
-        .get("calibration")
-        .and_then(Value::as_object)
+    let calibration = capabilities.get("calibration");
+    let calibration_digest = calibration
         .and_then(|calibration| calibration.get("bundle"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
+    let has_calibration = model_digest.is_some_and(|digest| {
+        calibration.is_some_and(|receipt| {
+            mslim::calibration_contract::validate_calibration_receipt(receipt, digest).is_ok()
+        })
+    });
     let identity_matches = model_digest.is_some()
         && model_digest == checkpoint_digest
         && model_digest == calibration_digest;
-    let has_identity = capabilities
-        .get("calibration")
-        .and_then(Value::as_object)
-        .and_then(|calibration| calibration.get("identity_digest"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    has_engine
-        && has_model
-        && has_runtime_description
-        && has_calibration
-        && identity_matches
-        && has_identity
+    has_engine && has_model && has_runtime_description && has_calibration && identity_matches
 }
 
 #[cfg(test)]
@@ -209,22 +193,44 @@ mod tests {
 
     #[test]
     fn worker_certificate_requires_matching_model_identity() {
+        let bundle = "a".repeat(64);
         let valid = json!({
             "engine": "mslim-engine",
-            "model_checkpoint": "runtime/models/model-a",
-            "model_digest": "model-a",
+            "model_checkpoint": format!("runtime/models/{bundle}"),
+            "model_digest": bundle,
             "model_metadata": {},
             "calibration": {
-                "schema": "mslim.calibration_receipt/v1",
-                "status": "measured-basic-execution",
-                "bundle": "model-a",
-                "identity_digest": "environment-a"
+                "schema": "mslim.calibration_receipt/v3",
+                "status": "measured-sustained-execution",
+                "bundle": "a".repeat(64),
+                "adapter": "accelerator-runtime",
+                "identity_digest": "b".repeat(64),
+                "started_unix_seconds": 1,
+                "warmup_runs": 1,
+                "measured_runs": 3,
+                "decode_tokens_per_run": 8,
+                "context_samples": [{
+                    "prompt_tokens": 1,
+                    "prefill_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                    "decode_tokens": 8,
+                    "decode_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                    "status": "measured"
+                }],
+                "snapshot_contract": {
+                    "kind": "physical-coldstore-handle",
+                    "physical_kv_persisted": true,
+                    "restore_latency_measured_as_physical_kv_hydration": false
+                },
+                "validation_matrix_gate": "same-backend-and-kv-integrity-passed"
             }
         });
         assert!(worker_capabilities_are_valid(Some(&valid)));
         let mut invalid = valid.clone();
-        invalid["calibration"]["bundle"] = json!("model-b");
+        invalid["calibration"]["bundle"] = json!("c".repeat(64));
         assert!(!worker_capabilities_are_valid(Some(&invalid)));
+        let mut legacy = valid;
+        legacy["calibration"]["schema"] = json!("kvslim.calibration_receipt/v2");
+        assert!(!worker_capabilities_are_valid(Some(&legacy)));
     }
 
     #[test]
@@ -357,7 +363,7 @@ async fn main() -> Result<()> {
         .route("/v1/chat/completions", post(chat))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
     let app = Router::new()
-        .route("/health", get(ready.clone()))
+        .route("/health", get(ready))
         .route("/ready", get(ready))
         .merge(protected)
         .with_state(state);

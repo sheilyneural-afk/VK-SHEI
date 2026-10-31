@@ -178,17 +178,67 @@ fn calibration_receipt_is_reusable(
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return "invalid";
     };
-    if value.get("schema").and_then(serde_json::Value::as_str)
-        == Some("mslim.calibration_receipt/v1")
-        && value.get("status").and_then(serde_json::Value::as_str)
-            == Some("measured-basic-execution")
-        && value
-            .get("identity_digest")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|digest| !digest.is_empty())
-    {
+    let expected_bundle = digest.to_string_lossy();
+    if mslim::calibration_contract::validate_calibration_receipt(&value, &expected_bundle).is_ok() {
         "available"
     } else {
         "invalid"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calibration_receipt_is_reusable;
+    use serde_json::json;
+    use std::fs;
+
+    fn canonical_receipt(bundle: &str) -> serde_json::Value {
+        json!({
+            "schema": "mslim.calibration_receipt/v3",
+            "bundle": bundle,
+            "adapter": "accelerator-runtime",
+            "identity_digest": "b".repeat(64),
+            "started_unix_seconds": 1,
+            "warmup_runs": 1,
+            "measured_runs": 3,
+            "decode_tokens_per_run": 8,
+            "context_samples": [{
+                "prompt_tokens": 1,
+                "prefill_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                "decode_tokens": 8,
+                "decode_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                "status": "measured"
+            }],
+            "snapshot_contract": {
+                "kind": "physical-coldstore-handle",
+                "physical_kv_persisted": true,
+                "restore_latency_measured_as_physical_kv_hydration": false
+            },
+            "validation_matrix_gate": "same-backend-and-kv-integrity-passed",
+            "status": "measured-sustained-execution"
+        })
+    }
+
+    #[test]
+    fn autoconfigure_reuses_only_canonical_matching_calibration() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = "a".repeat(64);
+        let path = root.path().join(format!("{bundle}.json"));
+        fs::write(
+            &path,
+            serde_json::to_vec(&canonical_receipt(&bundle)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            calibration_receipt_is_reusable(root.path(), std::ffi::OsStr::new(&bundle)),
+            "available"
+        );
+        let mut legacy = canonical_receipt(&bundle);
+        legacy["schema"] = json!("kvslim.calibration_receipt/v2");
+        fs::write(path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(
+            calibration_receipt_is_reusable(root.path(), std::ffi::OsStr::new(&bundle)),
+            "invalid"
+        );
     }
 }

@@ -14,6 +14,7 @@ use axum::{
 };
 use minijinja::{Environment, context};
 use mslim::{
+    calibration_contract::validate_calibration_receipt,
     continuity_contract::{
         CACHE_RECEIPT_SCHEMA, CacheMode as ContinuityCacheMode, CacheReceipt as ContinuityReceipt,
         ContinuityOperation, ContinuityRequest,
@@ -24,6 +25,7 @@ use mslim::{
     gpu_region_store::GpuRegionConfig,
     inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
     ipc_transport::IpcClient,
+    model_bundle::validated_bundle_manifest,
     model_config::ModelSpec,
     opencl_llm::{OpenClLlm, WeightMode},
     session_store::SessionStore,
@@ -33,7 +35,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     sync::atomic::AtomicBool,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -791,8 +794,8 @@ impl InferenceExecutor for ExternalExecutor {
 }
 
 enum RuntimeExecutor {
-    Local(GpuExecutor),
-    External(ExternalExecutor),
+    Local(Box<GpuExecutor>),
+    External(Box<ExternalExecutor>),
 }
 
 impl InferenceExecutor for RuntimeExecutor {
@@ -842,7 +845,41 @@ async fn index() -> Html<&'static str> {
     Html(CHAT_HTML)
 }
 
+fn validation_matrix_summary(model_dir: &str) -> Option<Value> {
+    let model_digest = Path::new(model_dir).file_name()?.to_str()?;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("deploy/local-production/runtime/validation")
+        .join(format!("validation-matrix-{model_digest}.json"));
+    let receipt: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    if receipt.get("schema").and_then(Value::as_str) != Some("mslim.validation-matrix/v1")
+        || receipt.get("status").and_then(Value::as_str) != Some("passed")
+        || receipt.get("bundle_sha256").and_then(Value::as_str) != Some(model_digest)
+    {
+        return None;
+    }
+    Some(json!({
+        "schema": "mslim.validation-matrix-summary/v1",
+        "status": "passed",
+        "bundle_sha256": model_digest,
+        "deterministic": receipt.pointer("/determinism/all_passed"),
+        "same_backend_exact": receipt.pointer("/same_backend/all_passed"),
+        "cpu_dense_vs_exact": receipt.pointer("/same_backend/cpu_dense_vs_exact/exact_same_backend_passed"),
+        "gpu_dense_vs_exact": receipt.pointer("/same_backend/gpu_dense_vs_exact/exact_same_backend_passed"),
+        "physical_coldstore_snapshot": receipt.pointer("/snapshot_contract/accelerator_exact_physical_snapshot"),
+        "cross_backend_tokens_equal": receipt.pointer("/cross_backend_diagnostic/all_tokens_equal"),
+        "cross_backend_top1_equal": receipt.pointer("/cross_backend_diagnostic/all_top1_equal"),
+        "cross_backend_logits_exact": receipt.pointer("/cross_backend_diagnostic/all_logits_exact"),
+        "cross_backend_role": "diagnostic-only",
+    }))
+}
+
 async fn health(State(state): State<AppState>) -> Json<Value> {
+    let validation = validation_matrix_summary(&state.model_dir);
+    let exact_dense_logits_parity_proven = validation
+        .as_ref()
+        .and_then(|value| value.get("same_backend_exact"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     Json(json!({
         "status":"ready",
         "engine":"mslim-engine",
@@ -892,7 +929,8 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         } else {"dense-device-kv"},
         "max_context_tokens":state.max_context_tokens,
         "no_libtorch":true,
-        "exact_dense_logits_parity_proven":false
+        "exact_dense_logits_parity_proven":exact_dense_logits_parity_proven,
+        "validation_matrix":validation
     }))
 }
 
@@ -918,11 +956,8 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
     let calibration = std::fs::read(&calibration_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .filter(|value| {
-            value.get("schema").and_then(Value::as_str) == Some("mslim.calibration_receipt/v2")
-                && value.get("status").and_then(Value::as_str)
-                    == Some("measured-sustained-execution")
-        });
+        .filter(|value| validate_calibration_receipt(value, model_digest).is_ok());
+    let validation = validation_matrix_summary(&state.model_dir);
     Json(json!({
         "engine":"mslim-engine",
         "model_checkpoint":state.model_dir,
@@ -962,7 +997,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_prefill_cold_pages":"batched up to 64 BF16 tokens/page using original ColdStore",
         "gpu_prefill_temporary_v_residency":"released after cold seal; no permanent extra GPU V cache",
          "gpu_region_scope":"hierarchical best-first Grid/Chunk/Page selection over original CPU index/LSH and micro-links; ColdStore and conservative BF16-box omitted-mass certificates authorize positive-epsilon pruning; exact epsilon=0 remains dense",
-        "parity_with_cpu":null,
+        "validation_matrix":validation,
         "server_backend": if state.runtime_manifest.is_some() { "external-runtime-session" } else { "local-runtime" },
         "max_context_tokens":state.max_context_tokens,
         "max_output_tokens":512,
@@ -1073,6 +1108,7 @@ async fn chat(
 }
 
 fn validate_model_bundle(model: &std::path::Path) -> Result<String> {
+    validated_bundle_manifest(model)?;
     let _spec = ModelSpec::inspect(model)?;
     let config: Value = serde_json::from_slice(
         &std::fs::read(model.join("tokenizer_config.json"))
@@ -1094,7 +1130,7 @@ async fn main() -> Result<()> {
     let mut max_context = 2048usize;
     let mut timeout_secs = 300u64;
     let mut mode = WeightMode::Resident;
-    // Exact canonical KV is the production default: BF16 pages remain the
+    // Exact canonical KV is this worker CLI's default: BF16 pages remain the
     // authority and enable verified prefix replay between independent turns.
     // Positive-epsilon pruning is still explicit; --gpu-dense-kv remains the
     // low-overhead escape hatch for short, stateless workloads.
@@ -1375,7 +1411,7 @@ async fn main() -> Result<()> {
         let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
         let worker = InferenceWorker::spawn(
-            RuntimeExecutor::External(ExternalExecutor {
+            RuntimeExecutor::External(Box::new(ExternalExecutor {
                 client,
                 tokenizer,
                 chat_template: chat_template.clone(),
@@ -1384,7 +1420,7 @@ async fn main() -> Result<()> {
                 session_store,
                 active_conversation: None,
                 active_history_tokens: Vec::new(),
-            }),
+            })),
             4,
         )?;
         (
@@ -1462,12 +1498,12 @@ async fn main() -> Result<()> {
         let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
         let worker = InferenceWorker::spawn(
-            RuntimeExecutor::Local(GpuExecutor {
+            RuntimeExecutor::Local(Box::new(GpuExecutor {
                 model: engine,
                 tokenizer,
                 chat_template: chat_template.clone(),
                 last_prompt_ids: Vec::new(),
-            }),
+            })),
             4,
         )?;
         (
@@ -1554,6 +1590,9 @@ mod tests {
     #[test]
     fn runtime_accepts_supported_architectures_when_template_is_declared() {
         let tmp = tempfile::tempdir().unwrap();
+        let bundle_digest = "a".repeat(64);
+        let bundle = tmp.path().join(&bundle_digest);
+        std::fs::create_dir(&bundle).unwrap();
         let config = serde_json::json!({
             "model_type": "llama",
             "hidden_size": 1536,
@@ -1570,16 +1609,26 @@ mod tests {
             "max_position_embeddings": 131072
         });
         std::fs::write(
-            tmp.path().join("config.json"),
+            bundle.join("config.json"),
             serde_json::to_vec(&config).unwrap(),
         )
         .unwrap();
         std::fs::write(
-            tmp.path().join("tokenizer_config.json"),
+            bundle.join("tokenizer_config.json"),
             r#"{"chat_template":"{{ messages[0]['content'] }}"}"#,
         )
         .unwrap();
-        assert!(validate_model_bundle(tmp.path()).is_ok());
+        std::fs::write(
+            bundle.join("bundle-manifest.json"),
+            serde_json::to_vec(&json!({
+                "schema": "mslim.model_bundle/v1",
+                "bundle_sha256": bundle_digest,
+                "files": ["config.json", "tokenizer_config.json"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(validate_model_bundle(&bundle).is_ok());
         let mut llama = config;
         llama["hidden_size"] = json!(4096);
         llama["num_attention_heads"] = json!(32);
@@ -1588,11 +1637,11 @@ mod tests {
         llama["head_dim"] = json!(128);
         llama["vocab_size"] = json!(128256);
         std::fs::write(
-            tmp.path().join("config.json"),
+            bundle.join("config.json"),
             serde_json::to_vec(&llama).unwrap(),
         )
         .unwrap();
-        assert!(validate_model_bundle(tmp.path()).is_ok());
+        assert!(validate_model_bundle(&bundle).is_ok());
     }
 
     #[test]

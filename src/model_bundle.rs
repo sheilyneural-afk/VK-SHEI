@@ -14,10 +14,119 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
+use serde::Deserialize;
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
 use crate::model_config::ModelSpec;
+
+pub const MODEL_BUNDLE_MANIFEST_SCHEMA: &str = "mslim.model_bundle/v1";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelBundleManifest {
+    pub schema: String,
+    pub bundle_sha256: String,
+    pub files: Vec<String>,
+}
+
+/// Validate the installed bundle identity without re-hashing multi-gigabyte
+/// weights. Full content hashing remains the responsibility of import and the
+/// explicit inventory command.
+pub fn validated_bundle_manifest(root: impl AsRef<Path>) -> Result<ModelBundleManifest> {
+    let root = root.as_ref();
+    let directory_digest = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("bundle directory has no UTF-8 SHA-256 identity")?;
+    ensure!(
+        is_sha256(directory_digest),
+        "bundle directory is not named by a SHA-256 digest"
+    );
+    let path = root.join("bundle-manifest.json");
+    let manifest: ModelBundleManifest = serde_json::from_slice(
+        &fs::read(&path).with_context(|| format!("missing bundle manifest: {}", path.display()))?,
+    )
+    .with_context(|| format!("invalid bundle manifest: {}", path.display()))?;
+    ensure!(
+        manifest.schema == MODEL_BUNDLE_MANIFEST_SCHEMA,
+        "unsupported bundle manifest schema"
+    );
+    ensure!(
+        manifest
+            .bundle_sha256
+            .eq_ignore_ascii_case(directory_digest),
+        "bundle manifest digest does not match its directory"
+    );
+
+    let listed = manifest
+        .files
+        .iter()
+        .map(|name| safe_manifest_path(name))
+        .collect::<Result<BTreeSet<_>>>()?;
+    ensure!(
+        listed.len() == manifest.files.len(),
+        "bundle manifest contains duplicate files"
+    );
+    let mut installed = BTreeSet::new();
+    collect_installed_files(root, root, &mut installed)?;
+    ensure!(
+        listed == installed,
+        "bundle manifest file inventory does not match installed files"
+    );
+    Ok(manifest)
+}
+
+pub fn validated_bundle_digest(root: impl AsRef<Path>) -> Result<String> {
+    Ok(validated_bundle_manifest(root)?.bundle_sha256)
+}
+
+fn safe_manifest_path(value: &str) -> Result<PathBuf> {
+    use std::path::Component;
+
+    let path = Path::new(value);
+    ensure!(
+        !value.is_empty() && !path.is_absolute(),
+        "invalid bundle manifest path"
+    );
+    ensure!(
+        path.components()
+            .all(|component| matches!(component, Component::Normal(_))),
+        "bundle manifest path escapes its root"
+    );
+    ensure!(
+        path != Path::new("bundle-manifest.json"),
+        "bundle manifest cannot list itself"
+    );
+    Ok(path.to_owned())
+}
+
+fn collect_installed_files(
+    root: &Path,
+    current: &Path,
+    files: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        ensure!(!file_type.is_symlink(), "bundle contains a symbolic link");
+        if file_type.is_dir() {
+            collect_installed_files(root, &path, files)?;
+        } else if file_type.is_file() {
+            let relative = path.strip_prefix(root)?.to_owned();
+            if relative != Path::new("bundle-manifest.json") {
+                files.insert(relative);
+            }
+        } else {
+            anyhow::bail!("bundle contains an unsupported file type");
+        }
+    }
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 
 #[derive(Debug, Clone)]
 pub struct ModelBundle {
@@ -36,6 +145,7 @@ pub struct ModelBundle {
 impl ModelBundle {
     pub fn load(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
+        validated_bundle_manifest(root)?;
         let spec = ModelSpec::inspect(root)?;
         let tokenizer_path = root.join("tokenizer.json");
         ensure!(tokenizer_path.is_file(), "falta tokenizer.json");
@@ -180,5 +290,38 @@ mod tests {
         );
         assert_eq!(dtype_mismatches(&inventory, "BF16", 8).len(), 2);
         assert!(dtype_mismatches(&inventory, "F32", 0).is_empty());
+    }
+
+    #[test]
+    fn manifest_rejects_legacy_schema_and_inventory_drift() {
+        let parent = tempfile::tempdir().unwrap();
+        let digest = "a".repeat(64);
+        let root = parent.path().join(&digest);
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("config.json"), b"{}").unwrap();
+        let manifest = |schema: &str, files: Vec<&str>| {
+            serde_json::json!({
+                "schema": schema,
+                "bundle_sha256": digest,
+                "files": files
+            })
+        };
+        fs::write(
+            root.join("bundle-manifest.json"),
+            serde_json::to_vec(&manifest("kvslim.model_bundle/v1", vec!["config.json"])).unwrap(),
+        )
+        .unwrap();
+        assert!(validated_bundle_manifest(&root).is_err());
+
+        fs::write(
+            root.join("bundle-manifest.json"),
+            serde_json::to_vec(&manifest(MODEL_BUNDLE_MANIFEST_SCHEMA, vec!["config.json"]))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(validated_bundle_manifest(&root).is_ok());
+
+        fs::write(root.join("unexpected.json"), b"{}").unwrap();
+        assert!(validated_bundle_manifest(&root).is_err());
     }
 }

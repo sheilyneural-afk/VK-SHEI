@@ -1,5 +1,11 @@
 #![recursion_limit = "256"]
 
+//! Legacy LibTorch HTTP implementation retained as source only.
+//!
+//! Cargo uses `autobins = false`; the registered `mslim-server` target points
+//! to `src/bin/mslim-gateway.rs`, not this file. Do not treat the contracts in
+//! this module as the active gateway API without registering a separate target.
+
 use anyhow::{Context, Result, bail};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
@@ -7,6 +13,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mslim::document_graph::DocumentGraph;
+use mslim::calibration_contract::validate_calibration_receipt;
 use mslim::inference_worker::{InferenceError, InferenceExecutor, InferencePool, SubmitError};
 use mslim::model_config::ModelSpec;
 use mslim::torch_runtime::{TorchChatMessage, TorchGeneration, TorchModelRuntime};
@@ -264,7 +271,7 @@ fn validate_request(
             ));
         }
         return Err(unsupported(
-            "applied_mass_tolerance está deshabilitado en la API: la ruta candidata no ha demostrado paridad de logits; use la ruta densa hasta disponer de verificación y fallback exactos",
+            "applied_mass_tolerance está deshabilitado en la API: la matriz exacta epsilon=0 está aprobada, pero el descarte aproximado epsilon>0 aún necesita su propia evaluación de calidad y fallback; use la ruta exacta",
         ));
     }
 
@@ -375,10 +382,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
     let calibration = std::fs::read(&calibration_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .filter(|value| {
-            value.get("schema").and_then(Value::as_str) == Some("mslim.calibration_receipt/v1")
-                && value.get("status").and_then(Value::as_str) == Some("measured-basic-execution")
-        });
+        .filter(|value| validate_calibration_receipt(value, &state.model_id).is_ok());
     Json(json!({
         "engine": "mslim-engine",
         "backend": "local-runtime",

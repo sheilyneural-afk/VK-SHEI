@@ -1,65 +1,127 @@
-# M-SLIM: núcleo backend-neutral y adaptadores de ejecución
+# Adaptadores de modelo de M-SLIM
 
-M-SLIM es el nombre único del producto y de su API local. El núcleo trabaja con
-metadatos de checkpoint, geometría K/V, serialización, integridad y almacenamiento
-sin fijar un proveedor, una marca o un modelo como identidad del sistema.
+## Contrato
 
-El contrato ejecutable vive en el crate independiente
-`crates/mslim-adapter-api`. Cada implementación se registra con backend,
-tipo de cómputo, prioridad y política de activación. El núcleo no presupone
-ninguna API, fabricante, proveedor ni runtime concreto. Un backend que dependa
-de hardware o bibliotecas externas debe quedar en modo explícito hasta
-que exista una detección real de disponibilidad y capacidades en ese equipo.
-Si no existe una coincidencia probada, la selección falla; no hay fallback
-silencioso ni se presenta un backend opcional como compatible sin pruebas.
+El contrato ejecutable vive en `crates/mslim-adapter-api`. `ModelAdapter`
+separa el núcleo de una implementación física y define estas operaciones:
 
-El catálogo distingue entre backend compilado y runtime disponible en el equipo:
-`Compiled`, `RuntimeAvailable`, `RuntimeUnavailable` y `RequiresProbe`. Que una
-opción exista en el binario no demuestra que sea utilizable en otro ordenador.
-La detección solo observa el estado local; no instala drivers ni fuerza una API.
+- declarar capacidades;
+- inspeccionar un bundle sin activarlo;
+- cargar el modelo;
+- ejecutar prefill y decode;
+- obtener los últimos logits cuando el adapter los expone;
+- reiniciar la sesión;
+- emitir y restaurar un snapshot K/V;
+- emitir, de forma opcional, un informe de integridad K/V.
 
-El inventario del host se calcula en memoria al iniciar o consultar el catálogo.
-Incluye únicamente capacidades operativas —por ejemplo, disponibilidad de CPU,
-paralelismo y runtimes que responden— y no conserva nombres de usuario, rutas
-personales, identificadores de máquina ni datos de identidad.
+`MslimEngine` conserva el estado del ciclo de vida y no permite prefill, decode
+o restore antes de cargar el adapter.
 
-El inventario local no consulta automáticamente Hugging Face ni ningún catálogo
-remoto. Puede existir un proveedor de catálogo opcional —Hugging Face u otro—
-para descubrir modelos, versiones, licencias y formatos, pero ese proveedor no
-forma parte del núcleo ni decide la compatibilidad. La autoridad es siempre el
-bundle que el usuario o la empresa ha importado dentro de `runtime/models/` y
-que M-SLIM ha verificado por contenido.
+## Catálogo y disponibilidad
 
-La dirección de producto es que el usuario no tenga que conocer de antemano el
-modelo correcto: M-SLIM debe detectar capacidades locales, consultar uno o
-varios catálogos, descartar candidatos incompatibles y presentar una
-recomendación explicada. La recomendación no convierte un candidato remoto en
-autoridad. Antes de activarlo, el resolvedor debe descargarlo dentro del
-proyecto, verificar licencia, tamaño, formato, digest, arquitectura,
-tokenizer, memoria y una carga real con el adaptador seleccionado. Si falla
-cualquier comprobación, el candidato queda en `inspect-only`.
+El catálogo distingue cuatro estados:
 
-Las credenciales privadas se gestionan como tokens de lectura de Hugging Face,
-nunca como contraseñas. El gestor opcional de credenciales vive en
-`mslim-auth`; valida el token contra el servicio antes de una operación
-autenticada, no lo incluye en diagnósticos y permite eliminarlo.
+- `Compiled`: el código existe en el binario;
+- `RuntimeAvailable`: el sondeo local encontró sus requisitos;
+- `RuntimeUnavailable`: el sondeo comprobó que faltan requisitos;
+- `RequiresProbe`: no hay evidencia suficiente para decidir.
 
-La ejecución de un modelo concreto se organiza como un adaptador. Un adaptador
-puede declarar qué arquitectura, precisión, tokenizer, RoPE, operadores y formato
-de pesos admite. Si el adaptador no puede demostrar compatibilidad completa,
-M-SLIM debe rechazar la ejecución y permitir únicamente inspección; no debe
-simular compatibilidad ni seleccionar una arquitectura por nombre.
+Una feature de Cargo o una entrada de catálogo no basta para ejecutar un modelo.
+El adapter debe estar disponible en ese host y el bundle debe superar su propia
+inspección.
 
-Los perfiles concretos que aparecen en las pruebas de referencia son datos de
-validación, no contratos públicos ni nombres de M-SLIM. Los checkpoints y sus
-tokenizers deben residir exclusivamente bajo
-`deploy/local-production/runtime/models/<digest>` y se seleccionan mediante
-configuración y digest, nunca mediante rutas personales o absolutas.
-El bundle lo aporta el usuario o la empresa que tenga derecho a utilizarlo; el
-adaptador declara el formato aceptado y M-SLIM no convierte ni modifica el
-original durante la ejecución.
+El inventario del host se calcula localmente. No convierte un modelo remoto en
+autoridad ni instala drivers. Los candidatos de un catálogo remoto solo son
+propuestas hasta que se importan por digest dentro de
+`deploy/local-production/runtime/models/`.
 
-Para incorporar una nueva arquitectura o hardware se requiere un adaptador explícito,
-pruebas de geometría y tokenizer, paridad de logits, persistencia/relectura de
-K/V, reinicio y prueba de servicio. Hasta completar esas pruebas, el perfil se
-considera `inspect-only`.
+## Implementaciones actuales
+
+### CPU Rust
+
+`native-cpu-runtime` carga un bundle soportado por `ModelBundle`. Su ruta exacta
+conserva K/V BF16 en ColdStore. El parámetro `native_hot_kv_bytes` controla qué
+cantidad puede atenderse desde el nivel caliente:
+
+- un presupuesto suficiente produce la referencia `cpu-hot-dense`;
+- presupuesto cero obliga a releer desde ColdStore y produce
+  `cpu-exact-coldstore`.
+
+Las dos rutas usan el mismo escalado de atención y la matriz exige logits,
+tokens y digest K/V idénticos.
+
+### Acelerador OpenCL
+
+`accelerator-runtime` acepta dos modos explícitos mediante `mslim_kv_mode`:
+
+- `dense`: K/V denso en el dispositivo;
+- `exact-coldstore`: ColdStore BF16 exacto y snapshot físico.
+
+Otro valor se rechaza. El modo por defecto del adapter es
+`exact-coldstore`. El modo denso no puede declarar un epsilon LOD positivo.
+
+`mslim_weight_mode` admite `stream` y `resident`. Este “stream” describe cómo se
+cargan los pesos y no habilita streaming HTTP.
+
+### Otras features
+
+El repositorio también contiene rutas opcionales LibTorch e HIP. Su presencia
+en el código no las convierte en la referencia de la matriz actual ni demuestra
+disponibilidad en el host.
+
+## Inspección del bundle
+
+La inspección valida, según el adapter, configuración, tokenizer, shards
+SafeTensors, geometría de atención, dtypes y layout del decoder. Un bundle que
+solo puede inspeccionarse no debe anunciarse como ejecutable.
+
+El bundle activo se identifica por digest. El runtime no debe seleccionar un
+modelo por un nombre ambiguo ni modificar sus archivos durante la inferencia.
+
+`mslim-validate-model` emite `mslim.validation_receipt/v1`. Ese recibo declara
+que un adapter concreto completó inspect, load, prefill, decode, snapshot y
+restore. Es distinto de `mslim.validation-matrix/v1`, que compara las cuatro
+rutas exactas. Los consumidores que piden uno no deben aceptar el otro por
+similitud de nombre.
+
+## Requisitos para aceptar una ruta exacta
+
+La validación se hace contra la referencia densa del mismo backend:
+
+1. repetir la ruta densa para comprobar determinismo;
+2. repetir la ruta exacta para comprobar determinismo;
+3. comparar densa y exacta con los mismos inputs;
+4. exigir logits y tokens idénticos;
+5. exigir SHA-256 lógico K/V idéntico;
+6. para GPU exacta, exigir un snapshot físico de ColdStore.
+
+CPU y GPU se comparan por métricas diagnósticas; la igualdad bit a bit entre
+ellos no es el gate de integridad. Véase [VALIDATION.md](VALIDATION.md).
+
+## Requisitos para añadir un adapter o una arquitectura
+
+Como mínimo:
+
+- inspección real del bundle y rechazo de layouts no soportados;
+- probe de disponibilidad del runtime y del dispositivo;
+- prefill, decode, reset, snapshot y restore;
+- determinismo caracterizado;
+- referencia densa y ruta exacta comparadas dentro del mismo backend;
+- digest lógico K/V;
+- rechazo de identidad, geometría o recibo incompatibles;
+- prueba de reinicio que indique con precisión qué proceso se reinicia;
+- prueba HTTP o IPC por la ruta pública que se pretende usar;
+- medición de rendimiento separada de la validación de integridad.
+
+Para una ruta aproximada hacen falta además métricas de calidad y memoria sobre
+un corpus representativo. La matriz exacta con `epsilon = 0` no autoriza
+`epsilon > 0`.
+
+## Credenciales y catálogo remoto
+
+La feature `model-catalog` puede consultar candidatos remotos. `mslim-auth`
+gestiona un token de lectura. El catálogo no decide compatibilidad, no activa un
+modelo y no sustituye el digest del bundle local.
+
+La compatibilidad efectiva siempre depende de tres elementos: adapter
+disponible, bundle validado y evidencia del perfil concreto.

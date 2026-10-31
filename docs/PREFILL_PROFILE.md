@@ -25,4 +25,15 @@ MSLIM_PREFILL_BLOCK_CANDIDATES='64 128 256' \
 scripts/select-prefill-profile.sh
 ```
 
-El resultado se guarda en `deploy/local-production/runtime/validation/prefill-profile.json` y selecciona el perfil válido más rápido. Los candidatos que fallen o excedan el timeout no se activan.
+El resultado se guarda en
+`deploy/local-production/runtime/validation/prefill-profile.json`. El campo
+`selected` contiene el candidato válido más rápido de esa ejecución. El script
+no modifica `local-production.env`, no instala binarios y no activa el perfil;
+el consumidor debe leer el recibo y aplicar la selección de forma explícita.
+Los candidatos que fallen o excedan el timeout quedan registrados con
+`ok: false`.
+
+La lista por defecto incluye `cached` porque el selector es neutral respecto al
+proveedor. El runtime OpenCL actual solo acepta `stream` y `resident`; si se usa
+como comando de benchmark, `cached` debe eliminarse de `MSLIM_WEIGHT_MODES` o se
+registrará como candidato fallido.

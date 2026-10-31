@@ -31,6 +31,12 @@ identificadores Rust, nombres de archivos o variables. En código se usa siempre
 - `exact` significa igualdad comprobada bajo el contrato indicado; si solo hay una
   cota o una selección certificada, el nombre debe decir `bounded`, `certified` o
   `approximate`.
+- `same-backend exact` significa igualdad contra la referencia densa del mismo
+  backend bajo una configuración congelada. No implica igualdad CPU/GPU.
+- `passed` describe únicamente los gates incluidos en un recibo. No significa
+  que exista una release instalada, un servicio activo o soporte general.
+- `eligible-for-reviewed-activation` exige revisión del perfil antes de activar;
+  no es una orden de despliegue ni una certificación de producto.
 - `canonical` se reserva para la única autoridad efectiva de un dato o efecto.
   No debe usarse como adjetivo de marketing.
 
@@ -59,6 +65,8 @@ no representan capacidades generales del núcleo.
 
 - Un `probe`, un manifest o una declaración de capacidades no demuestra por sí
   solo que el runtime esté disponible o que la ruta pública lo utilice.
+- Un recibo con un schema distinto del que exige el consumidor no es evidencia
+  válida para ese consumidor.
 - `ColdStore` y `SessionStore` tienen responsabilidades diferentes y no deben
   fusionarse bajo un nombre genérico como `MemoryStore`.
 - `GpuRegionStore` identifica el almacenamiento y la selección de regiones de la
