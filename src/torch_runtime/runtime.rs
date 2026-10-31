@@ -8,31 +8,39 @@
 //! for the torch-backend feature.
 
 use anyhow::{Context, Result, bail, ensure};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use tch::{Device, Kind, Tensor};
 use tokenizers::Tokenizer;
 
-use crate::adaptive_extent::{AxisPolicy, ParallelContextAxis};
 #[cfg(test)]
-use crate::attention_certificate::omitted_error_bound;
-use crate::attention_certificate::{
-    bf16_rounding_cell_contains, certified, select_by_exact_mass, select_v_by_token_contribution,
-};
-use crate::cold_store::{ColdStore, ColdStoreStats, PageGeometry, PreparedPage};
-use crate::conversion_worker::{Bf16PageJob, ConversionStats, ConversionWorker, PageShape};
 use crate::model_config::ModelSpec;
-use crate::prefill_tch::protected_queries;
-use crate::shadow_metrics::{ShadowDiagnosticReport, ShadowEventId, ShadowMetrics};
+use crate::shadow_metrics::{ShadowDiagnosticReport, ShadowMetrics};
 
 use super::kv_cache::{
-    AttentionCache, DecoderGeometry, DecoderLayer, DecoderModel, DenseKvCache, LayerOutputTrace,
-    MslimKvCache,
+    AdaptiveSpeculationPolicy, AttentionCache, ChatTemplateFamily, DecoderGeometry, DecoderLayer,
+    DecoderModel, DenseKvCache, DeterministicSuffixDrafter, LayerOutputTrace, MslimKvCache,
+    reference_draft,
 };
-use super::weight_io::{WeightArchive, model_weight_file};
+use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
+use super::weight_io::WeightArchive;
+#[cfg(test)]
+use super::kv_cache::{
+    IncrementalRegionCertificate, MslimPage, PageAttentionCertificate, PageStorage,
+    exact_oracle_min_tolerance_candidate, exact_oracle_omissible_tokens, omitted_region_bounds,
+    select_token_indices, state_score_uppers_generic,
+};
+#[cfg(test)]
+use super::weight_io::WeightFile;
+#[cfg(test)]
+use crate::attention_certificate::certified;
+#[cfg(test)]
+use crate::cold_store::PageGeometry;
+#[cfg(test)]
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::fs;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TorchChatMessage {
@@ -2282,7 +2290,7 @@ impl DecoderLayer {
         ]);
     }
 
-    fn load(weights: &WeightArchive, layer: usize, geometry: &DecoderGeometry) -> Result<Self> {
+    pub(super) fn load(weights: &WeightArchive, layer: usize, geometry: &DecoderGeometry) -> Result<Self> {
         let p = format!("model.layers.{layer}");
         let hidden = geometry.hidden;
         let query_out = geometry.query_out();
@@ -2325,7 +2333,7 @@ impl DecoderLayer {
         input.matmul(&weight.transpose(0, 1))
     }
 
-    fn rms_norm(input: &Tensor, weight: &Tensor, eps: f64) -> Tensor {
+    pub(super) fn rms_norm(input: &Tensor, weight: &Tensor, eps: f64) -> Tensor {
         let dtype = input.kind();
         let input_f32 = input.to_kind(Kind::Float);
         let variance =
@@ -2400,7 +2408,7 @@ impl DecoderLayer {
         input * &cos + Self::rotate_half(input) * &sin
     }
 
-    fn forward_cached<C: AttentionCache>(
+    pub(super) fn forward_cached<C: AttentionCache>(
         &self,
         input: &Tensor,
         layer_index: usize,

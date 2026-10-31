@@ -9,11 +9,11 @@ use safetensors::{Dtype, SafeTensors};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use tch::{Kind, Tensor};
+use tch::{Device, Kind, Tensor};
 
 pub struct WeightFile {
     path: PathBuf,
-    mapping: Mmap,
+    pub(super) mapping: Mmap,
 }
 
 impl WeightFile {

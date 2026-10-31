@@ -5,15 +5,12 @@
 //! all tensor operations run through LibTorch on whatever device is active.
 
 use anyhow::{Context, Result, bail, ensure};
-use memmap2::MmapOptions;
 use rayon::prelude::*;
-use safetensors::{Dtype, SafeTensors};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::{self, File};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::fs::{self};
+use std::path::Path;
 use tch::{Device, Kind, Tensor};
 
 use crate::adaptive_extent::{AxisPolicy, ParallelContextAxis};
@@ -26,32 +23,32 @@ use crate::cold_store::{ColdStore, ColdStoreStats, PageGeometry, PreparedPage};
 use crate::conversion_worker::{Bf16PageJob, ConversionStats, ConversionWorker, PageShape};
 use crate::model_config::ModelSpec;
 use crate::prefill_tch::protected_queries;
-use crate::shadow_metrics::{ShadowDiagnosticReport, ShadowEventId, ShadowMetrics};
+use crate::shadow_metrics::{ShadowEventId, ShadowMetrics};
 
-use super::weight_io::{WeightArchive, WeightFile};
+use super::weight_io::WeightArchive;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ChatTemplateFamily {
+pub(super) enum ChatTemplateFamily {
     TemplateDelimited,
 }
 
-struct DecoderGeometry {
-    hidden: i64,
-    intermediate: i64,
-    vocab: i64,
-    n_layers: usize,
-    query_heads: i64,
-    kv_heads: i64,
-    head_dim: i64,
-    rope_theta: f64,
-    rms_eps: f64,
-    llama3_rope: bool,
-    eos: Vec<i64>,
-    chat: ChatTemplateFamily,
+pub(super) struct DecoderGeometry {
+    pub(super) hidden: i64,
+    pub(super) intermediate: i64,
+    pub(super) vocab: i64,
+    pub(super) n_layers: usize,
+    pub(super) query_heads: i64,
+    pub(super) kv_heads: i64,
+    pub(super) head_dim: i64,
+    pub(super) rope_theta: f64,
+    pub(super) rms_eps: f64,
+    pub(super) llama3_rope: bool,
+    pub(super) eos: Vec<i64>,
+    pub(super) chat: ChatTemplateFamily,
 }
 
 impl DecoderGeometry {
-    fn from_spec(spec: &ModelSpec) -> Result<Self> {
+    pub(super) fn from_spec(spec: &ModelSpec) -> Result<Self> {
         let intermediate = spec
             .intermediate_size
             .context("missing intermediate_size")?;
@@ -73,52 +70,52 @@ impl DecoderGeometry {
         })
     }
 
-    fn query_out(&self) -> i64 {
+    pub(super) fn query_out(&self) -> i64 {
         self.query_heads * self.head_dim
     }
 
-    fn kv_out(&self) -> i64 {
+    pub(super) fn kv_out(&self) -> i64 {
         self.kv_heads * self.head_dim
     }
 }
 
 pub struct DecoderLayer {
-    input_norm: Tensor,
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    o: Tensor,
-    post_norm: Tensor,
-    gate: Tensor,
-    up: Tensor,
-    down: Tensor,
-    query_heads: i64,
-    kv_heads: i64,
-    head_dim: i64,
-    rope_theta: f64,
-    rms_eps: f64,
-    llama3_rope: bool,
+    pub(super) input_norm: Tensor,
+    pub(super) q: Tensor,
+    pub(super) k: Tensor,
+    pub(super) v: Tensor,
+    pub(super) o: Tensor,
+    pub(super) post_norm: Tensor,
+    pub(super) gate: Tensor,
+    pub(super) up: Tensor,
+    pub(super) down: Tensor,
+    pub(super) query_heads: i64,
+    pub(super) kv_heads: i64,
+    pub(super) head_dim: i64,
+    pub(super) rope_theta: f64,
+    pub(super) rms_eps: f64,
+    pub(super) llama3_rope: bool,
 }
 
 pub struct DecoderModel {
-    embedding: Tensor,
-    layers: Vec<DecoderLayer>,
-    final_norm: Tensor,
-    lm_head: Tensor,
-    rms_eps: f64,
-    eos: Vec<i64>,
-    chat: ChatTemplateFamily,
-    query_heads: i64,
-    kv_heads: i64,
-    head_dim: i64,
-    streaming_prefill: bool,
-    declared_context_limit: usize,
+    pub(super) embedding: Tensor,
+    pub(super) layers: Vec<DecoderLayer>,
+    pub(super) final_norm: Tensor,
+    pub(super) lm_head: Tensor,
+    pub(super) rms_eps: f64,
+    pub(super) eos: Vec<i64>,
+    pub(super) chat: ChatTemplateFamily,
+    pub(super) query_heads: i64,
+    pub(super) kv_heads: i64,
+    pub(super) head_dim: i64,
+    pub(super) streaming_prefill: bool,
+    pub(super) declared_context_limit: usize,
 }
 
 pub struct DenseKvCache {
-    layers: Vec<Option<(Tensor, Tensor)>>,
-    sequence_tokens: usize,
-    querywise_attention: bool,
+    pub(super) layers: Vec<Option<(Tensor, Tensor)>>,
+    pub(super) sequence_tokens: usize,
+    pub(super) querywise_attention: bool,
 }
 
 pub trait AttentionCache {
@@ -145,9 +142,9 @@ pub trait AttentionCache {
 #[derive(Debug)]
 #[doc(hidden)]
 pub struct LayerOutputTrace {
-    layer_index: usize,
-    sequence_end: usize,
-    last_token: Vec<f32>,
+    pub(super) layer_index: usize,
+    pub(super) sequence_end: usize,
+    pub(super) last_token: Vec<f32>,
 }
 
 impl DenseKvCache {
@@ -163,7 +160,7 @@ impl DenseKvCache {
         }
     }
 
-    fn gqa_groups(query: &Tensor, key: &Tensor) -> Result<i64> {
+    pub(super) fn gqa_groups(query: &Tensor, key: &Tensor) -> Result<i64> {
         let query_heads = query.size()[1];
         let kv_heads = key.size()[1];
         ensure!(
@@ -185,7 +182,7 @@ impl DenseKvCache {
             .sum()
     }
 
-    fn state_digest(&self) -> Result<String> {
+    pub(super) fn state_digest(&self) -> Result<String> {
         let mut digest = Sha256::new();
         digest.update(b"mslim-dense-kv-state-v1");
         digest.update((self.sequence_tokens as u64).to_le_bytes());
@@ -212,7 +209,7 @@ impl DenseKvCache {
             .collect())
     }
 
-    fn compare_appended_state(&self, other: &Self, appended: usize) -> Result<KvStateDifference> {
+    pub(super) fn compare_appended_state(&self, other: &Self, appended: usize) -> Result<KvStateDifference> {
         ensure!(
             self.sequence_tokens == other.sequence_tokens && appended <= self.sequence_tokens,
             "estados KV no comparables"
@@ -286,7 +283,7 @@ impl DenseKvCache {
         })
     }
 
-    fn truncate_to(&mut self, sequence_tokens: usize) -> Result<()> {
+    pub(super) fn truncate_to(&mut self, sequence_tokens: usize) -> Result<()> {
         ensure!(
             sequence_tokens <= self.sequence_tokens,
             "rollback KV denso hacia delante"
@@ -308,14 +305,14 @@ impl DenseKvCache {
     }
 }
 
-struct KvStateDifference {
-    first_divergent_layer: Option<usize>,
-    divergent_layers: usize,
-    key_mismatched_elements: usize,
-    value_mismatched_elements: usize,
-    elements_compared: usize,
-    max_abs_key_difference: f64,
-    max_abs_value_difference: f64,
+pub(super) struct KvStateDifference {
+    pub(super) first_divergent_layer: Option<usize>,
+    pub(super) divergent_layers: usize,
+    pub(super) key_mismatched_elements: usize,
+    pub(super) value_mismatched_elements: usize,
+    pub(super) elements_compared: usize,
+    pub(super) max_abs_key_difference: f64,
+    pub(super) max_abs_value_difference: f64,
 }
 
 impl Default for DenseKvCache {
@@ -408,64 +405,64 @@ impl AttentionCache for DenseKvCache {
     }
 }
 
-struct MslimPage {
-    token_start: usize,
-    tokens: usize,
-    certificate: PageAttentionCertificate,
-    storage: PageStorage,
+pub(super) struct MslimPage {
+    pub(super) token_start: usize,
+    pub(super) tokens: usize,
+    pub(super) certificate: PageAttentionCertificate,
+    pub(super) storage: PageStorage,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-struct PageAttentionCertificate {
-    regions: Vec<KeyRegionCertificate>,
+pub(super) struct PageAttentionCertificate {
+    pub(super) regions: Vec<KeyRegionCertificate>,
     /// Historical configured-model 2KV bound. Kept unchanged for v1 prefix
     /// compatibility and the original 16Q/2KV branch-and-bound path.
-    value_abs_max: [f32; 2],
+    pub(super) value_abs_max: [f32; 2],
     /// New, optional exact BF16 V bound for ALL KV heads (8 for Llama).
     /// A missing field in a legacy persisted prefix FAILS CLOSED
     /// to full dense BF16 V reads; it never authorizes an omission.
     #[serde(default)]
-    value_abs_max_by_kv_head: Vec<f32>,
+    pub(super) value_abs_max_by_kv_head: Vec<f32>,
     /// Per-KV-head, per-dimension maxima in head-major order. Legacy
     /// manifests lack this field and cannot certify component-wise omission.
     #[serde(default)]
-    value_abs_max_by_kv_head_dim: Vec<f32>,
+    pub(super) value_abs_max_by_kv_head_dim: Vec<f32>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-struct KeyRegionCertificate {
-    block_id: usize,
-    state_id: usize,
-    local_start: usize,
-    local_end: usize,
-    key_minimum_bits: Vec<u16>,
-    key_maximum_bits: Vec<u16>,
-    value_abs_max: [f32; 2],
+pub(super) struct KeyRegionCertificate {
+    pub(super) block_id: usize,
+    pub(super) state_id: usize,
+    pub(super) local_start: usize,
+    pub(super) local_end: usize,
+    pub(super) key_minimum_bits: Vec<u16>,
+    pub(super) key_maximum_bits: Vec<u16>,
+    pub(super) value_abs_max: [f32; 2],
     /// Exact per-KV-head regional V maxima. Legacy prefixes omit this field
     /// and therefore cannot authorize a Llama 8-KV-head regional omission.
     #[serde(default)]
-    value_abs_max_by_kv_head: Vec<f32>,
+    pub(super) value_abs_max_by_kv_head: Vec<f32>,
 }
 
-struct ParallelAxisMetrics {
-    extents: usize,
-    tokens: usize,
-    fingerprint_payload_bytes: usize,
-    f32_fingerprint_reference_bytes: usize,
-    micro_metadata_bytes: usize,
-    extent_min: usize,
-    extent_max: usize,
-    query_events: usize,
-    dimensional_views: usize,
-    view_tokens: usize,
-    lsh_queries: usize,
-    lsh_candidates: usize,
-    lsh_misses: usize,
-    lsh_probe_two: usize,
-    lsh_probe_four: usize,
+pub(super) struct ParallelAxisMetrics {
+    pub(super) extents: usize,
+    pub(super) tokens: usize,
+    pub(super) fingerprint_payload_bytes: usize,
+    pub(super) f32_fingerprint_reference_bytes: usize,
+    pub(super) micro_metadata_bytes: usize,
+    pub(super) extent_min: usize,
+    pub(super) extent_max: usize,
+    pub(super) query_events: usize,
+    pub(super) dimensional_views: usize,
+    pub(super) view_tokens: usize,
+    pub(super) lsh_queries: usize,
+    pub(super) lsh_candidates: usize,
+    pub(super) lsh_misses: usize,
+    pub(super) lsh_probe_two: usize,
+    pub(super) lsh_probe_four: usize,
 }
 
-enum PageStorage {
+pub(super) enum PageStorage {
     Cold {
         exact_id: u64,
         immutable: bool,
@@ -478,22 +475,22 @@ enum PageStorage {
 }
 
 #[derive(Deserialize, Serialize)]
-struct PersistentPrefixPage {
-    token_start: usize,
-    tokens: usize,
-    certificate: PageAttentionCertificate,
-    exact_id: u64,
+pub(super) struct PersistentPrefixPage {
+    pub(super) token_start: usize,
+    pub(super) tokens: usize,
+    pub(super) certificate: PageAttentionCertificate,
+    pub(super) exact_id: u64,
 }
 
 #[derive(Deserialize, Serialize)]
-struct PersistentPrefixManifest {
-    schema: u32,
-    model_identity: String,
-    prefix_digest: String,
-    prefix_tokens: usize,
-    storage_frame_tokens: usize,
-    layers: Vec<Vec<PersistentPrefixPage>>,
-    parallel_axis: ParallelContextAxis,
+pub(super) struct PersistentPrefixManifest {
+    pub(super) schema: u32,
+    pub(super) model_identity: String,
+    pub(super) prefix_digest: String,
+    pub(super) prefix_tokens: usize,
+    pub(super) storage_frame_tokens: usize,
+    pub(super) layers: Vec<Vec<PersistentPrefixPage>>,
+    pub(super) parallel_axis: ParallelContextAxis,
 }
 
 const PREFIX_CACHE_SCHEMA: u32 = 1;
@@ -526,12 +523,12 @@ impl Clone for MslimPage {
     }
 }
 
-struct MslimLayer {
-    pages: Vec<MslimPage>,
-    tail: Option<(Tensor, Tensor)>,
-    prefill_hot: Option<(Tensor, Tensor)>,
+pub(super) struct MslimLayer {
+    pub(super) pages: Vec<MslimPage>,
+    pub(super) tail: Option<(Tensor, Tensor)>,
+    pub(super) prefill_hot: Option<(Tensor, Tensor)>,
     /// Verified resident copy of `pages`, see [`ResidentCommittedKv`].
-    resident: Option<ResidentCommittedKv>,
+    pub(super) resident: Option<ResidentCommittedKv>,
 }
 
 /// Resident, already verified BF16 copy of a layer's committed pages.
@@ -542,12 +539,12 @@ struct MslimLayer {
 /// instead of re-reading (and re-hashing) the whole history from disk. The
 /// returned history is a view of the first `tokens` positions, which are
 /// never rewritten, so its bytes are identical to the old `Tensor::cat`.
-struct ResidentCommittedKv {
-    key: Tensor,
-    value: Tensor,
-    tokens: usize,
-    capacity: usize,
-    spans: Vec<(usize, usize)>,
+pub(super) struct ResidentCommittedKv {
+    pub(super) key: Tensor,
+    pub(super) value: Tensor,
+    pub(super) tokens: usize,
+    pub(super) capacity: usize,
+    pub(super) spans: Vec<(usize, usize)>,
 }
 
 /// Default RAM budget for resident committed KV: `MSLIM_RESIDENT_KV_BYTES`
@@ -579,108 +576,108 @@ fn default_resident_kv_budget_bytes() -> usize {
 }
 
 pub struct MslimKvCache {
-    layers: Vec<MslimLayer>,
-    kv_heads: i64,
-    head_dim: i64,
-    query_heads: i64,
-    sequence_tokens: usize,
-    _cold_directory: tempfile::TempDir,
-    exact_cold: ColdStore,
-    conversion: ConversionWorker<PreparedPage>,
-    storage_frame_tokens: usize,
-    parallel_axis: ParallelContextAxis,
-    parallel_query_events: usize,
-    parallel_dimensional_views: usize,
-    parallel_view_tokens: usize,
-    parallel_selected_positions: Vec<usize>,
-    exact_k_tokens_scanned: usize,
-    exact_v_tokens_materialized: usize,
-    exact_mass_max_bound: f64,
-    decode_metadata_nanos: u64,
-    decode_key_materialization_nanos: u64,
-    decode_exact_scores_nanos: u64,
-    decode_region_bound_nanos: u64,
-    decode_key_assembly_nanos: u64,
-    decode_value_materialization_nanos: u64,
-    decode_sdpa_nanos: u64,
+    pub(super) layers: Vec<MslimLayer>,
+    pub(super) kv_heads: i64,
+    pub(super) head_dim: i64,
+    pub(super) query_heads: i64,
+    pub(super) sequence_tokens: usize,
+    pub(super) _cold_directory: tempfile::TempDir,
+    pub(super) exact_cold: ColdStore,
+    pub(super) conversion: ConversionWorker<PreparedPage>,
+    pub(super) storage_frame_tokens: usize,
+    pub(super) parallel_axis: ParallelContextAxis,
+    pub(super) parallel_query_events: usize,
+    pub(super) parallel_dimensional_views: usize,
+    pub(super) parallel_view_tokens: usize,
+    pub(super) parallel_selected_positions: Vec<usize>,
+    pub(super) exact_k_tokens_scanned: usize,
+    pub(super) exact_v_tokens_materialized: usize,
+    pub(super) exact_mass_max_bound: f64,
+    pub(super) decode_metadata_nanos: u64,
+    pub(super) decode_key_materialization_nanos: u64,
+    pub(super) decode_exact_scores_nanos: u64,
+    pub(super) decode_region_bound_nanos: u64,
+    pub(super) decode_key_assembly_nanos: u64,
+    pub(super) decode_value_materialization_nanos: u64,
+    pub(super) decode_sdpa_nanos: u64,
     /// Operation-count accounting for the attention authority. These are
     /// logical BF16 element counts, not claims about opaque LibTorch kernels.
-    attention_dense_qk_elements: u128,
-    attention_dense_pv_elements: u128,
-    attention_selected_qk_elements: u128,
-    attention_selected_pv_elements: u128,
-    attention_v_tokens_avoided: usize,
+    pub(super) attention_dense_qk_elements: u128,
+    pub(super) attention_dense_pv_elements: u128,
+    pub(super) attention_selected_qk_elements: u128,
+    pub(super) attention_selected_pv_elements: u128,
+    pub(super) attention_v_tokens_avoided: usize,
     /// Work submitted by the canonical dense path to LibTorch SDPA.  The
     /// scheduled counters describe the rectangular tensors handed to the
     /// opaque kernel; the causal counters describe the non-masked prefix
     /// pairs.  They are deliberately separate from the omission baseline
     /// above, which is also populated by diagnostic/selective paths.
-    dense_sdpa_calls: usize,
-    dense_sdpa_scheduled_qk_elements: u128,
-    dense_sdpa_scheduled_pv_elements: u128,
-    dense_sdpa_causal_qk_elements: u128,
-    dense_sdpa_causal_pv_elements: u128,
-    dense_sdpa_nanos: u64,
+    pub(super) dense_sdpa_calls: usize,
+    pub(super) dense_sdpa_scheduled_qk_elements: u128,
+    pub(super) dense_sdpa_scheduled_pv_elements: u128,
+    pub(super) dense_sdpa_causal_qk_elements: u128,
+    pub(super) dense_sdpa_causal_pv_elements: u128,
+    pub(super) dense_sdpa_nanos: u64,
     /// Maximum known temporary allocation footprint of one autoregressive
     /// attention call. This is an accounting lower bound, not process RSS:
     /// opaque libtorch/SDPA workspace is reported separately as unknown.
-    known_attention_scratch_peak_bytes: usize,
-    prefill_working_peak_bytes: usize,
-    resident_kv_budget_bytes: usize,
-    resident_kv_bytes: usize,
-    resident_kv_peak_bytes: usize,
-    resident_kv_pages_reused: usize,
-    resident_kv_fallbacks: usize,
-    prefill_axis_nanos: u64,
-    prefill_hot_concat_nanos: u64,
-    prefill_certificate_nanos: u64,
-    prefill_handoff_nanos: u64,
-    prefill_commit_nanos: u64,
-    hierarchy_events: usize,
-    hierarchy_states_total: usize,
-    hierarchy_states_initial: usize,
-    hierarchy_states_loaded: usize,
-    hierarchy_widening_rounds: usize,
-    hierarchy_k_tokens_avoided: usize,
-    hierarchy_k_events: usize,
-    hierarchy_k_tokens_skippable: usize,
-    hierarchy_last_states_initial: usize,
-    hierarchy_last_states_loaded: usize,
-    hierarchy_last_widening_rounds: usize,
-    hierarchy_last_region_bound: f64,
-    hierarchy_last_token_bound: f64,
-    exact_oracle_events: usize,
-    exact_oracle_token_opportunities: usize,
-    exact_oracle_tokens_omissible_at_1e6: usize,
-    exact_oracle_tokens_omissible_at_1e5: usize,
-    exact_oracle_tokens_omissible_at_1e4: usize,
-    exact_oracle_tokens_omissible_at_1e3: usize,
-    exact_oracle_min_tolerance_for_one_omission: f64,
-    exact_oracle_enabled: bool,
-    shadow_metrics: Option<ShadowMetrics>,
+    pub(super) known_attention_scratch_peak_bytes: usize,
+    pub(super) prefill_working_peak_bytes: usize,
+    pub(super) resident_kv_budget_bytes: usize,
+    pub(super) resident_kv_bytes: usize,
+    pub(super) resident_kv_peak_bytes: usize,
+    pub(super) resident_kv_pages_reused: usize,
+    pub(super) resident_kv_fallbacks: usize,
+    pub(super) prefill_axis_nanos: u64,
+    pub(super) prefill_hot_concat_nanos: u64,
+    pub(super) prefill_certificate_nanos: u64,
+    pub(super) prefill_handoff_nanos: u64,
+    pub(super) prefill_commit_nanos: u64,
+    pub(super) hierarchy_events: usize,
+    pub(super) hierarchy_states_total: usize,
+    pub(super) hierarchy_states_initial: usize,
+    pub(super) hierarchy_states_loaded: usize,
+    pub(super) hierarchy_widening_rounds: usize,
+    pub(super) hierarchy_k_tokens_avoided: usize,
+    pub(super) hierarchy_k_events: usize,
+    pub(super) hierarchy_k_tokens_skippable: usize,
+    pub(super) hierarchy_last_states_initial: usize,
+    pub(super) hierarchy_last_states_loaded: usize,
+    pub(super) hierarchy_last_widening_rounds: usize,
+    pub(super) hierarchy_last_region_bound: f64,
+    pub(super) hierarchy_last_token_bound: f64,
+    pub(super) exact_oracle_events: usize,
+    pub(super) exact_oracle_token_opportunities: usize,
+    pub(super) exact_oracle_tokens_omissible_at_1e6: usize,
+    pub(super) exact_oracle_tokens_omissible_at_1e5: usize,
+    pub(super) exact_oracle_tokens_omissible_at_1e4: usize,
+    pub(super) exact_oracle_tokens_omissible_at_1e3: usize,
+    pub(super) exact_oracle_min_tolerance_for_one_omission: f64,
+    pub(super) exact_oracle_enabled: bool,
+    pub(super) shadow_metrics: Option<ShadowMetrics>,
     /// Explicit transaction mode for exact multi-token target verification.
     /// It is never inferred from tensor length because prefill is multi-token.
-    multitoken_verification: bool,
-    prefix_cold: Option<ColdStore>,
-    applied_mass_tolerance: Option<f64>,
-    prefix_copied_bytes: u64,
-    record_step_logits: bool,
-    step_logits: Vec<Vec<f32>>,
-    layer_output_traces: Vec<LayerOutputTrace>,
-    verify_exact_attention_outputs: bool,
-    exact_attention_verified_events: usize,
-    exact_attention_equal_events: usize,
-    exact_attention_candidate_v_tokens: usize,
-    exact_attention_rejected_v_tokens: usize,
-    rounding_cell_checked_events: usize,
-    rounding_cell_certified_events: usize,
-    rounding_cell_components_checked: usize,
-    rounding_cell_components_certified: usize,
-    suffix_against_committed: bool,
+    pub(super) multitoken_verification: bool,
+    pub(super) prefix_cold: Option<ColdStore>,
+    pub(super) applied_mass_tolerance: Option<f64>,
+    pub(super) prefix_copied_bytes: u64,
+    pub(super) record_step_logits: bool,
+    pub(super) step_logits: Vec<Vec<f32>>,
+    pub(super) layer_output_traces: Vec<LayerOutputTrace>,
+    pub(super) verify_exact_attention_outputs: bool,
+    pub(super) exact_attention_verified_events: usize,
+    pub(super) exact_attention_equal_events: usize,
+    pub(super) exact_attention_candidate_v_tokens: usize,
+    pub(super) exact_attention_rejected_v_tokens: usize,
+    pub(super) rounding_cell_checked_events: usize,
+    pub(super) rounding_cell_certified_events: usize,
+    pub(super) rounding_cell_components_checked: usize,
+    pub(super) rounding_cell_components_certified: usize,
+    pub(super) suffix_against_committed: bool,
 }
 
 impl MslimKvCache {
-    fn conversion_worker(first_sequence: u64) -> Result<ConversionWorker<PreparedPage>> {
+    pub(super) fn conversion_worker(first_sequence: u64) -> Result<ConversionWorker<PreparedPage>> {
         ConversionWorker::spawn_from(16, 1, first_sequence, move |job| {
             let geometry = PageGeometry {
                 layer: job.shape.layer as u32,
@@ -706,7 +703,7 @@ impl MslimKvCache {
         Self::try_new_with_geometry(storage_frame_tokens, 24, 2, 16, 128)
     }
 
-    fn try_new_with_geometry(
+    pub(super) fn try_new_with_geometry(
         storage_frame_tokens: usize,
         n_layers: usize,
         kv_heads: i64,
@@ -832,7 +829,7 @@ impl MslimKvCache {
         })
     }
 
-    fn cold_store(&mut self, immutable: bool) -> Result<&mut ColdStore> {
+    pub(super) fn cold_store(&mut self, immutable: bool) -> Result<&mut ColdStore> {
         if immutable {
             self.prefix_cold
                 .as_mut()
@@ -842,19 +839,19 @@ impl MslimKvCache {
         }
     }
 
-    fn read_cold_key(&mut self, exact_id: u64, immutable: bool) -> Result<Vec<u8>> {
+    pub(super) fn read_cold_key(&mut self, exact_id: u64, immutable: bool) -> Result<Vec<u8>> {
         self.cold_store(immutable)?
             .read_key(exact_id)
             .map_err(anyhow::Error::from)
     }
 
-    fn read_cold_value(&mut self, exact_id: u64, immutable: bool) -> Result<Vec<u8>> {
+    pub(super) fn read_cold_value(&mut self, exact_id: u64, immutable: bool) -> Result<Vec<u8>> {
         self.cold_store(immutable)?
             .read_value(exact_id)
             .map_err(anyhow::Error::from)
     }
 
-    fn read_cold_key_tokens(
+    pub(super) fn read_cold_key_tokens(
         &mut self,
         exact_id: u64,
         immutable: bool,
@@ -865,7 +862,7 @@ impl MslimKvCache {
             .map_err(anyhow::Error::from)
     }
 
-    fn read_cold_value_tokens(
+    pub(super) fn read_cold_value_tokens(
         &mut self,
         exact_id: u64,
         immutable: bool,
@@ -877,7 +874,7 @@ impl MslimKvCache {
     }
 
     /// Exact BF16 K/V tensors of `pages`, reading (and verifying) cold pages.
-    fn committed_page_tensors(
+    pub(super) fn committed_page_tensors(
         &mut self,
         pages: &[MslimPage],
     ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
@@ -903,11 +900,11 @@ impl MslimKvCache {
         Ok((keys, values))
     }
 
-    fn resident_bytes_for(&self, capacity: usize) -> usize {
+    pub(super) fn resident_bytes_for(&self, capacity: usize) -> usize {
         2 * self.kv_heads as usize * capacity * self.head_dim as usize * 2
     }
 
-    fn release_resident(&mut self, layer_index: usize) {
+    pub(super) fn release_resident(&mut self, layer_index: usize) {
         if let Some(resident) = self.layers[layer_index].resident.take() {
             self.resident_kv_bytes = self
                 .resident_kv_bytes
@@ -915,7 +912,7 @@ impl MslimKvCache {
         }
     }
 
-    fn assemble_committed_layer(&mut self, layer_index: usize) -> Result<(Tensor, Tensor)> {
+    pub(super) fn assemble_committed_layer(&mut self, layer_index: usize) -> Result<(Tensor, Tensor)> {
         let pages = self.layers[layer_index].pages.clone();
         ensure!(!pages.is_empty(), "capa comprometida vacía");
         let spans = pages
@@ -1025,7 +1022,7 @@ impl MslimKvCache {
         Ok(history)
     }
 
-    fn begin_multitoken_verification(&mut self) -> Result<()> {
+    pub(super) fn begin_multitoken_verification(&mut self) -> Result<()> {
         ensure!(
             !self.multitoken_verification,
             "verificación multí-token ya activa"
@@ -1038,14 +1035,14 @@ impl MslimKvCache {
         Ok(())
     }
 
-    fn end_multitoken_verification(&mut self) {
+    pub(super) fn end_multitoken_verification(&mut self) {
         self.multitoken_verification = false;
     }
 
     /// Roll back only provisional, unsealed tokens. Multi-token verification
     /// deliberately never submits them to conversion workers, so this cannot
     /// orphan a background job or mutate cold storage.
-    fn rollback_unsealed_to(&mut self, sequence_tokens: usize) -> Result<()> {
+    pub(super) fn rollback_unsealed_to(&mut self, sequence_tokens: usize) -> Result<()> {
         ensure!(
             sequence_tokens <= self.sequence_tokens,
             "rollback KV frío hacia delante"
@@ -1086,7 +1083,7 @@ impl MslimKvCache {
     /// Hash the logical BF16 K/V state in the same layer-major order as the
     /// dense cache. Cold pages are verified by `ColdStore` while being read;
     /// the digest is diagnostic and does not become serving authority.
-    fn logical_state_digest(&mut self) -> Result<String> {
+    pub(super) fn logical_state_digest(&mut self) -> Result<String> {
         self.collect_conversions()?;
         let mut digest = Sha256::new();
         digest.update(b"mslim-dense-kv-state-v1");
@@ -1166,7 +1163,7 @@ impl MslimKvCache {
             .collect())
     }
 
-    fn persistent_manifest(
+    pub(super) fn persistent_manifest(
         &self,
         model_identity: &str,
         prefix_digest: &str,
@@ -1210,7 +1207,7 @@ impl MslimKvCache {
         })
     }
 
-    fn persist_prefix(
+    pub(super) fn persist_prefix(
         &mut self,
         cache_root: &Path,
         cache_key: &str,
@@ -1259,7 +1256,7 @@ impl MslimKvCache {
         self.adopt_published_prefix(&destination, &manifest_bytes, copied_bytes)
     }
 
-    fn adopt_published_prefix(
+    pub(super) fn adopt_published_prefix(
         &mut self,
         destination: &Path,
         expected_manifest: &[u8],
@@ -1317,7 +1314,7 @@ impl MslimKvCache {
     }
 
     #[cfg(test)]
-    fn restore_prefix(
+    pub(super) fn restore_prefix(
         cache_root: &Path,
         cache_key: &str,
         model_identity: &str,
@@ -1338,7 +1335,7 @@ impl MslimKvCache {
     // Keeping the cache identity and complete tensor geometry explicit makes
     // a mismatched persistent prefix fail closed at this authority boundary.
     #[allow(clippy::too_many_arguments)]
-    fn restore_prefix_geometry(
+    pub(super) fn restore_prefix_geometry(
         cache_root: &Path,
         cache_key: &str,
         model_identity: &str,
@@ -1389,7 +1386,7 @@ impl MslimKvCache {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn restore_prefix_from_manifest(
+    pub(super) fn restore_prefix_from_manifest(
         cache_root: &Path,
         cache_key: &str,
         storage_frame_tokens: usize,
@@ -1444,7 +1441,7 @@ impl MslimKvCache {
     }
 
     #[cfg(test)]
-    fn hydrate_prefill_hot(&mut self) -> Result<()> {
+    pub(super) fn hydrate_prefill_hot(&mut self) -> Result<()> {
         for layer_index in 0..self.layers.len() {
             self.layers[layer_index].prefill_hot =
                 Some(self.assemble_committed_layer(layer_index)?);
@@ -1452,7 +1449,7 @@ impl MslimKvCache {
         Ok(())
     }
 
-    fn observe_parallel_axis(&mut self, key: &Tensor) -> Result<()> {
+    pub(super) fn observe_parallel_axis(&mut self, key: &Tensor) -> Result<()> {
         let shape = key.size();
         let kv_heads = self.kv_heads as usize;
         let head_dim = self.head_dim as usize;
@@ -1482,7 +1479,7 @@ impl MslimKvCache {
         Ok(())
     }
 
-    fn autocatalogue_parallel_axis(&mut self, query: &Tensor) -> Result<()> {
+    pub(super) fn autocatalogue_parallel_axis(&mut self, query: &Tensor) -> Result<()> {
         if query.size()[2] != 1 || self.parallel_axis.extents().is_empty() {
             return Ok(());
         }
@@ -1557,7 +1554,7 @@ impl MslimKvCache {
         Ok(())
     }
 
-    fn bf16_bits(tensor: &Tensor) -> Result<Vec<u16>> {
+    pub(super) fn bf16_bits(tensor: &Tensor) -> Result<Vec<u16>> {
         ensure!(tensor.kind() == Kind::BFloat16, "página no BF16");
         let contiguous = tensor.contiguous();
         let source = unsafe {
@@ -1566,14 +1563,14 @@ impl MslimKvCache {
         Ok(source.to_vec())
     }
 
-    fn u16_bytes(values: &[u16]) -> &[u8] {
+    pub(super) fn u16_bytes(values: &[u16]) -> &[u8] {
         unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len() * 2) }
     }
 
     /// Encode interval endpoints conservatively in BF16. Nearest conversion
     /// is not sufficient for a certificate: minima must round downward and
     /// maxima upward in the numeric ordering of BF16 values.
-    fn outward_bf16_bounds(values: &[f32], lower: bool) -> Vec<u16> {
+    pub(super) fn outward_bf16_bounds(values: &[f32], lower: bool) -> Vec<u16> {
         values
             .iter()
             .copied()
@@ -1598,7 +1595,7 @@ impl MslimKvCache {
             .collect()
     }
 
-    fn page_attention_certificate(
+    pub(super) fn page_attention_certificate(
         &self,
         key: &Tensor,
         value: &Tensor,
@@ -1714,7 +1711,7 @@ impl MslimKvCache {
         })
     }
 
-    fn commit_conversion(
+    pub(super) fn commit_conversion(
         &mut self,
         result: crate::conversion_worker::ConversionResult<PreparedPage>,
     ) -> Result<()> {
@@ -1735,14 +1732,14 @@ impl MslimKvCache {
         Ok(())
     }
 
-    fn collect_conversions(&mut self) -> Result<()> {
+    pub(super) fn collect_conversions(&mut self) -> Result<()> {
         for result in self.conversion.try_collect_ordered() {
             self.commit_conversion(result)?;
         }
         Ok(())
     }
 
-    fn gqa_groups(query: &Tensor, key: &Tensor) -> i64 {
+    pub(super) fn gqa_groups(query: &Tensor, key: &Tensor) -> i64 {
         let query_heads = query.size()[1];
         let kv_heads = key.size()[1].max(1);
         if query_heads % kv_heads == 0 {
@@ -1752,7 +1749,7 @@ impl MslimKvCache {
         }
     }
 
-    fn record_dense_sdpa(
+    pub(super) fn record_dense_sdpa(
         &mut self,
         query_tokens: usize,
         attended_tokens: usize,
@@ -1788,7 +1785,7 @@ impl MslimKvCache {
         self.dense_sdpa_nanos = self.dense_sdpa_nanos.saturating_add(elapsed_nanos);
     }
 
-    fn seal_and_release_prefill(&mut self) -> Result<()> {
+    pub(super) fn seal_and_release_prefill(&mut self) -> Result<()> {
         self.seal_partial_storage_frames()?;
         for layer in &mut self.layers {
             layer.prefill_hot = None;
@@ -1814,7 +1811,7 @@ impl MslimKvCache {
         self.storage_frame_tokens
     }
 
-    fn parallel_axis_metrics(&self) -> ParallelAxisMetrics {
+    pub(super) fn parallel_axis_metrics(&self) -> ParallelAxisMetrics {
         let extents = self.parallel_axis.extents();
         let minimum = extents
             .iter()
@@ -2013,7 +2010,7 @@ impl MslimKvCache {
                 .sum::<usize>()
     }
 
-    fn exact_tensor_from_bytes(&self, bytes: &[u8], tokens: usize) -> Result<Tensor> {
+    pub(super) fn exact_tensor_from_bytes(&self, bytes: &[u8], tokens: usize) -> Result<Tensor> {
         let expected = self.kv_heads as usize * tokens * self.head_dim as usize * 2;
         ensure!(bytes.len() == expected, "geometría BF16 fría inválida");
         Ok(Tensor::from_data_size(
@@ -2040,7 +2037,7 @@ impl MslimKvCache {
     // physical work already happened; bundling them would obscure ownership
     // and make accidental recomputation harder to audit.
     #[allow(clippy::too_many_arguments)]
-    fn llama_certified_value_attention(
+    pub(super) fn llama_certified_value_attention(
         &mut self,
         layer_index: usize,
         query: &Tensor,
@@ -2500,7 +2497,7 @@ impl MslimKvCache {
     /// only attention is evaluated query-by-query so each token keeps its own
     /// causal prefix and certificate. If any query cannot certify, return None
     /// and let the caller execute the existing dense causal tile.
-    fn llama_querywise_certified_prefill(
+    pub(super) fn llama_querywise_certified_prefill(
         &mut self,
         layer_index: usize,
         query: &Tensor,
@@ -2655,7 +2652,7 @@ impl MslimKvCache {
         Ok(Some(Tensor::cat(&refs, 2)))
     }
 
-    fn llama_dense_tile_attention(
+    pub(super) fn llama_dense_tile_attention(
         &mut self,
         query: &Tensor,
         pages: &[MslimPage],
@@ -2715,7 +2712,7 @@ impl MslimKvCache {
         Ok(output)
     }
 
-    fn llama_dense_tile_key(
+    pub(super) fn llama_dense_tile_key(
         &mut self,
         pages: &[MslimPage],
         existing_tail: Option<&(Tensor, Tensor)>,
@@ -2755,7 +2752,7 @@ impl MslimKvCache {
         Ok(Tensor::cat(&refs, 2))
     }
 
-    fn llama_dense_single_query_attention(
+    pub(super) fn llama_dense_single_query_attention(
         &mut self,
         query: &Tensor,
         pages: &[MslimPage],
@@ -2811,7 +2808,7 @@ impl MslimKvCache {
         Ok(output)
     }
 
-    fn exact_mass_attention(
+    pub(super) fn exact_mass_attention(
         &mut self,
         layer_index: usize,
         query: &Tensor,
@@ -3322,7 +3319,7 @@ impl MslimKvCache {
     /// still uses a length-one SDPA call and its own causal prefix, preserving
     /// the numerical authority of sequential decode while avoiding repeated
     /// certification and cold reads for every candidate.
-    fn querywise_dense_cold_attention(
+    pub(super) fn querywise_dense_cold_attention(
         &mut self,
         query: &Tensor,
         pages: &[MslimPage],
@@ -3422,7 +3419,7 @@ impl MslimKvCache {
         Ok(Tensor::cat(&output_refs, 2))
     }
 
-    fn scaled_attention(
+    pub(super) fn scaled_attention(
         query: &Tensor,
         key_pages: &[Tensor],
         value_pages: &[Tensor],
@@ -3578,7 +3575,7 @@ fn llama_regional_k_tokens_skippable(
         .sum())
 }
 
-fn state_score_uppers_generic<const Q: usize, const KV: usize>(
+pub(super) fn state_score_uppers_generic<const Q: usize, const KV: usize>(
     pages: &[MslimPage],
     query_values: &[f32],
     scale: f64,
@@ -3676,7 +3673,7 @@ fn exact_scores_generic<const Q: usize, const KV: usize>(
 /// Select token coordinates without copying when they form one contiguous
 /// interval. `index_select` remains the exact fallback for genuinely sparse
 /// selections.
-fn select_token_indices(tensor: &Tensor, indices: &[usize]) -> Tensor {
+pub(super) fn select_token_indices(tensor: &Tensor, indices: &[usize]) -> Tensor {
     debug_assert!(!indices.is_empty());
     let contiguous = indices.windows(2).all(|pair| pair[1] == pair[0] + 1);
     if contiguous {
@@ -3697,7 +3694,7 @@ fn select_token_indices(tensor: &Tensor, indices: &[usize]) -> Tensor {
     }
 }
 
-fn exact_oracle_omissible_tokens(
+pub(super) fn exact_oracle_omissible_tokens(
     scores_by_head: &[Vec<f64>],
     value_abs_max: &[f64],
     tolerance: f64,
@@ -3710,7 +3707,7 @@ fn exact_oracle_omissible_tokens(
 /// Smallest component-wise attention-output tolerance for which at least one
 /// token can be omitted simultaneously for every query head. This uses exact
 /// QK scores; no geometric region bound participates in the result.
-fn exact_oracle_min_tolerance_candidate(
+pub(super) fn exact_oracle_min_tolerance_candidate(
     scores_by_head: &[Vec<f64>],
     value_abs_max: &[f64],
 ) -> (f64, usize, usize) {
@@ -3835,7 +3832,7 @@ fn elapsed_nanos(started: std::time::Instant) -> u64 {
     started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
-fn reference_draft(prompt: &[i64], generated: &[u32], maximum: usize) -> Vec<i64> {
+pub(super) fn reference_draft(prompt: &[i64], generated: &[u32], maximum: usize) -> Vec<i64> {
     if maximum == 0 || generated.is_empty() {
         return Vec::new();
     }
@@ -3861,22 +3858,22 @@ fn reference_draft(prompt: &[i64], generated: &[u32], maximum: usize) -> Vec<i64
 }
 
 #[derive(Clone, Default)]
-struct SuffixAutomatonState {
-    maximum_length: usize,
-    suffix_link: Option<usize>,
-    transitions: HashMap<i64, usize>,
-    terminal: bool,
+pub(super) struct SuffixAutomatonState {
+    pub(super) maximum_length: usize,
+    pub(super) suffix_link: Option<usize>,
+    pub(super) transitions: HashMap<i64, usize>,
+    pub(super) terminal: bool,
 }
 
 /// Linear-size index of every prompt substring. A state with exactly one
 /// outgoing edge has a unique observed continuation. Terminal states are not
 /// extended because end-of-document is an alternative continuation.
-struct DeterministicSuffixDrafter {
-    states: Vec<SuffixAutomatonState>,
+pub(super) struct DeterministicSuffixDrafter {
+    pub(super) states: Vec<SuffixAutomatonState>,
 }
 
 impl DeterministicSuffixDrafter {
-    fn build(tokens: &[i64]) -> Self {
+    pub(super) fn build(tokens: &[i64]) -> Self {
         let mut states = vec![SuffixAutomatonState::default()];
         let mut last = 0_usize;
         for &token in tokens {
@@ -3927,7 +3924,7 @@ impl DeterministicSuffixDrafter {
         Self { states }
     }
 
-    fn walk(&self, tokens: &[i64]) -> Option<usize> {
+    pub(super) fn walk(&self, tokens: &[i64]) -> Option<usize> {
         let mut state = 0_usize;
         for token in tokens {
             state = *self.states[state].transitions.get(token)?;
@@ -3935,7 +3932,7 @@ impl DeterministicSuffixDrafter {
         Some(state)
     }
 
-    fn longest_suffix_state(&self, tokens: &[i64]) -> Option<usize> {
+    pub(super) fn longest_suffix_state(&self, tokens: &[i64]) -> Option<usize> {
         let maximum_context = tokens.len().min(64);
         (1..=maximum_context)
             .rev()
@@ -3945,7 +3942,7 @@ impl DeterministicSuffixDrafter {
     /// The first token is already the target model's exact argmax from the
     /// previous forward. Only the remaining suffix is drafted from unique
     /// prompt continuations.
-    fn draft(&self, generated: &[u32], exact_first_token: i64, maximum: usize) -> Vec<i64> {
+    pub(super) fn draft(&self, generated: &[u32], exact_first_token: i64, maximum: usize) -> Vec<i64> {
         if maximum == 0 {
             return Vec::new();
         }
@@ -3978,14 +3975,14 @@ impl DeterministicSuffixDrafter {
 }
 
 #[derive(Debug)]
-struct AdaptiveSpeculationPolicy {
-    k: usize,
-    cooldown_tokens: usize,
-    bypassed_tokens: usize,
+pub(super) struct AdaptiveSpeculationPolicy {
+    pub(super) k: usize,
+    pub(super) cooldown_tokens: usize,
+    pub(super) bypassed_tokens: usize,
 }
 
 impl AdaptiveSpeculationPolicy {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             k: 2,
             cooldown_tokens: 0,
@@ -3993,20 +3990,20 @@ impl AdaptiveSpeculationPolicy {
         }
     }
 
-    fn maximum_draft(&self) -> usize {
+    pub(super) fn maximum_draft(&self) -> usize {
         self.k
     }
 
-    fn should_speculate(&self) -> bool {
+    pub(super) fn should_speculate(&self) -> bool {
         self.cooldown_tokens == 0
     }
 
-    fn record_sequential_bypass(&mut self) {
+    pub(super) fn record_sequential_bypass(&mut self) {
         self.cooldown_tokens = self.cooldown_tokens.saturating_sub(1);
         self.bypassed_tokens += 1;
     }
 
-    fn record_round(&mut self, proposed: usize, accepted: usize) {
+    pub(super) fn record_round(&mut self, proposed: usize, accepted: usize) {
         if accepted == proposed {
             self.k = (self.k * 2).min(8);
             self.cooldown_tokens = 0;
@@ -4022,7 +4019,7 @@ impl AdaptiveSpeculationPolicy {
 }
 
 #[cfg(test)]
-fn omitted_region_bounds(
+pub(super) fn omitted_region_bounds(
     selected_scores: &[Vec<f64>],
     state_uppers: &BTreeMap<usize, [f64; 16]>,
     state_value_max: &BTreeMap<usize, [f64; 2]>,
@@ -4068,18 +4065,18 @@ fn omitted_region_bounds(
 /// region after each widening round is unnecessary.  This accumulator keeps
 /// the same proof quantities in a fixed exponential reference frame and
 /// updates only the state that has just been materialized.
-struct IncrementalRegionCertificate<const Q: usize, const KV: usize> {
-    reference: [f64; Q],
-    kept_mass: [f64; Q],
-    omitted_upper_mass: [f64; Q],
-    kept_value_max: [f64; KV],
-    omitted_value_desc: [Vec<(usize, f64)>; KV],
-    omitted_value_cursor: [usize; KV],
-    remaining: BTreeSet<usize>,
+pub(super) struct IncrementalRegionCertificate<const Q: usize, const KV: usize> {
+    pub(super) reference: [f64; Q],
+    pub(super) kept_mass: [f64; Q],
+    pub(super) omitted_upper_mass: [f64; Q],
+    pub(super) kept_value_max: [f64; KV],
+    pub(super) omitted_value_desc: [Vec<(usize, f64)>; KV],
+    pub(super) omitted_value_cursor: [usize; KV],
+    pub(super) remaining: BTreeSet<usize>,
 }
 
 impl<const Q: usize, const KV: usize> IncrementalRegionCertificate<Q, KV> {
-    fn new(
+    pub(super) fn new(
         state_uppers: &BTreeMap<usize, [f64; Q]>,
         state_value_max: &BTreeMap<usize, [f64; KV]>,
         always_kept_scores: Option<&Vec<Vec<f64>>>,
@@ -4141,7 +4138,7 @@ impl<const Q: usize, const KV: usize> IncrementalRegionCertificate<Q, KV> {
         })
     }
 
-    fn materialize(
+    pub(super) fn materialize(
         &mut self,
         state: usize,
         exact_scores: &[Vec<f64>],
@@ -4189,7 +4186,7 @@ impl<const Q: usize, const KV: usize> IncrementalRegionCertificate<Q, KV> {
         Ok(())
     }
 
-    fn bounds(&self) -> Vec<f64> {
+    pub(super) fn bounds(&self) -> Vec<f64> {
         (0..Q)
             .map(|head| {
                 if self.remaining.is_empty() {
@@ -4620,11 +4617,11 @@ impl DecoderModel {
         })
     }
 
-    fn is_eos(&self, token: i64) -> bool {
+    pub(super) fn is_eos(&self, token: i64) -> bool {
         self.eos.contains(&token)
     }
 
-    fn mslim_cache(&self, storage_frame_tokens: usize) -> Result<MslimKvCache> {
+    pub(super) fn mslim_cache(&self, storage_frame_tokens: usize) -> Result<MslimKvCache> {
         MslimKvCache::try_new_with_geometry(
             storage_frame_tokens,
             self.layers.len(),
@@ -4655,7 +4652,7 @@ impl DecoderModel {
     /// Llama experiment. The cache applies the one-query certificate inside
     /// each attention layer while projections and MLPs remain batched for the
     /// whole tile, matching the canonical/OpenCL prefill execution order.
-    fn forward_certified_prefill<C: AttentionCache>(
+    pub(super) fn forward_certified_prefill<C: AttentionCache>(
         &self,
         token_ids: &[i64],
         cache: &mut C,

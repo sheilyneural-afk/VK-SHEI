@@ -15,8 +15,7 @@ pub mod weight_io;
 
 // Re-export the public surface so call sites keep working unchanged.
 pub use kv_cache::{
-    AttentionCache, DecoderGeometry, DecoderLayer, DecoderModel, DenseKvCache, LayerOutputTrace,
-    MslimKvCache,
+    AttentionCache, DecoderLayer, DecoderModel, DenseKvCache, LayerOutputTrace, MslimKvCache,
 };
 pub use runtime::{
     AppliedOmissionReport, DenseGeneration, MultiTokenVerificationOracle, NativeInferenceParity,
