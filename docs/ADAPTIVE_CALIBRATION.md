@@ -13,10 +13,9 @@ almacén de memoria, sistema de sesiones ni autoridad de activación.
 | `calibration_transaction.rs` | Propuesta, shadow, canary, promoción explícita, recibos y reversión de archivos. |
 | `OpenClLlm` | Aplicación de los dos ajustes sobre el motor real, antes del prefill. |
 
-El predictor es una implementación nueva y pequeña del mecanismo de mínimos
-cuadrados recursivos considerado en la revisión de INICIO. No es una copia del
-organismo ni un port completo de sus modelos continuos. No importa paquetes,
-servicios o datos de SHEILY/INICIO y no necesita que esos proyectos existan.
+El predictor es una implementación propia y pequeña de mínimos cuadrados
+recursivos, sin dependencias externas al crate ni servicios o datos de otros
+proyectos.
 
 ## Qué puede cambiar
 
