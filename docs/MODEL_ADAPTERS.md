@@ -50,7 +50,7 @@ cantidad puede atenderse desde el nivel caliente:
 Las dos rutas usan el mismo escalado de atención y la matriz exige logits,
 tokens y digest K/V idénticos.
 
-### Acelerador OpenCL
+### Acelerador GPU
 
 `accelerator-runtime` acepta dos modos explícitos mediante `mslim_kv_mode`:
 

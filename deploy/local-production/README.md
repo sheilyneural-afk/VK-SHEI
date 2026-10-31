@@ -177,7 +177,7 @@ Por tanto, `VERIFY-OK` significa “estructura y hashes básicos válidos”, no
 
 ## Worker y gateway
 
-`run-local-worker.sh` inicia el worker OpenCL en `127.0.0.1`, construyendo sus
+`run-local-worker.sh` inicia el worker GPU en `127.0.0.1`, construyendo sus
 argumentos a partir de `local-production.env`. El worker no implementa
 autenticación y no debe exponerse fuera de loopback.
 

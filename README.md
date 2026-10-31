@@ -109,7 +109,7 @@ informe opcional de integridad K/V. Las implementaciones físicas viven detrás
 de ese contrato:
 
 - `native-cpu-runtime`: ejecución Rust en CPU;
-- `accelerator-runtime`: ejecución OpenCL en el equipo compatible;
+- `accelerator-runtime`: ejecución GPU en el equipo compatible (OpenCL, HIP u otro backend detectado);
 - adaptadores opcionales LibTorch e HIP, compilados mediante features
   específicas.
 
@@ -189,9 +189,9 @@ actualmente desalineado con el worker, como se indica en “Estado del despliegu
 local”.
 
 Cargo tiene `autobins = false` y registra `mslim-server` con
-`src/bin/mslim-gateway.rs`. El archivo `src/bin/mslim-server.rs` no es el target
-canónico de ese nombre y conserva una implementación HTTP anterior. Su mera
-presencia no describe el servicio que se compila como `mslim-server`.
+`src/bin/mslim-gateway.rs`. La implementación HTTP anterior que vivía en
+`src/bin/mslim-server.rs` se eliminó porque no se compilaba; sigue en el
+historial de git.
 
 ## Módulos principales
 
@@ -200,8 +200,8 @@ presencia no describe el servicio que se compila como `mslim-server`.
 | Contrato de adaptadores | [`crates/mslim-adapter-api/src/lib.rs`](crates/mslim-adapter-api/src/lib.rs) |
 | Motor | [`src/engine.rs`](src/engine.rs) |
 | CPU nativa | [`src/native_cpu_adapter.rs`](src/native_cpu_adapter.rs) |
-| Adapter acelerado | [`src/opencl_adapter.rs`](src/opencl_adapter.rs) |
-| Runtime OpenCL | [`src/opencl_llm.rs`](src/opencl_llm.rs) |
+| Adapter acelerado | [`src/gpu_adapter.rs`](src/gpu_adapter.rs) |
+| Runtime GPU | [`src/gpu_llm/mod.rs`](src/gpu_llm/mod.rs) |
 | ColdStore acelerado | [`src/gpu_region_store.rs`](src/gpu_region_store.rs) |
 | Métricas de distribución | [`src/conformance.rs`](src/conformance.rs) |
 | Matriz de validación | [`src/bin/mslim-adapter-parity.rs`](src/bin/mslim-adapter-parity.rs) |
@@ -217,7 +217,7 @@ presencia no describe el servicio que se compila como `mslim-server`.
 | Feature | Alcance |
 |---|---|
 | `native-cpu-backend` | adapter CPU Rust y soporte de bundle; es la feature por defecto |
-| `accelerator-backend` | OpenCL, kernels, worker y proveedor acelerado |
+| `accelerator-backend` | GPU kernels, worker y proveedor acelerado (backend detectado en runtime) |
 | `torch-backend` | runtime LibTorch y binarios asociados |
 | `hip-backend` | bridge hipBLASLt explícito sobre la ruta acelerada |
 | `unified-router` | gateway HTTP; no carga pesos |

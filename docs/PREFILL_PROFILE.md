@@ -38,6 +38,6 @@ Los candidatos que fallen o excedan el timeout quedan registrados con
 `ok: false`.
 
 La lista por defecto incluye `cached` porque el selector es neutral respecto al
-proveedor. El runtime OpenCL actual solo acepta `stream` y `resident`; si se usa
+proveedor. El runtime GPU actual solo acepta `stream` y `resident`; si se usa
 como comando de benchmark, `cached` debe eliminarse de `MSLIM_WEIGHT_MODES` o se
 registrará como candidato fallido.

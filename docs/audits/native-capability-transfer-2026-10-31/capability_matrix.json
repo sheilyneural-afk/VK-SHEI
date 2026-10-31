@@ -1,0 +1,1050 @@
+{
+  "schema": "mslim.native_transfer.assessment/v1",
+  "date": "2026-10-31",
+  "scope": "native independent adaptation; not integration",
+  "source_inventory": "source_inventory.v2.json",
+  "runtime_changes_made": false,
+  "donor_tests_executed": false,
+  "capabilities": [
+    {
+      "id": "S01",
+      "name": "Índice de proyectos y símbolos",
+      "decision": "ADAPTAR P1",
+      "proposed_target": "project_index",
+      "benefit": "Localizar archivos, funciones, tipos y módulos del código que M-SLIM deba estudiar.",
+      "limit": "resource-index solo indexa .py y extrae nombres de alto nivel mediante texto. Para Rust hay que extraer el analizador de la consola y sus dependencias; no basta renombrar el índice.",
+      "acceptance_gate": "Comparar símbolos y rangos con un corpus Rust/Python conocido; resolver cambios y borrados sin devolver índices antiguos.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-resource-index-rs/src/lib.rs",
+          "symbol": "build_module_index",
+          "line": 280,
+          "sha256": "d3f48a668c8126a0a1941782e62721398ee901570f2e98e3085437a787954095",
+          "static_tests_in_file": 9
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-cognitive-console-rs/src/inventory.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "597b8c03b0f8a902bfd71e199c9019eb72ad8fa4ff4d9a09d74e0cc7dd67f073",
+          "static_tests_in_file": 26
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "auto-doc/autodoc/analyzer.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "dad56e384e8e021b4ae3353a987fc0538bdec02dc5f2c5e0f04f32a45962e206",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S02",
+      "name": "Grafo de dependencias e impacto",
+      "decision": "ADAPTAR P1",
+      "proposed_target": "project_index::dependency_graph",
+      "benefit": "Relacionar módulos y localizar qué pruebas o consumidores podrían afectar los cambios.",
+      "limit": "El grafo del auditor usa imports Python por regex; no es un grafo semántico multilenguaje ni demuestra llamadas ejecutadas.",
+      "acceptance_gate": "Distinguir imports, definiciones, llamadas y aristas inferidas; validar módulos relativos, macros y límites del análisis.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-repo-auditor-rs/src/graph.rs",
+          "symbol": "build_dependency_graph",
+          "line": 15,
+          "sha256": "531cec8e2c891e4ec89bab3424c04d2ddd95d9fdb35b44b6da52e30470bacd64",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "auto-doc/autodoc/indexer.py",
+          "symbol": "build_graph",
+          "line": 122,
+          "sha256": "140366ca6ba6a67e1fe955e5231b65e30f5445667bc9a8d27621169015db0511",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S03",
+      "name": "Auditoría e integridad del proyecto",
+      "decision": "EXTRAER P1",
+      "proposed_target": "project_audit",
+      "benefit": "Inventariar código, registrar anomalías y sellar conjuntos de archivos mediante hashes.",
+      "limit": "Un certificado de integridad no certifica corrección funcional. Ejecutar escaneos fuera de la ruta de inferencia; no copiar rutas o exclusiones sin revisarlas.",
+      "acceptance_gate": "Detectar modificación, pérdida y duplicación de archivos; producir resultados deterministas sin leer secretos.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-repo-auditor-rs/src/inventory.rs",
+          "symbol": "build_inventory",
+          "line": 25,
+          "sha256": "b85221c479214374265a9aaba3d2ef09e63055cf90ae89dc97f37de568862030",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-repo-auditor-rs/src/certify.rs",
+          "symbol": "certify_state",
+          "line": 135,
+          "sha256": "46fdb80d2fc2aee1a5cc62acb074d2c824ac74c2d786b56cbb8668b7e8222ba5",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S04",
+      "name": "Puertas de cierre y documentación verificable",
+      "decision": "ADAPTAR P1",
+      "proposed_target": "validation::project_closure",
+      "benefit": "Separar código presente, cableado, compilación, pruebas y evidencia de ejecución.",
+      "limit": "No copiar el generador como autoridad infalible; sus búsquedas son parcialmente heurísticas. Convertir controles útiles a herramientas propias o Rust sin dependencia de la instalación donante.",
+      "acceptance_gate": "Un módulo desconectado o una prueba omitida debe impedir un estado de validación completa.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "auto-doc/autodoc/closure.py",
+          "symbol": "assess_closure",
+          "line": 850,
+          "sha256": "27d85f9a22da9db557835f9a265364db30633c4da10a3148bcf12cccb7d1e539",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "auto-doc/autodoc/verify.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "104ad9f64df2ba9e58f0e275cf31161a131095fe4cbaaa979e0b717dedf41c1f",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S05",
+      "name": "Recuperación híbrida con citas verificadas",
+      "decision": "EXTRAER P1",
+      "proposed_target": "evidence_retrieval",
+      "benefit": "Fusionar varios rankings, deduplicar por identidad/revisión y aceptar solo resultados cuya fuente canónica, ámbito y hash coincidan.",
+      "limit": "La fusión no crea embeddings ni un buscador semántico. Aporta ranking y validación de candidatos; debe extender document_graph, no reemplazar originales por resúmenes.",
+      "acceptance_gate": "Conservar rechazos de índice obsoleto, ámbito cruzado, duplicados, hash alterado y citas con límites UTF-8 inválidos.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-memory-engine-rs/src/hybrid_retrieval.rs",
+          "symbol": "weighted_rrf",
+          "line": 337,
+          "sha256": "7a20f52b88f0b448ae8845b9837e133c6cca981641a057bb45f10530871ff5cc",
+          "static_tests_in_file": 13
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S06",
+      "name": "Memoria de trabajo acotada",
+      "decision": "EXTRAER P1",
+      "proposed_target": "experience_memory::working_set",
+      "benefit": "Mantener entidades, ejemplos, notas e hipótesis de la operación actual con capacidad explícita.",
+      "limit": "Es un búfer lógico, no una KV-cache exacta ni un mecanismo de compresión de pesos.",
+      "acceptance_gate": "Probar límites, orden de expulsión, aislamiento de sesión y reconstrucción desde fuentes duraderas.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-memory-engine-rs/src/working_memory.rs",
+          "symbol": "WorkingMemoryBuffer",
+          "line": 26,
+          "sha256": "1b3adb985ca9ec4304eaf0241bd0a53471648848a0d1ffd86c7b115a582f9dd3",
+          "static_tests_in_file": 2
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S07",
+      "name": "Hechos, hipótesis, dudas y contradicciones",
+      "decision": "ADAPTAR P1",
+      "proposed_target": "experience_memory::epistemic_state",
+      "benefit": "Registrar qué está respaldado, qué sigue siendo hipótesis y qué preguntas impiden cerrar un trabajo.",
+      "limit": "Las etiquetas y reglas de confianza no verifican automáticamente la verdad ni eliminan alucinaciones. El código de revisión contiene reglas de texto y requiere validación del dominio.",
+      "acceptance_gate": "Una contradicción no debe aumentar confianza; evitar que un recuerdo se corrobore a sí mismo.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-memory-engine-rs/src/epistemic.rs",
+          "symbol": "EpistemicWorkingState",
+          "line": 76,
+          "sha256": "2244a91e2ea8a6c3ef4dd59582688c6bcbe37b1d5af6f87b7bc29a16092e845e",
+          "static_tests_in_file": 6
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-cortex-rs/src/belief_revision.rs",
+          "symbol": "revise_beliefs",
+          "line": 54,
+          "sha256": "9fd6604d73eafb52adccbf5e9d7c20717d4651ed8d9a632114b1b0981c7cf8c9",
+          "static_tests_in_file": 7
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S08",
+      "name": "Consolidación estructurada de experiencias",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "experience_memory::consolidation",
+      "benefit": "Derivar hechos y procedimientos de episodios conservando referencias a las fuentes.",
+      "limit": "El módulo está acoplado a escritores, ámbitos e inferencia de SHEILY. Extraer contratos y lógica, no importar la memoria canónica ni sus servicios. La síntesis semántica no es preservación bit a bit.",
+      "acceptance_gate": "Separar preparación sin escrituras de persistencia; revalidar fuentes al confirmar; impedir referencias inexistentes.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-memory-engine-rs/src/structured_consolidation.rs",
+          "symbol": "prepare_structured_consolidation",
+          "line": 457,
+          "sha256": "1e382a642d5bacd9af107dc8e9147ab6e5a6b13f2dfbfd5dab0a5160cf91ed72",
+          "static_tests_in_file": 37
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S09",
+      "name": "Memoria de fallos y patrones",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "experience_memory::failure_patterns",
+      "benefit": "Reconocer configuraciones o procedimientos asociados a fallos anteriores y detectar candidatos conflictivos.",
+      "limit": "Hay coincidencias textuales y kernels sobre vectores aportados por el llamador; no diagnostican por sí mismos todas las causas de un fallo.",
+      "acceptance_gate": "Una coincidencia no puede bloquear un perfil correcto sin evidencia contextual; separar memoria histórica de autoridad de ejecución.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-memory-engine-rs/src/failure_memory.rs",
+          "symbol": "FailureMemory",
+          "line": 33,
+          "sha256": "8f17b1e7a313a6445080018e1774da7a67328c077f78863625801ce9acb4c237",
+          "static_tests_in_file": 5
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-memory-engine-rs/src/pattern_memory.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "2a93c520a7527e60fddc7ae3063e9f321f633ff115f2eddb236fd667b435ca12",
+          "static_tests_in_file": 3
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S10",
+      "name": "Minimum Space: historial y reducción de estado",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "experience_memory::event_reducer",
+      "benefit": "Reconstruir estado derivado a partir de eventos y detectar/quarantinar sufijos corruptos de una cadena.",
+      "limit": "Es un subsistema de experiencia, evidencia y estado cognitivo, muy ligado al motor de turnos. No es un compresor lossless de tensores, KV ni pesos de 2 bits.",
+      "acceptance_gate": "Mismos eventos deben producir mismo estado; una corrupción no puede reescribir silenciosamente historia válida ni alterar KV canónica.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-turn-engine-rs/src/minimum_space_state_transition.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "a86278476774c3fb9c2106cdff72cc6bdcbd3de4647fe1200f32fcabd37fa1bb",
+          "static_tests_in_file": 2
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-turn-engine-rs/src/minimum_space_persistence.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "33ad26fb5d9ae8e52c17f5f40cc342eb3c2f9ce0067c9103313924bc2c08b9f1",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-turn-engine-rs/src/minimum_space_chain_integrity.rs",
+          "symbol": "verify_experience_chain",
+          "line": 780,
+          "sha256": "55be779c851ed12869a8bbc2b02ebd28bc4f8b8b542b23f50f9823c0844e095f",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S11",
+      "name": "Selección de candidatos medidos",
+      "decision": "EXTRAER P1",
+      "proposed_target": "adaptive_policy::candidate_ranker",
+      "benefit": "Ordenar perfiles y estrategias candidatos con señales, evidencias y límites aportados por M-SLIM.",
+      "limit": "La puntuación combina señales; no demuestra rendimiento físico. Mantener recomendaciones separadas de permisos y usar solo métricas observadas cuando se declare una mejora real.",
+      "acceptance_gate": "Rechazar valores no finitos, candidatos sin procedencia y promociones que no hayan pasado las puertas existentes.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-cognitive-mechanisms-rs/src/hypothesis.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "1755203803cb15776e05689aed2802a60a70516b891b758749228a294bfd6584",
+          "static_tests_in_file": 8
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S12",
+      "name": "Búsqueda acotada de secuencias",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "adaptive_policy::bounded_planner",
+      "benefit": "Explorar alternativas de operaciones con límites de pasos y una cinta de decisiones reproducible.",
+      "limit": "Necesita un generador y un evaluador propios. No hace más inteligente al LLM automáticamente ni justifica aproximar la atención en modo exacto.",
+      "acceptance_gate": "Límite verificable de trabajo y repetibilidad; distinguir puntuaciones de modelo de medidas reales.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-cognitive-mechanisms-rs/src/trajectory_search.rs",
+          "symbol": "search_trajectory",
+          "line": 710,
+          "sha256": "d1328854453b3abea9ccadd6a8df70e5ed7263bd510493197096c8d4eb1412da",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S13",
+      "name": "Análisis documental y relaciones derivadas",
+      "decision": "FUSIONAR P2",
+      "proposed_target": "document_graph + derived_relations",
+      "benefit": "Añadir entidades, relaciones e hipótesis al grafo de páginas original de M-SLIM.",
+      "limit": "No copiar un segundo almacén de documentos; relaciones extraídas son derivadas y deben apuntar a páginas/rangos verificables.",
+      "acceptance_gate": "Toda relación debe llevar fuente y estado de confianza; una relación derivada no puede sustituir al texto original.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-cortex-rs/src/document_analysis.rs",
+          "symbol": "DocumentKnowledgeGraph",
+          "line": 45,
+          "sha256": "2b546933acacde3ce5fdb992ca0991af034a5f282c7f8e4fb8d3f8fde9765d29",
+          "static_tests_in_file": 7
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S14",
+      "name": "Registro de capacidades y contratos",
+      "decision": "FUSIONAR P2",
+      "proposed_target": "runtime_registry + typed_contracts",
+      "benefit": "Describir qué funciones ofrece cada componente y vincularlas con implementación, versión y validación.",
+      "limit": "M-SLIM ya tiene registro de runtimes y adaptadores. Extraer mecanismos de verificación; no copiar identidades, permisos o contratos de SHEILY como dependencia.",
+      "acceptance_gate": "Detectar capacidades declaradas sin consumidor o sin implementación; contratos versionados y fallos explícitos.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-runtime-registry-rs/src/lib.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "6717830f8b14717359b19a8345eac1b5a5a32e43f2a10c40a6475a6aca0cf553",
+          "static_tests_in_file": 1
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-turn-contracts-rs/src/lib.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "97f0b9b338a843743cc4baaa02a0a1be438f8cb07c1ff9f6b68a9646994716c1",
+          "static_tests_in_file": 7
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S15",
+      "name": "Continuidad contextual con ámbito",
+      "decision": "FUSIONAR P2",
+      "proposed_target": "session_store + continuity_contract",
+      "benefit": "Conservar vínculos entre turnos, documentos y referencias dentro de una sesión.",
+      "limit": "No copiar la autoridad de SHEILY ni confundir continuidad semántica con restaurar exactamente el estado K/V de otro modelo.",
+      "acceptance_gate": "Separación entre proyectos/sesiones, revisiones de documento y modelo; rechazo de snapshots incompatibles.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-context-authority-rs/src/lib.rs",
+          "symbol": "TurnContextEnvelope",
+          "line": 133,
+          "sha256": "767ffd68be0b2c927b4ddf506c2d8f5b670d061f7383ab089bf7f7baad5b32f0",
+          "static_tests_in_file": 24
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-memory-engine-rs/src/session_continuity.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "57d1ca0c87a1b225e5398c790359284e9ae2019abbc18b3b6aa83ed0aecf2ad4",
+          "static_tests_in_file": 6
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S16",
+      "name": "Asesor sin autoridad implícita",
+      "decision": "EXTRAER P1",
+      "proposed_target": "adaptive_policy::advisory_contract",
+      "benefit": "Hacer que el optimizador recomiende o pida revisión sin poder ejecutar, cambiar código o promover perfiles por sí mismo.",
+      "limit": "Esta proyección GPEM no implementa reparto de RAM/VRAM ni un gestor físico de recursos. Esa afirmación anterior no queda respaldada por este módulo.",
+      "acceptance_gate": "Una recomendación no puede convertirse en permiso ni modificar la memoria canónica.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-memory-engine-rs/src/gpem_authority.rs",
+          "symbol": "gpem_authority_projection",
+          "line": 20,
+          "sha256": "3d7e8941d3ff127993a3dac5b3dc4cc51315870e5b8d41dd7a43942d6fc34c5e",
+          "static_tests_in_file": 1
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S17",
+      "name": "Memoria procedimental de intentos verificados",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "experience_memory::procedural_replay",
+      "benefit": "Recordar qué procedimientos funcionaron a partir de recibos auténticos, sin inventar un segundo historial.",
+      "limit": "Los esquemas actuales corresponden a solvers TIDEX. Hay que definir recibos propios de M-SLIM y mantener límites del búfer.",
+      "acceptance_gate": "No reconstruir éxitos a partir de stdout no autenticado; replay estable y rechazo de esquemas desconocidos.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "tidex/src/learning/procedural_memory.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "8a625efc2cc6ffce28fe5dc391714ab9b5e0e5b7fa7f7c335ffb1903127d5de3",
+          "static_tests_in_file": 19
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "tidex/src/learning/procedural_replay.rs",
+          "symbol": "rebuild_from_authenticated_receipt",
+          "line": 127,
+          "sha256": "c74fbf174ca6cb7260faf70a449fb24ef9f8eb9d2902e726a4d2800ec6e609db",
+          "static_tests_in_file": 18
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S18",
+      "name": "Portafolio de solvers y crédito causal",
+      "decision": "EXPERIMENTAL P3",
+      "proposed_target": "calibration::numerical_models",
+      "benefit": "Comparar solucionadores o ajustes numéricos con residuos recomputados y atribución de resultados.",
+      "limit": "Es un portafolio de mínimos cuadrados, no un selector directo CPU/GPU/LLM. Solo compensa extraerlo si el problema de calibración necesita esos solvers.",
+      "acceptance_gate": "Residuos independientes, cotas de recursos y evaluación fuera de muestra antes de atribuir una mejora.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "tidex/src/learning/solver_portfolio.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "8132a2c0f8869e53ebc7c2655492079cb03cb6a4f2e4e08d8f2820c676bf149a",
+          "static_tests_in_file": 31
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "tidex/src/learning/causal_credit.rs",
+          "symbol": "estimate_causal_credit",
+          "line": 201,
+          "sha256": "658aa4544394a5d5d04a3cac3f29ba6b71b285b6d11dfbd28aa30ae181dd116b",
+          "static_tests_in_file": 7
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S19",
+      "name": "Geometría Pitágoras de TIDEX",
+      "decision": "EXPERIMENTAL P3",
+      "proposed_target": "diagnostics::geometry",
+      "benefit": "Comparar normas L1/L2 y analizar perturbaciones en experimentos numéricos.",
+      "limit": "evaluate_and_correct calcula normas y razones; project_to_geodesic reescala el vector. No comprime sin pérdida; la reescala modifica sus valores y no debe tocar pesos/KV exactos.",
+      "acceptance_gate": "Separar diagnóstico de transformación; cualquier transformación debe declararse aproximada y validarse, nunca presentarse como paridad exacta.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "tidex/src/analysis/pythagoras_topology.rs",
+          "symbol": "PythagorasStaircaseMetric",
+          "line": 53,
+          "sha256": "9777760c14de8b1cc8fc8b232b62b6659d8d1aabae2d1e7e8cc7731b408f531d",
+          "static_tests_in_file": 5
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "S20",
+      "name": "Generación de corpus y entrenamiento auxiliar",
+      "decision": "EXPERIMENTAL P3",
+      "proposed_target": "offline_validation::retrieval_corpus",
+      "benefit": "Preparar corpus y entrenar un recuperador auxiliar cuando existan datos y una evaluación adecuada.",
+      "limit": "No importar el stack entero de entrenamiento/inferencia. Entrenar cambia parámetros; no es compresión transparente ni mejora garantizada en el hardware actual.",
+      "acceptance_gate": "Datos separados de evaluación, trazabilidad y comparación con búsqueda exacta antes de incorporar un recuperador entrenado.",
+      "sources": [
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-dataset-compiler-rs/src/retrieval_curriculum.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "0e967159499c187a03f59373fcdf8bfa81670eda7ed6598d604c1e19e6dd9bf5",
+          "static_tests_in_file": 2
+        },
+        {
+          "project": "SHEILY-COGNITIVA",
+          "path": "cognition/native/sheily-training-kernels-rs/src/retrieval_encoder_training.rs",
+          "symbol": null,
+          "line": 1,
+          "sha256": "98bf0ed3f18123b90d0cdd6ccd28b14ff60d04cc829dd29d3a03819867fac0fc",
+          "static_tests_in_file": 2
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I01",
+      "name": "Admisión de aprendizaje",
+      "decision": "EXTRAER P1",
+      "proposed_target": "adaptive_policy::learning_admission",
+      "benefit": "Decidir qué observaciones pueden actualizar el modelo auxiliar de rendimiento y cuáles quedan bloqueadas.",
+      "limit": "Es un contrato de aprendizaje de dinámica, no autoridad de ejecución. Portar las reglas a tipos propios Rust y a métricas reales de M-SLIM.",
+      "acceptance_gate": "Datos no finitos, observaciones ambiguas y muestras de evaluación deben quedar fuera del aprendizaje activo.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/adaptation/learning_admission.py",
+          "symbol": "learning_admission_for_evidence",
+          "line": 147,
+          "sha256": "1dd7900e95601839cc2308ae2b02f4d5291058fc0c58ed3d2479100f569aa88e",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I02",
+      "name": "Evaluación en sombra, canary y revocación",
+      "decision": "FUSIONAR P1",
+      "proposed_target": "calibration_transaction",
+      "benefit": "Probar perfiles candidatos, activarlos de forma acotada y restaurar el anterior cuando fallen.",
+      "limit": "M-SLIM ya tiene CalibrationTransaction. La búsqueda estática no encontró usos de ese tipo fuera de su propio archivo/pruebas; aprovechar y cablear ese núcleo antes de duplicarlo.",
+      "acceptance_gate": "Ensayo real con fallo de canary y reinicio; restauración verificada y ninguna promoción a partir de métricas inventadas.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/adaptation/structural_shadow.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "883457a0630ec702afb9cede8414c383f135e85e182b626950a65e6c25bfb2a2",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/adaptation/structural_canary.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "3626b632fce184ad01bc6d047ba648df7b674040b79ab13a81aca75fbaadf259",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/adaptation/structural_revoke.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "444c8ad88f7538055cc6279f16440aad3bf59c367f233620c8a9ef0ce8ae045c",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/governance/promotion_manager.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "a2d116a155a309bc75b7cef10aefb06a4a5938a4e86469ebb925eaaa9e278ea0",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I03",
+      "name": "Vigilancia secuencial de degradación",
+      "decision": "EXTRAER P1",
+      "proposed_target": "calibration::degradation_watch",
+      "benefit": "Vigilar si una configuración nueva empeora una pérdida medida respecto a su referencia.",
+      "limit": "El módulo combina un proceso de capital y CUSUM; su docstring limita la garantía y lo declara asesor. Adaptar el significado de pérdida a latencia/error con supuestos explícitos.",
+      "acceptance_gate": "Paridad Python/Rust sobre secuencias registradas y rechazo de NaN, infinito y pérdidas inválidas; una alarma no autoriza una mutación.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/adaptation/degradation_eprocess.py",
+          "symbol": "SequentialDegradationWatch",
+          "line": 23,
+          "sha256": "4048e91ae44a5359980ae8c1889df31026ce7a47e24c53ff4e903e34e8af5127",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I04",
+      "name": "Estadística y confianza explícita",
+      "decision": "EXTRAER P1",
+      "proposed_target": "validation::statistical_evidence",
+      "benefit": "Separar insuficiencia de datos, alarmas secuenciales y tipos de cobertura estadística.",
+      "limit": "Las garantías requieren hipótesis sobre los datos; la cobertura conformal adaptativa no equivale a una garantía exacta por petición.",
+      "acceptance_gate": "Pruebas de fronteras, warmup y datos dependientes; registrar los supuestos y no renombrar estimaciones como certezas.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/evidence/statistics.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "acf4a63a59323461bacc62f5e2c7c9d42a2af14f73691c6e95f0bef8b67cb85d",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/evidence/reliability.py",
+          "symbol": "BettingEProcess",
+          "line": 24,
+          "sha256": "55ed5bb6b1dc063ea65aceb9e0225d39b9daf0985ab65bf7cf233c6c6a1d4d41",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I05",
+      "name": "Modelo continuo del coste observado",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "adaptive_policy::cost_model",
+      "benefit": "Aprender un predictor pequeño del coste de operaciones a partir de longitud de contexto, lote y telemetría.",
+      "limit": "La aplicación a coste de inferencia es una propuesta de adaptación, no una capacidad medida ya en M-SLIM. El modelo continuo no es un LLM ni almacena documentos sin pérdida.",
+      "acceptance_gate": "Predicción contrastada con medidas reales y conjuntos reservados; límites de recursos y detección de cambio de distribución.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/cognitive_engines/m_continuous.py",
+          "symbol": "apply_rls_theta_update",
+          "line": 1245,
+          "sha256": "0bc8d1b7781e8eef94ae5cd4a1cddd92a82fd2e23bef1a10321e58a1ad76db2f",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/cognitive_engines/m_continuous.py",
+          "symbol": "GaussianGenerativeModel",
+          "line": 1295,
+          "sha256": "0bc8d1b7781e8eef94ae5cd4a1cddd92a82fd2e23bef1a10321e58a1ad76db2f",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I06",
+      "name": "Rutas según régimen de carga",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "adaptive_policy::workload_router",
+      "benefit": "Distinguir regímenes recurrentes de trabajo y reutilizar modelos auxiliares especializados.",
+      "limit": "Adaptar identidades y contratos a hardware/carga. Cambiar de LLM no conserva necesariamente respuestas ni KV: debe ser una decisión explícita, no una promesa de paridad.",
+      "acceptance_gate": "No aplicar una ruta conocida a hardware/modelo incompatible; probar regímenes nuevos, agotamiento de capacidad y retorno a uno anterior.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/adaptation/regime_composition.py",
+          "symbol": "RegimeRoutedGenerativeModel",
+          "line": 350,
+          "sha256": "385c4009f51f8c20447e7fa0859a9b1d1f4c7734b4eb7711d0a8ff43036ef372",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/substrates/routing_substrate.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "68de3cba5d350015cdc9d3b546596827bf85cd77d82de34a9939e0e986fc87ae",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I07",
+      "name": "Detección de insuficiencia y cambio de dinámica",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "adaptive_policy::sufficiency_monitor",
+      "benefit": "Saber cuándo el predictor auxiliar dejó de describir las medidas y conviene abstenerse o recalibrar.",
+      "limit": "No diagnostica por sí solo todas las causas físicas. Sus umbrales y observables deben rediseñarse para rendimiento y exactitud de inferencia.",
+      "acceptance_gate": "Cambios de carga, temperatura o ruta deben evaluarse con medidas de referencia y no confundirse con ganancias persistentes.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/cognitive_engines/m_continuous.py",
+          "symbol": "DynamicSufficiencyMonitor",
+          "line": 119,
+          "sha256": "0bc8d1b7781e8eef94ae5cd4a1cddd92a82fd2e23bef1a10321e58a1ad76db2f",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I08",
+      "name": "Recuperación de experiencias operativas",
+      "decision": "ADAPTAR P1",
+      "proposed_target": "experience_memory::profile_retrieval",
+      "benefit": "Recuperar experiencias compatibles con ambiente, régimen y esquema para sugerir perfiles ya probados.",
+      "limit": "La recuperación es asesora y puede abstenerse. No es la recuperación de tokens K/V ni un permiso para activar una estrategia.",
+      "acceptance_gate": "Identidad ausente, evidencia insegura o índice obsoleto deben causar abstención; nunca crear candidatos que no existían.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/memory/memory_retrieval.py",
+          "symbol": "ContextualMemoryRetriever",
+          "line": 75,
+          "sha256": "0004f235bb0186e66c45d2a827e1d7934efabacb67543acf7f603179dd869665",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I09",
+      "name": "Reorganización del índice de experiencias",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "experience_memory::derived_index",
+      "benefit": "Reorganizar proyecciones para recuperar historia útil con menos trabajo.",
+      "limit": "Tratar el índice como derivado y reconstruible. No extrapolar reorganización semántica a borrar información canónica o comprimir arbitrariamente K/V.",
+      "acceptance_gate": "Índice obsoleto detectable, reconstrucción y mismas identidades de evidencia tras reorganizar.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/memory/plastic_memory_reorganizer.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "ebdf9bd46fe539532c409ff3d0ae40e692b9a7abbe90e86b0761a68dc16dc582",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I10",
+      "name": "Registro transaccional de experiencia y aprendizaje",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "experience_memory::event_log",
+      "benefit": "Relacionar observaciones, decisiones de admisión y mutaciones con integridad y prevención de fugas de evaluación.",
+      "limit": "No copiar un segundo almacén de KV ni sus identidades de organismo. Definir un único registro de evidencia operacional propio.",
+      "acceptance_gate": "Atomicidad, caída entre eventos, duplicados e identificación de muestras reservadas.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/persistence/event_store.py",
+          "symbol": "EventStore",
+          "line": 86,
+          "sha256": "538dc7f269cd54e01ab8a69b6304ebafc7a672d84baed6fa7a6891e2753d60e4",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I11",
+      "name": "Checkpoints de datos sin ejecución arbitraria",
+      "decision": "FUSIONAR P2",
+      "proposed_target": "session_store + auxiliary_checkpoint",
+      "benefit": "Validar versiones y configuración antes de restaurar modelos auxiliares y estados de optimización.",
+      "limit": "El formato donante usa árboles JSON y arrays NPZ, no pickle. Conservar el principio, no añadir Python al runtime ni sustituir el formato de KV exacta.",
+      "acceptance_gate": "Rechazar formas, tipos, versiones y configuraciones incompatibles; ninguna carga ejecutable desde un checkpoint.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/persistence/neural_checkpoint.py",
+          "symbol": "prepare_neural_restore",
+          "line": 110,
+          "sha256": "7a1d8d05e755eb2b90f9e4498c157befad9c7cb7619707f85c48537ad398ca95",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/persistence/state_store.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "a6c980b5f3fc904a40fe518eb9731391ee6f9dcbb206d60ed9822671dece5964",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I12",
+      "name": "Comparación causal y prevención de contaminación",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "validation::paired_evaluation",
+      "benefit": "Comparar políticas sin mezclar entrenamiento y evaluación; agrupar episodios o bloques temporales.",
+      "limit": "La evaluación off-policy necesita cobertura y supuestos de identificación. No convertir historial sesgado en una mejora causal demostrada.",
+      "acceptance_gate": "Abstención cuando falta soporte, evaluación retenida y resultados reproducibles frente a comparación pareada directa.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/evidence/causal.py",
+          "symbol": "OffPolicyEvaluator",
+          "line": 162,
+          "sha256": "d754e96c3ebc8733cf93187d91e6414950fd789841ccc4928bb7d99cb9a34c80",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/evidence/boundary.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "cfb26f73ed27a1bc799e5ebd3b33cee8ad4c0f0f275db53a8a2958f665836c6f",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I13",
+      "name": "Restricciones y decisiones admisibles",
+      "decision": "EXTRAER P1",
+      "proposed_target": "adaptive_policy::constraints",
+      "benefit": "Filtrar decisiones por límites explícitos de memoria, exactitud, coste y permisos.",
+      "limit": "Copiar la separación entre objetivos y restricciones; no la autoridad humana específica ni un nuevo sistema de permisos paralelo.",
+      "acceptance_gate": "Un optimizador no puede relajar el modo exacto, el presupuesto o una prohibición para mejorar su puntuación.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/cognitive_engines/m4_governance.py",
+          "symbol": "GovernanceGateway",
+          "line": 380,
+          "sha256": "0c72b5c2df37f2a7811e5ee3eaf9f22397e31c2971b9f0013c38fe6004faab8e",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I14",
+      "name": "Estrategias de búsqueda reemplazables",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "adaptive_policy::search_strategy",
+      "benefit": "Elegir cómo buscar perfiles o planes dentro de un presupuesto computacional.",
+      "limit": "Los certificados distinguen búsqueda exacta de aproximada. Esa distinción del planificador no autoriza atención aproximada ni pérdida de tokens.",
+      "acceptance_gate": "Referencia exhaustiva en problemas pequeños, límites de exploración y rotulado correcto de resultados incompletos.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/cognitive_engines/policy_search.py",
+          "symbol": "ExactPolicySearchStrategy",
+          "line": 207,
+          "sha256": "031489f86ea6108c9ee87d7cf30f923b09f5a5ccdfefe3d457d3f55de924837d",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/cognitive_engines/policy_search.py",
+          "symbol": "BeamPolicySearchStrategy",
+          "line": 221,
+          "sha256": "031489f86ea6108c9ee87d7cf30f923b09f5a5ccdfefe3d457d3f55de924837d",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/cognitive_engines/planner_plasticity.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "0404e1fe354871ee46ba8306a9d13fbc9606cc18be7ceacfb60fd14352411a60",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I15",
+      "name": "Aprendizaje auxiliar en cuarentena",
+      "decision": "ADAPTAR P2",
+      "proposed_target": "adaptive_policy::shadow_tracker",
+      "benefit": "Seguir ajustando candidatos auxiliares aislados cuando la actualización activa no es admisible.",
+      "limit": "No aprende el LLM canónico en secreto ni concede autoridad. Separar sus datos y parámetros del perfil activo.",
+      "acceptance_gate": "Ningún cambio observable en el perfil vivo durante la cuarentena; activación solo tras evaluación independiente.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/adaptation/quarantine_tracker.py",
+          "symbol": "QuarantineSafeTrackerBank",
+          "line": 152,
+          "sha256": "26230fe959d1118b1a962a36dc311088c22bfbb7f607029f2b481f96bc5e519f",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I16",
+      "name": "Evaluación de alternativas y composición",
+      "decision": "EXPERIMENTAL P3",
+      "proposed_target": "adaptive_policy::proposal_lab",
+      "benefit": "Proponer y comparar alternativas antes de un ensayo físico acotado.",
+      "limit": "Los contrafactuales son predicciones, no mediciones. No cumplen por sí solos el requisito de resultados reales; no deben entrar como benchmarks.",
+      "acceptance_gate": "Etiquetar predicción/observación y exigir ensayo real separado para cualquier afirmación de mejora.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/parallel_counterfactual_engine.py",
+          "symbol": "ParallelCounterfactualEngine",
+          "line": 33,
+          "sha256": "4e25c407815cc9a76d78856906f82e67e93d99bb56047e890ff1d5d915d84880",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/adaptation/composition_evaluator.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "2b3e5ceac9e90f597afb9f2fb651aebd2b5d44fe5a31a0c30e429c3a3ca8264e",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I17",
+      "name": "Red modular y adaptadores entrenables",
+      "decision": "EXPERIMENTAL P3",
+      "proposed_target": "optional_auxiliary_predictor",
+      "benefit": "Explorar un predictor auxiliar modular con capacidad y parámetros aislados.",
+      "limit": "El propio módulo advierte que preservar parámetros no garantiza predicciones invariantes cuando cambia el router. No es ampliación automática de inteligencia ni compresión sin pérdida.",
+      "acceptance_gate": "Capacidad máxima, aislamiento, restauración y evaluación de cambios de salida; nunca modificar pesos de inferencia exacta implícitamente.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/substrates/continual_modular_network.py",
+          "symbol": "ContinualModularNetwork",
+          "line": 210,
+          "sha256": "14d56890d6d57513839d55ebb9a4b6df5a582745e51c365995c6f68cbb67cc06",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I18",
+      "name": "Dinámica ondulatoria y geometría",
+      "decision": "EXPERIMENTAL P3",
+      "proposed_target": "isolated_research_only",
+      "benefit": "Conservar como líneas de investigación numérica, separadas del producto exacto.",
+      "limit": "La existencia de estos módulos no demuestra una compresión o atención superior en M-SLIM. No incorporar al núcleo hasta medir utilidad, recursos y desviación.",
+      "acceptance_gate": "Benchmark independiente con datos reales, ablation y comparación exacta; sin promesas basadas en el nombre del algoritmo.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/substrates/wave_substrate/weight_soliton.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "45f815a363b7b9094e24c1e5c855870f5bc1f410d481de91d4a496e1fc747a4c",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/substrates/wave_substrate/attention_bridge.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "2440bd7a65a7bb64ae81b829c35c1475436075e15cafba4a5d9b6ea3e5a68667",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/cognition/lie_invariant_geometry.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "19deb884c736bfef88e14a14ade6716ae7a9a210e47c77d2f3437b2054857678",
+          "static_tests_in_file": 2
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I19",
+      "name": "Federación de evidencias y malla de eventos",
+      "decision": "NO PORTAR",
+      "proposed_target": "none",
+      "benefit": "No aporta una necesidad inmediata al motor local independiente solicitado.",
+      "limit": "Importar una malla distribuida añade identidades, red y complejidad ajenas al objetivo. No se propone conexión alguna con los proyectos donantes.",
+      "acceptance_gate": "Mantener fuera de dependencias, servicios y despliegue de M-SLIM.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/federation/federated_evidence.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "3225818007babb383369b62182e7405255d807a294e1f8ff97d4db237c2ad6c6",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/federation/swarm_event_mesh.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "251d9800a86d6db2809ed5268c1a706601a5428e5ece8b65d5ccec8e656d63c8",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    },
+    {
+      "id": "I20",
+      "name": "Runtime de organismo y puente HTTP",
+      "decision": "NO PORTAR",
+      "proposed_target": "none",
+      "benefit": "Extraer algoritmos pequeños de sus módulos; no trasladar el organismo ni usar su servidor.",
+      "limit": "Copiar o conectar el runtime completo contradice la independencia pedida. El runtime propio de M-SLIM conserva todo el control.",
+      "acceptance_gate": "El resultado debe compilar y funcionar con las carpetas SHEILY-COGNITIVA e INICIO ausentes y sin sus endpoints.",
+      "sources": [
+        {
+          "project": "INICIO",
+          "path": "inicio/runtime/organism.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "7ce250f5796ccd13c4d119e404a1c1ebf983d900607817c689a0276c2f9969f9",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/integration/external_transition_gateway.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "a43f234a3b51a077de0a57e3d69de7426579a7eed62a3106d218657a777b812f",
+          "static_tests_in_file": 0
+        },
+        {
+          "project": "INICIO",
+          "path": "inicio/integration/http_service.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "c0b3b0780750e463b8287e14f6a02a08666fd7c72f0d48fb232302dd59a1391c",
+          "static_tests_in_file": 0
+        }
+      ],
+      "status": "source_reviewed_or_structurally_indexed; not_ported; not_runtime_certified"
+    }
+  ]
+}

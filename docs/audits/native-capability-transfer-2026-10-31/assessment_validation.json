@@ -1,0 +1,11 @@
+{
+  "capability_records": 40,
+  "source_references_checked": 70,
+  "native_crates_classified": 38,
+  "inicio_modules_classified": 85,
+  "all_source_paths_exist_in_snapshot": true,
+  "all_named_symbols_found": true,
+  "runtime_code_changed": false,
+  "donor_test_results": "not_run",
+  "nature": "documentary_and_structural_validation_only"
+}

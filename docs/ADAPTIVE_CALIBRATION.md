@@ -26,9 +26,10 @@ fusión, registros y virtual lanes. Las combinaciones incompatibles se rechazan
 antes de medir. Un perfil no puede cambiar pesos, precisión, tokenizer, modelo,
 backend, epsilon, selección de atención, KV canónico, documentos ni prompts.
 
-La primera implementación física usa OpenCL BF16 exacto. La biblioteca del
-predictor y los contratos compilan sin GPU. La ruta de CPU no recibe ajustes
-OpenCL y `--tune-prefill` sin `accelerator-backend` falla explícitamente.
+La implementación física usa GPU BF16 exacto (backend detectado en runtime). La
+biblioteca del predictor y los contratos compilan sin GPU. La ruta de CPU no
+recibe ajustes GPU y `--tune-prefill` sin `accelerator-backend` falla
+explícitamente.
 
 ## Predictor acotado
 
