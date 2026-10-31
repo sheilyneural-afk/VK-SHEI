@@ -5,6 +5,10 @@
 //! coordinates; exact BF16 state fragments are then read from the append-only cold
 //! store. There is no alternate low-bit K/V authority.
 
+// Every `unsafe` block must state why it is sound; enforced by the shared gate
+// (`scripts/check.sh` runs clippy with `-D warnings`).
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 pub mod adapter_catalog;
 pub mod adaptive_extent;
 pub mod attention_certificate;

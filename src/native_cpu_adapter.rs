@@ -34,6 +34,10 @@ impl WeightShard {
     fn open(path: PathBuf) -> Result<Self> {
         let file =
             File::open(&path).with_context(|| format!("no se pudo abrir {}", path.display()))?;
+        // SAFETY: the weight shard is opened read-only and mapped immutably for
+        // the lifetime of `WeightShard`. Truncating or rewriting the file from
+        // outside this process while it is mapped is undefined behaviour; the
+        // bundle directory is treated as immutable once validated.
         let map = unsafe { MmapOptions::new().map(&file) }
             .with_context(|| format!("no se pudo mapear {}", path.display()))?;
         SafeTensors::deserialize(&map)

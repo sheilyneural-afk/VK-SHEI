@@ -220,6 +220,8 @@ impl GpuBackend {
             )
             .map_err(|e| driver_error("allocate Q", e))?
         };
+        // SAFETY: same contract as above: bounded length, null host pointer
+        // (device-owned allocation) and the live context held under the mutex.
         let mut k_buf = unsafe {
             Buffer::<u8>::create(
                 &runtime.context,
@@ -229,6 +231,7 @@ impl GpuBackend {
             )
             .map_err(|e| driver_error("allocate K", e))?
         };
+        // SAFETY: same contract as above.
         let mut v_buf = unsafe {
             Buffer::<u8>::create(
                 &runtime.context,
@@ -238,6 +241,8 @@ impl GpuBackend {
             )
             .map_err(|e| driver_error("allocate V", e))?
         };
+        // SAFETY: same contract as above; the length is derived from the token
+        // count validated for this call.
         let scores = unsafe {
             Buffer::<f32>::create(
                 &runtime.context,
@@ -247,6 +252,7 @@ impl GpuBackend {
             )
             .map_err(|e| driver_error("allocate score scratch", e))?
         };
+        // SAFETY: same contract as above.
         let output = unsafe {
             Buffer::<f32>::create(
                 &runtime.context,
@@ -299,6 +305,8 @@ impl GpuBackend {
                 .enqueue_nd_range(&runtime.queue)
                 .map_err(|e| driver_error("execute QK", e))?
         };
+        // SAFETY: queue serialized by the mutex; the argument list matches the
+        // `mslim_softmax` signature and `scores` stays alive until readback.
         let softmax_event = unsafe {
             ExecuteKernel::new(&k_softmax)
                 .set_arg(&scores)
@@ -308,6 +316,8 @@ impl GpuBackend {
                 .enqueue_nd_range(&runtime.queue)
                 .map_err(|e| driver_error("execute softmax", e))?
         };
+        // SAFETY: queue serialized by the mutex; the argument list matches the
+        // `mslim_pv` signature and all buffers stay alive until readback.
         let pv_event = unsafe {
             ExecuteKernel::new(&k_pv)
                 .set_arg(&scores)
