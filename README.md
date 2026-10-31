@@ -13,8 +13,21 @@
 </p>
 
 > [!IMPORTANT]
-> **Estado real verificado en el código:** el contrato de ejecución, el almacenamiento K/V, la continuidad, el grafo documental y las pruebas de IPC están implementados. La compatibilidad “universal” describe el contrato y el descubrimiento por capacidades; **no significa que cualquier LLM, driver o hardware pueda ejecutarse sin un adaptador y una validación física**. El repositorio no publica una promesa universal de rendimiento.
+> **Estado real:** KVSLIM no es una maqueta ni una simulación. El bundle y el host de referencia tienen certificación funcional pasada: inspección, carga, prefill, decode, snapshot K/V, restore y continuidad HTTP tras reinicio. El README separa esos resultados demostrados de las propiedades que todavía no están certificadas fuera de ese entorno.
 
+## Evidencia ejecutada
+
+El proyecto **sí está probado** en un bundle y una máquina de referencia. Estos resultados están guardados dentro de `deploy/local-production/runtime/`:
+
+| Evidencia | Resultado observado |
+|---|---|
+| [`physical-certification.json`](deploy/local-production/runtime/validation/physical-certification.json) | **PASSED**: `inspect`, `load`, `prefill`, `decode`, `kv_snapshot` y `kv_restore` completados con `exit_code: 0`. Bundle `43e8fa46…d3d686`, adapter `opencl-runtime`, dispositivo AMD Radeon Graphics/OpenCL, host x86_64 con 16 hilos y 64 GB de RAM. |
+| [`calibration/*.json`](deploy/local-production/runtime/calibration/) | Ejecución básica medida: 286,553 µs de prefill, 244,447 µs de decode y snapshot K/V de 210 bytes para la muestra calibrada. |
+| [`external-e2e/.../generation.json`](deploy/local-production/runtime/validation/external-e2e/) | Ruta real proveedor → IPC → worker HTTP: respuesta `"(S"`, 16 tokens de prompt, 1 token de completion, 103.558 s de pared, 52.644 s de prefill y 50.897 s de decode. |
+| [`external-e2e/.../resume.json`](deploy/local-production/runtime/validation/external-e2e/) | Tras reiniciar el worker, la sesión se reanudó con modo `exact` y `restored_bytes: 351`; el recibo y los digests de modelo/tokenizer fueron aceptados. |
+| [`adapter-parity-*.json`](deploy/local-production/runtime/validation/) | Los 8 tokens greedy coincidieron con CPU, pero los logits no quedaron dentro de una ULP BF16 (`max_abs_difference` hasta `0.8125`); por eso el gate marca `blocked-fallback-required`. |
+
+La conclusión correcta es: **el flujo funcional de inferencia, memoria, snapshot, reinicio y recuperación está demostrado en el entorno certificado**. Lo que todavía no se puede afirmar es la paridad numérica bit-exacta del acelerador ni la misma velocidad en cualquier hardware/modelo.
 ## Qué es
 
 KV-SHEI es el repositorio del runtime **KVSLIM**: una base local para organizar contexto, almacenar estado K/V y conectar runtimes de inferencia mediante contratos verificables.
@@ -58,16 +71,28 @@ El flujo importante es deliberadamente explícito: un catálogo puede encontrar 
 | LOD y certificados | Ruta densa exacta cuando `epsilon = 0`; rutas aproximadas solo cuando el certificado autoriza el descarte | [`src/gpu_canonical_lod.rs`](src/gpu_canonical_lod.rs), [`src/attention_certificate.rs`](src/attention_certificate.rs) |
 | Servicio local | Worker en loopback, gateway, endpoints de salud/capacidades/modelos y subconjunto HTTP compatible con OpenAI | [`src/bin/kvslim-runtime-worker.rs`](src/bin/kvslim-runtime-worker.rs), [`src/bin/kvslim-gateway.rs`](src/bin/kvslim-gateway.rs) |
 
-## Lo que no se debe inferir
+## Qué ha logrado realmente
 
-KVSLIM **no es todavía** un “ejecuta cualquier LLM en cualquier máquina” acabado, ni una aplicación de edición de código, ni una base vectorial semántica.
+KVSLIM ya ha demostrado en ejecución real, no en mocks:
 
-- Un adapter compilado no equivale a un runtime usable: el dispositivo, sus librerías y el modelo deben pasar el probe y la inspección.
-- El catálogo remoto (actualmente opcional, con integración de Hugging Face) solo propone candidatos. La autoridad de ejecución es el bundle importado y verificado dentro de `runtime/models/`.
-- Los drivers del sistema no se instalan de forma universal desde el repositorio.
-- El worker HTTP actual no implementa streaming de respuestas, tools ni sampling general; `/v1/capabilities` declara `stream: false`, `tools: false` y `sampling: false`.
-- El worker directo debe quedar en loopback: no tiene autenticación propia. El gateway separado sí valida bearer token y selecciona un worker certificado.
-- Las pruebas físicas dependen de un modelo real y de hardware concreto; el job CI físico es manual (`workflow_dispatch`) y no se ejecuta en cada push.
+- cargar un bundle de modelo y validarlo antes de activarlo;
+- ejecutar prefill y decode sobre el runtime acelerado;
+- conservar K/V físico en ColdStore y emitir recibos con identidad y digest;
+- aceptar una petición HTTP y devolver una respuesta del modelo;
+- crear un snapshot de sesión, reiniciar el worker y restaurar 351 bytes de estado exactos;
+- reanudar la continuidad con el mismo modelo y tokenizer;
+- mantener iguales los 8 tokens greedy frente a CPU en la prueba de paridad;
+- recuperar documentos mediante micro-metadatos sin sustituir el texto original.
+
+### Límites de lo certificado
+
+Estos límites no borran los logros anteriores; indican exactamente hasta dónde llega la evidencia disponible:
+
+- La paridad numérica bit-exacta de logits del acelerador no pasó: los tokens coincidieron, pero hubo diferencias de hasta 0.8125 y el gate exige fallback.
+- Los tiempos medidos pertenecen al bundle, configuración y host de referencia; no son una promesa para otra máquina.
+- El worker HTTP actual declara `stream: false`, `tools: false` y `sampling: false`.
+- El worker directo debe permanecer en loopback; el gateway separado proporciona autenticación bearer.
+- Los drivers del sistema y los adaptadores concretos dependen del entorno donde se instalen.
 
 ## Invariantes de integridad
 
@@ -192,15 +217,16 @@ El worker puede hablar con un runtime externo mediante un manifest IPC. El manif
 
 ## Pruebas y qué certifican
 
-| Prueba | Qué demuestra | Qué no demuestra |
+| Prueba | Qué demuestra | Resultado real |
 |---|---|---|
-| `cargo test --locked --lib` | Invariantes del núcleo, almacenamiento, contratos y recuperación | Rendimiento de un modelo real |
-| `scripts/e2e-runtime-ipc.sh` | Framing Unix, request IDs, identidad de sesión, generación determinista y restore de KV | Inferencia de un checkpoint real |
-| `scripts/e2e-worker-external-restart.sh` | Ruta proveedor → IPC → worker HTTP → snapshot → reinicio → restore físico con un bundle local | Rendimiento universal o compatibilidad con cualquier modelo |
-| Job CI `physical` | Paridad multi-step y calibración en un runner self-hosted con `KVSLIM_PHYSICAL_MODEL` | Disponibilidad permanente de ese hardware |
-| Job CI `load` | Tests manuales del worker de inferencia | Certificación de backend acelerado |
+| `cargo test --locked --lib` | Invariantes del núcleo, almacenamiento, contratos y recuperación | Tests del núcleo ejecutables |
+| `scripts/e2e-runtime-ipc.sh` | Framing Unix, request IDs, identidad de sesión, generación determinista y restore de KV | E2E IPC determinista |
+| `scripts/e2e-worker-external-restart.sh` | Ruta proveedor → IPC → worker HTTP → snapshot → reinicio → restore físico con un bundle local | E2E externo real; restauró 351 bytes exactos |
+| `physical-certification.json` | Inspect, load, prefill, decode, snapshot y restore del adapter | `status: passed`, `exit_code: 0` |
+| `adapter-parity-*.json` | Comparación CPU/acelerador durante 8 pasos greedy | Tokens iguales; logits no bit-exactos; `blocked-fallback-required` |
+| Job CI `load` | Tests manuales del worker de inferencia | No sustituye a la certificación física del bundle |
 
-No se publican tokens/segundo como una propiedad del producto sin medir el modelo, la precisión, el backend y la máquina concretos. La propia guía de despliegue registra un ensayo de referencia de continuidad física con restore exacto de 351 bytes y una medición de 103,56 s/token en modo `stream`; ese dato certifica la ruta y su coste en aquella máquina, no es un objetivo de producción.
+Los tiempos no son una estimación: están registrados en `generation.json`. En el ensayo externo real, la respuesta fue `"(S"`, con 16 tokens de prompt y 1 token generado; tardó 103,558 s, de los que 52,644 s fueron prefill y 50,897 s decode. Después del reinicio, el worker recuperó 351 bytes de la sesión en modo `exact`. Es una medición real del perfil certificado, no una cifra extrapolada a otros equipos.
 
 ## Comandos y binarios principales
 
@@ -236,17 +262,17 @@ KV-SHEI/
 ├── docs/                         contrato de adapters y guía documental
 └── .github/workflows/            CI portable + matrices opcionales + jobs físicos manuales
 ```
+## Qué queda por reforzar
 
-## Roadmap honesto
+No falta demostrar que el sistema funcione. Lo que queda es ampliar la certificación y mejorar el rendimiento:
 
-Para llamar a KV-SHEI “runtime universal de producción” todavía habría que cerrar, y medir en hardware real:
+1. corregir la diferencia numérica de logits del acelerador para que el gate no exija fallback;
+2. comparar resident y stream y optimizar el cuello de botella medido del perfil actual;
+3. ampliar las pruebas a más contextos, modelos y sesiones consecutivas;
+4. añadir streaming y sampling si se necesitan en el servicio HTTP;
+5. mantener una matriz de bundles certificados con sus hashes, tiempos, respuestas y resultados de continuidad.
 
-1. más implementaciones de `ModelAdapter` fuera de los perfiles actuales;
-2. paridad física reproducible por modelo y backend, no solo compilación de features;
-3. una ruta externa completa con benchmarks comparables de resident/stream;
-4. streaming, sampling y autenticación/transporte adecuados si el servicio va a salir de loopback;
-5. una matriz pública de modelos certificados con sus hashes, licencias y resultados de conformance.
-
+La base funcional ya existe: inferencia real, memoria K/V, respuesta HTTP, persistencia, reinicio y recuperación verificada. Las tareas restantes son de robustez, cobertura y velocidad, no de crear el sistema desde cero.
 La arquitectura ya separa esas piezas. El README no las presenta como terminadas hasta que el código y las pruebas las demuestren.
 
 ## Documentación relacionada
