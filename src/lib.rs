@@ -21,6 +21,7 @@ pub mod inference_worker;
 pub mod ipc_transport;
 #[cfg(feature = "torch-backend")]
 pub mod prefill_tch;
+pub mod runtime_host;
 pub mod runtime_registry;
 pub mod session_coordinator;
 pub mod session_store;
