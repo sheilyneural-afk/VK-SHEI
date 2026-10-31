@@ -15,8 +15,7 @@ use kvslim_adapter_api::{
 };
 use serde_json::Value;
 use std::{
-    env,
-    fs,
+    env, fs,
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
 };
@@ -47,10 +46,16 @@ impl DeterministicSession {
     }
 }
 impl RuntimeSession for DeterministicSession {
-    fn capabilities(&self) -> &AdapterCapabilities { &self.caps }
-    fn identity(&self) -> &ModelIdentity { &self.identity }
+    fn capabilities(&self) -> &AdapterCapabilities {
+        &self.caps
+    }
+    fn identity(&self) -> &ModelIdentity {
+        &self.identity
+    }
     fn generate(&mut self, request: GenerationRequest) -> Result<GenerationResult> {
-        if request.input_tokens.is_empty() { bail!("input_tokens must not be empty"); }
+        if request.input_tokens.is_empty() {
+            bail!("input_tokens must not be empty");
+        }
         Ok(GenerationResult {
             output_tokens: vec![request.input_tokens.last().copied().unwrap_or(0)],
             prompt_tokens: request.input_tokens.len(),
@@ -61,9 +66,13 @@ impl RuntimeSession for DeterministicSession {
             },
         })
     }
-    fn snapshot_kv(&self) -> Result<Vec<u8>> { Ok(self.snapshot.clone()) }
+    fn snapshot_kv(&self) -> Result<Vec<u8>> {
+        Ok(self.snapshot.clone())
+    }
     fn restore_kv(&mut self, bytes: &[u8]) -> Result<()> {
-        if bytes != self.snapshot { bail!("snapshot digest/content mismatch"); }
+        if bytes != self.snapshot {
+            bail!("snapshot digest/content mismatch");
+        }
         Ok(())
     }
     fn snapshot_receipt(&self) -> Result<CacheReceipt> {
@@ -81,7 +90,9 @@ impl RuntimeSession for DeterministicSession {
         })
     }
     fn restore_receipt(&mut self, receipt: &CacheReceipt, bytes: &[u8]) -> Result<()> {
-        if receipt.model_digest != self.identity.model_digest { bail!("model digest mismatch"); }
+        if receipt.model_digest != self.identity.model_digest {
+            bail!("model digest mismatch");
+        }
         self.restore_kv(bytes)
     }
 }
@@ -111,8 +122,14 @@ fn main() -> Result<()> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--socket" => { i += 1; socket = PathBuf::from(args.get(i).context("--socket needs a path")?); }
-            "--session-id" => { i += 1; session_id = args.get(i).context("--session-id needs a value")?.clone(); }
+            "--socket" => {
+                i += 1;
+                socket = PathBuf::from(args.get(i).context("--socket needs a path")?);
+            }
+            "--session-id" => {
+                i += 1;
+                session_id = args.get(i).context("--session-id needs a value")?.clone();
+            }
             "--self-test" => self_test = true,
             "--help" => {
                 println!("kvslim-runtime-host --socket PATH [--session-id ID] [--self-test]");
@@ -123,14 +140,23 @@ fn main() -> Result<()> {
         i += 1;
     }
     if self_test {
-        println!("generic runtime host self-test requires a client; socket={}", socket.display());
+        println!(
+            "generic runtime host self-test requires a client; socket={}",
+            socket.display()
+        );
     }
-    if socket.exists() { fs::remove_file(&socket).context("remove stale runtime socket")?; }
+    if socket.exists() {
+        fs::remove_file(&socket).context("remove stale runtime socket")?;
+    }
     let listener = UnixListener::bind(&socket).context("bind runtime IPC socket")?;
     println!("generic runtime host listening on {}", socket.display());
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => { if let Err(error) = serve_connection(stream, &session_id) { eprintln!("connection failed: {error:#}"); } }
+            Ok(stream) => {
+                if let Err(error) = serve_connection(stream, &session_id) {
+                    eprintln!("connection failed: {error:#}");
+                }
+            }
             Err(error) => return Err(error.into()),
         }
     }
