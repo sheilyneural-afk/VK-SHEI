@@ -10,9 +10,9 @@ use anyhow::{Context, Result, ensure};
 use mslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use serde_json::{Value, json};
 
+use crate::gpu_llm::{GpuLlm, WeightMode};
 use crate::gpu_region_store::GpuRegionConfig;
 use crate::model_bundle::ModelBundle;
-use crate::gpu_llm::{GpuLlm, WeightMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GpuKvMode {
@@ -344,10 +344,7 @@ impl ModelAdapter for GpuModelAdapter {
     }
 
     fn kv_integrity_report(&mut self) -> Result<Option<Value>> {
-        let runtime = self
-            .runtime
-            .as_mut()
-            .context("GPU adapter is not loaded")?;
+        let runtime = self.runtime.as_mut().context("GPU adapter is not loaded")?;
         Ok(Some(json!({
             "schema": "mslim.logical-kv-integrity/v1",
             "authority": if self.kv_mode == GpuKvMode::Dense {
@@ -365,10 +362,7 @@ impl ModelAdapter for GpuModelAdapter {
 
     fn snapshot_kv(&self) -> Result<Vec<u8>> {
         if self.kv_mode == GpuKvMode::Dense {
-            let runtime = self
-                .runtime
-                .as_ref()
-                .context("GPU adapter is not loaded")?;
+            let runtime = self.runtime.as_ref().context("GPU adapter is not loaded")?;
             return serde_json::to_vec(&json!({
                 "schema": "mslim.runtime.replay-snapshot/v1",
                 "model_dir": self.model_dir,
@@ -382,10 +376,7 @@ impl ModelAdapter for GpuModelAdapter {
             self.capabilities.supports_kv_restore,
             "physical GPU K/V snapshots require mslim_cold_directory"
         );
-        let runtime = self
-            .runtime
-            .as_ref()
-            .context("GPU adapter is not loaded")?;
+        let runtime = self.runtime.as_ref().context("GPU adapter is not loaded")?;
         serde_json::to_vec(&json!({
             "schema": "mslim.runtime.physical-coldstore-snapshot/v1",
             "model_dir": self.model_dir,
@@ -426,10 +417,7 @@ impl ModelAdapter for GpuModelAdapter {
                         .context("invalid token in dense GPU snapshot")
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let runtime = self
-                .runtime
-                .as_mut()
-                .context("GPU adapter is not loaded")?;
+            let runtime = self.runtime.as_mut().context("GPU adapter is not loaded")?;
             runtime.reset_session()?;
             for &token in &tokens {
                 runtime.forward_token(token, false)?;
@@ -482,10 +470,7 @@ impl ModelAdapter for GpuModelAdapter {
             .and_then(Value::as_str)
             .map(PathBuf::from)
             .context("physical GPU snapshot missing ColdStore namespace")?;
-        let runtime = self
-            .runtime
-            .as_mut()
-            .context("GPU adapter is not loaded")?;
+        let runtime = self.runtime.as_mut().context("GPU adapter is not loaded")?;
         if tokens.is_empty() {
             // Empty snapshot: start in a fresh namespace so a previously-filled
             // pages-exact.kv in cold_directory is not mistaken for the restored

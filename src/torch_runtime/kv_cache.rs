@@ -4664,4 +4664,3 @@ impl DecoderModel {
         self.forward_with_cache(token_ids, cache)
     }
 }
-

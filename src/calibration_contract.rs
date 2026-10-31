@@ -147,13 +147,33 @@ fn validate_distribution(distribution: Option<&Value>, measured_runs: u64) -> Re
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("calibration distribution samples are missing"))?;
     ensure!(
-        samples.len() as u64 == measured_runs && samples.iter().all(Value::is_number),
+        samples.len() as u64 == measured_runs,
         "calibration distribution does not contain the declared runs"
     );
-    for field in ["minimum", "median", "p95", "maximum"] {
+    let mut values = samples
+        .iter()
+        .map(|sample| {
+            sample.as_u64().ok_or_else(|| {
+                anyhow::anyhow!("calibration distribution sample is not an unsigned integer")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    values.sort_unstable();
+    let len = values.len();
+    ensure!(len > 0, "calibration distribution is empty");
+    let p95_index = ((len * 95).saturating_add(99) / 100)
+        .saturating_sub(1)
+        .min(len - 1);
+    let expected = [
+        ("minimum", values[0]),
+        ("median", values[len / 2]),
+        ("p95", values[p95_index]),
+        ("maximum", values[len - 1]),
+    ];
+    for (field, value) in expected {
         ensure!(
-            distribution.get(field).is_some_and(Value::is_number),
-            "calibration distribution field {field} is missing"
+            distribution.get(field).and_then(Value::as_u64) == Some(value),
+            "calibration distribution field {field} does not match its samples"
         );
     }
     Ok(())

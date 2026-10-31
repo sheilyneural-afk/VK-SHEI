@@ -17,11 +17,7 @@
 //! for arbitrary checkpoint architectures or devices. No GPU CPU fallback.
 
 use anyhow::{Context, Result, ensure};
-use opencl3::{
-    kernel::ExecuteKernel,
-    memory::Buffer,
-    types::CL_BLOCKING,
-};
+use opencl3::{kernel::ExecuteKernel, memory::Buffer, types::CL_BLOCKING};
 use safetensors::Dtype;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -32,9 +28,9 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-mod prefill;
-mod kernels;
 mod gpu_resources;
+mod kernels;
+mod prefill;
 
 #[cfg(feature = "hip-backend")]
 use crate::native_hip::{HipRuntime, HipWeight};
@@ -49,8 +45,8 @@ use crate::{
 
 pub(crate) use gpu_resources::GpuEngine;
 pub(crate) use kernels::{
-    CheckpointShards, GpuHotValues, GpuLayer, GpuWeight,
-    MicroSelectedDevice, RopeKernelConfig, VerifiedGpuPromptReplay, Workspace,
+    CheckpointShards, GpuHotValues, GpuLayer, GpuWeight, MicroSelectedDevice, RopeKernelConfig,
+    VerifiedGpuPromptReplay, Workspace,
 };
 
 const LOCAL_WORK_SIZE: usize = 128;
@@ -1399,6 +1395,7 @@ impl GpuLlm {
                 config.cold_directory = Some(directory);
             }
             let policy = lod.axis_policy().clone();
+            self.lod = None;
             self.lod = Some(GpuRegionStore::new_with_axis_policy(
                 self.spec.attention,
                 self.spec.num_hidden_layers,
@@ -2541,7 +2538,7 @@ impl GpuLlm {
             model_weights_dtype: "BF16".to_owned(),
             gpu_compute: "FP32_accumulators_BF16_intermediate_storage".to_owned(),
             hip_bf16_gemm_active: self.native_hip_enabled(),
-            mslim_lod_active: false,
+            mslim_lod_active: self.lod.is_some(),
             gpu_region_components_active: self.lod.is_some(),
             gpu_region_stats: self.gpu_region_stats(),
             gpu_kv_capacity_bytes: self.gpu_region_gpu_kv_capacity_bytes(),
@@ -5170,13 +5167,9 @@ mod tests {
             };
             let ids = [128000_u32, 9906, 11, 1917, 0, 128001, 128006, 882];
             {
-                let mut source = GpuLlm::load_with_gpu_region(
-                    &model,
-                    32,
-                    WeightMode::Resident,
-                    config.clone(),
-                )
-                .unwrap();
+                let mut source =
+                    GpuLlm::load_with_gpu_region(&model, 32, WeightMode::Resident, config.clone())
+                        .unwrap();
                 source.set_batch_prefill_tokens(Some(8)).unwrap();
                 source.generate(&ids, 1, false).unwrap();
                 assert_eq!(source.position(), ids.len());

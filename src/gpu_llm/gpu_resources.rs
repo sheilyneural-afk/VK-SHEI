@@ -19,8 +19,7 @@ use opencl3::{
     types::CL_BLOCKING,
 };
 use std::{
-    fs,
-    ptr,
+    fs, ptr,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -29,15 +28,15 @@ use crate::native_hip::{HipRuntime, HipWeight};
 #[cfg(feature = "hip-backend")]
 use opencl3::memory::ClMem;
 
+use super::kernels::{
+    CheckpointShards, GpuKv, GpuLayer, GpuWeight, LlmKernels, LodStage, MicroHotBuffers,
+    MicroSelectedDevice, RopeKernelConfig, Workspace,
+};
 use crate::gpu_region_store::{GpuRegionConfig, GpuRegionStore};
 use crate::model_config::ModelSpec;
 use crate::portable::AttentionGeometry;
 use safetensors::{Dtype, tensor::TensorView};
 use sha2::{Digest, Sha256};
-use super::kernels::{
-    CheckpointShards, GpuKv, GpuLayer, GpuWeight, LlmKernels, LodStage,
-    MicroHotBuffers, MicroSelectedDevice, RopeKernelConfig, Workspace,
-};
 
 const LOCAL_WORK_SIZE: usize = 128;
 const BYTES_PER_BF16: usize = 2;
@@ -72,8 +71,7 @@ impl GpuEngine {
         let filter = std::env::var("MSLIM_GPU_DEVICE")
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let devices =
-            get_all_devices(CL_DEVICE_TYPE_GPU).context("no GPU devices available")?;
+        let devices = get_all_devices(CL_DEVICE_TYPE_GPU).context("no GPU devices available")?;
         let device = devices
             .into_iter()
             .map(Device::new)
@@ -1009,7 +1007,12 @@ impl GpuEngine {
         Ok(())
     }
 
-    pub(crate) fn argmax(&self, logits: &Buffer<u8>, result: &Buffer<u32>, vocab_size: u32) -> Result<()> {
+    pub(crate) fn argmax(
+        &self,
+        logits: &Buffer<u8>,
+        result: &Buffer<u32>,
+        vocab_size: u32,
+    ) -> Result<()> {
         // SAFETY: One workgroup reads the logits and writes one token ID.
         unsafe {
             ExecuteKernel::new(&self.kernels.argmax)
@@ -1201,4 +1204,3 @@ impl Workspace {
         })
     }
 }
-

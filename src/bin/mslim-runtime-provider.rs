@@ -2,8 +2,8 @@
 //! Concrete device/model code lives here, outside the generic host.
 use anyhow::{Context, Result};
 use mslim::{
-    ipc_transport::{read_request, write_response},
     gpu_adapter::GpuModelAdapter,
+    ipc_transport::{read_request, write_response},
     runtime_host::RuntimeHost,
 };
 use mslim_adapter_api::{ModelAdapter, ModelAdapterSession, ModelIdentity, RuntimeSession};

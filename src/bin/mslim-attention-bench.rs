@@ -185,9 +185,7 @@ fn main() -> Result<()> {
     let tolerance = 0.0005f64;
     let passed = max_error <= tolerance;
     let gpu_median = median_ms(&gpu_times);
-    let metrics = gpu
-        .last_timings()
-        .context("missing GPU kernel metrics")?;
+    let metrics = gpu.last_timings().context("missing GPU kernel metrics")?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({

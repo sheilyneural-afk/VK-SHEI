@@ -29,7 +29,7 @@ use crate::prefill_tch::protected_queries;
 use crate::shadow_metrics::{ShadowDiagnosticReport, ShadowEventId, ShadowMetrics};
 
 use super::kv_cache::{
-    AttentionCache, DenseKvCache, DecoderGeometry, DecoderLayer, DecoderModel, LayerOutputTrace,
+    AttentionCache, DecoderGeometry, DecoderLayer, DecoderModel, DenseKvCache, LayerOutputTrace,
     MslimKvCache,
 };
 use super::weight_io::{WeightArchive, model_weight_file};

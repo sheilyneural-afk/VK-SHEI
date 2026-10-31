@@ -15,12 +15,12 @@ pub mod weight_io;
 
 // Re-export the public surface so call sites keep working unchanged.
 pub use kv_cache::{
-    AttentionCache, DenseKvCache, DecoderGeometry, DecoderLayer, DecoderModel, LayerOutputTrace,
+    AttentionCache, DecoderGeometry, DecoderLayer, DecoderModel, DenseKvCache, LayerOutputTrace,
     MslimKvCache,
 };
 pub use runtime::{
-    AppliedOmissionReport, DenseGeneration, MultiTokenVerificationOracle,
-    NativeInferenceParity, NativeStepDivergence, ReferenceSpeculativeGeneration,
-    TorchChatMessage, TorchGeneration, TorchModelRuntime,
+    AppliedOmissionReport, DenseGeneration, MultiTokenVerificationOracle, NativeInferenceParity,
+    NativeStepDivergence, ReferenceSpeculativeGeneration, TorchChatMessage, TorchGeneration,
+    TorchModelRuntime,
 };
 pub use weight_io::{WeightArchive, WeightFile, model_weight_file};

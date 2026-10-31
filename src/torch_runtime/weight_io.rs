@@ -173,4 +173,3 @@ impl WeightArchive {
         self.shards[index].require_bf16(name, expected)
     }
 }
-

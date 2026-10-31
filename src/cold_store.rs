@@ -6,7 +6,7 @@
 //! ignored on reopen, while corruption of a committed record is rejected.
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Write};
 #[cfg(not(unix))]
 use std::io::{Read, Seek, SeekFrom};
@@ -117,6 +117,20 @@ pub struct ColdStore {
     fail_append_after_bytes: Option<usize>,
 }
 
+fn lock_exclusive_writer(file: &File, path: &Path) -> io::Result<()> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            format!(
+                "ColdStore {} already has an exclusive writer",
+                path.display()
+            ),
+        )),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
+}
+
 impl ColdStore {
     pub fn create(path: impl AsRef<Path>, hot_capacity: usize) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -125,12 +139,14 @@ impl ColdStore {
             .read(true)
             .append(true)
             .open(&path)?;
+        lock_exclusive_writer(&file, &path)?;
         Ok(Self::empty(path, file, false, hot_capacity))
     }
 
     pub fn open(path: impl AsRef<Path>, hot_capacity: usize) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new().read(true).append(true).open(&path)?;
+        lock_exclusive_writer(&file, &path)?;
         let mut store = Self::empty(path, file, false, hot_capacity);
         store.rebuild_catalogue()?;
         Ok(store)

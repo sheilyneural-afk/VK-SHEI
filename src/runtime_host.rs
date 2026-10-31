@@ -263,6 +263,7 @@ mod tests {
                 max_new_tokens: 1,
                 temperature: None,
                 seed: None,
+                stop_tokens: vec![],
             })
             .unwrap(),
         });
