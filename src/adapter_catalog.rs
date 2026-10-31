@@ -272,6 +272,40 @@ pub fn select_available_for_model(
     Ok(selection)
 }
 
+/// Builds the backend-neutral runtime registry. Concrete constructors stay
+/// confined to this compatibility boundary; callers select only by capabilities.
+pub fn runtime_registry() -> crate::runtime_registry::RuntimeRegistry {
+    let mut registry = crate::runtime_registry::RuntimeRegistry::new();
+    for descriptor in compiled_adapters() {
+        let status = adapter_status()
+            .into_iter()
+            .find(|candidate| candidate.descriptor.id == descriptor.id)
+            .unwrap_or(AdapterStatus {
+                descriptor: descriptor.clone(),
+                availability: AdapterAvailability::RequiresProbe,
+                reason: "runtime probe required".to_owned(),
+            });
+        let id = descriptor.id.clone();
+        registry.register(Box::new(CatalogFactory { status, id }));
+    }
+    registry
+}
+
+struct CatalogFactory {
+    status: AdapterStatus,
+    id: String,
+}
+
+impl crate::runtime_registry::RuntimeFactory for CatalogFactory {
+    fn status(&self) -> AdapterStatus {
+        self.status.clone()
+    }
+
+    fn create(&self) -> Result<Box<dyn ModelAdapter>> {
+        create_adapter(&self.id)
+    }
+}
+
 /// Construct only an adapter whose implementation is compiled in this binary.
 pub fn create_adapter(adapter_id: &str) -> Result<Box<dyn ModelAdapter>> {
     match adapter_id {
