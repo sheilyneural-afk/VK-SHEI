@@ -681,6 +681,7 @@ pub fn run_cli(args: Vec<String>) -> Result<Value> {
             &serde_json::to_vec_pretty(&profile(original)?)?,
         )?;
         let mut report = json!({"schema": REPORT_SCHEMA, "run_id": run_id, "environment": environment,
+            "source_revision": crate::build_info::source_revision(),
             "execution_configuration": runtime.prefill_execution_configuration(),
             "runtime_config": config.as_object().map(|o| o.iter().filter(|(k,_)| k.starts_with("mslim_") && !k.contains("directory")).collect::<std::collections::BTreeMap<_,_>>()),
             "workload_sha256": workload, "prompt_token_ids": prompts, "decode_probes": options.decode_probes,

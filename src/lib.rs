@@ -8,6 +8,7 @@
 pub mod adapter_catalog;
 pub mod adaptive_extent;
 pub mod attention_certificate;
+pub mod build_info;
 pub mod calibration_contract;
 pub mod calibration_predictor;
 pub mod calibration_profile;

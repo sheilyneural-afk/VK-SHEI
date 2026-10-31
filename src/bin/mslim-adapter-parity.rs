@@ -339,6 +339,7 @@ fn main() -> Result<()> {
     let receipt = json!({
         "schema": "mslim.validation-matrix/v1",
         "status": if passed { "passed" } else { "failed" },
+        "source_revision": mslim::build_info::source_revision(),
         "bundle_sha256": bundle_id,
         "model": model,
         "probe_tokens": prompt.len(),
