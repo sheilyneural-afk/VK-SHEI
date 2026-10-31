@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Blocks a push when the shared gate fails. Bypass deliberately with
+# `git push --no-verify`; CI runs the same gate and will still block the merge.
+exec "$(git rev-parse --show-toplevel)/scripts/check.sh"
