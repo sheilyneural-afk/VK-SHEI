@@ -7,7 +7,6 @@
 use std::path::Path;
 
 use anyhow::{Result, bail};
-#[allow(unused_imports)]
 use mslim_adapter_api::{
     ActivationPolicy, AdapterDescriptor, AdapterSelection, ComputeKind, select_adapter,
     select_available_adapter,
@@ -218,7 +217,6 @@ pub fn adapter_status() -> Vec<AdapterStatus> {
 /// Select a compiled adapter only after inspecting the actual model metadata.
 /// The model directory is never accepted solely because a backend feature is
 /// enabled.
-#[allow(unreachable_code, unused_variables)]
 pub fn select_for_model(
     model_dir: impl AsRef<Path>,
     requested_backend: Option<&str>,
@@ -232,11 +230,10 @@ pub fn select_for_model(
     // Validate the concrete selected adapter, not its broad backend label.
     // Multiple CPU adapters may coexist and the native Rust adapter must not
     // acquire an accidental LibTorch feature dependency.
-    let _ = create_adapter(&selection.adapter_id)?;
+    let adapter = create_adapter(&selection.adapter_id)?;
 
     let config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(model_dir.join("config.json"))?)?;
-    let adapter = create_adapter(&selection.adapter_id)?;
     adapter.inspect(model_dir, &config)?;
     Ok(selection)
 }

@@ -8,7 +8,6 @@
 //! uses `get_all_devices(CL_DEVICE_TYPE_GPU)` at runtime — no vendor is
 //! hard-coded.
 
-#[allow(unused_imports)]
 use anyhow::{Context, Result, ensure};
 use opencl3::{
     command_queue::{CL_QUEUE_PROFILING_ENABLE, CommandQueue},
