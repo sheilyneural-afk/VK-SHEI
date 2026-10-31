@@ -281,7 +281,8 @@ deploy/local-production/scripts/run-local-runtime.sh
 ```
 
 Para certificar la ruta externa completa (proveedor real, HTTP, snapshot,
-reinicio del worker y restore físico) se usa:
+reinicio del worker y restore físico) se usa. Por defecto selecciona `auto`,
+que mantiene los pesos residentes cuando caben y evita recargarlos por capa:
 
 ```bash
 KVSLIM_MODEL_DIR="$PWD/deploy/local-production/runtime/models/<digest>" \

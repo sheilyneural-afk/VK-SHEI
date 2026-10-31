@@ -65,7 +65,8 @@ fn load(
             .context("model context missing")?;
         config["max_context_tokens"] = max.into();
     }
-    // Stream is the safe default; resident can be selected for high-memory hosts.
+    // Auto selects resident when the verified weight bundle fits the available
+    // memory; stream is the explicit low-memory fallback.
     config["kvslim_weight_mode"] = Value::String(selected_mode.into());
     config["kvslim_decode_fused_kernels"] = Value::Bool(true);
     config["kvslim_prefill_fuse_projections"] = Value::Bool(true);
@@ -116,7 +117,7 @@ fn main() -> Result<()> {
         .windows(2)
         .find(|w| w[0] == "--weight-mode")
         .map(|w| w[1].as_str())
-        .unwrap_or("stream");
+        .unwrap_or("auto");
     anyhow::ensure!(
         matches!(weight_mode, "auto" | "stream" | "resident"),
         "--weight-mode must be auto, stream or resident"
