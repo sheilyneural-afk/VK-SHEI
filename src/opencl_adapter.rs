@@ -159,7 +159,13 @@ impl ModelAdapter for OpenClModelAdapter {
             config
                 .get("kvslim_decode_fused_kernels")
                 .and_then(Value::as_bool)
-                .unwrap_or(false),
+                .unwrap_or(true),
+        )?;
+        runtime.set_prefill_fuse_projections(
+            config
+                .get("kvslim_prefill_fuse_projections")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
         )?;
         self.capabilities.supports_kv_restore = physical_restore;
         self.model_dir = Some(model_dir.to_owned());

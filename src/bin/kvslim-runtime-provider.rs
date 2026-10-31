@@ -33,6 +33,8 @@ fn load(
     }
     // Stream is the safe default; resident can be selected for high-memory hosts.
     config["kvslim_weight_mode"] = Value::String(weight_mode.into());
+    config["kvslim_decode_fused_kernels"] = Value::Bool(true);
+    config["kvslim_prefill_fuse_projections"] = Value::Bool(true);
     fs::create_dir_all(cold_dir)?;
     config["kvslim_cold_directory"] = Value::String(cold_dir.display().to_string());
     config["kvslim_hot_v_tokens"] = 512u64.into();
