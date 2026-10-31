@@ -532,13 +532,43 @@ impl GpuEngine {
         let max_gpu_allocation = device.max_mem_alloc_size()?;
         let context = ClContext::from_device(&device)?;
         let queue = CommandQueue::create_default(&context, CL_QUEUE_PROFILING_ENABLE)?;
-        let program = Program::create_and_build_from_source(
-            &context,
-            include_str!("../assets/opencl_llm.cl"),
-            "-cl-std=CL1.2",
-        )
-        .map_err(anyhow::Error::msg)
-        .context("GPU full-LLM shader compilation failed")?;
+        let shader = include_str!("../assets/opencl_llm.cl");
+        let build_options = "-cl-std=CL1.2";
+        let mut key_hasher = Sha256::new();
+        key_hasher.update(shader.as_bytes());
+        key_hasher.update(build_options.as_bytes());
+        key_hasher.update(name.as_bytes());
+        key_hasher.update(device.vendor()?.as_bytes());
+        key_hasher.update(device.driver_version()?.as_bytes());
+        key_hasher.update(device.version()?.as_bytes());
+        let cache_key = hex::encode(key_hasher.finalize());
+        let cache_root = std::env::var_os("KVSLIM_OPENCL_CACHE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("deploy/local-production/runtime/artifacts/opencl"));
+        let cache_path = cache_root.join(format!("{cache_key}.bin"));
+        let program = if let Ok(binary) = fs::read(&cache_path) {
+            let binaries: [&[u8]; 1] = [&binary];
+            Program::create_and_build_from_binary(&context, &binaries, build_options)
+                .or_else(|_| {
+                    Program::create_and_build_from_source(&context, shader, build_options)
+                        .map_err(anyhow::Error::msg)
+                })
+                .context("load or compile cached GPU program")?
+        } else {
+            let program = Program::create_and_build_from_source(&context, shader, build_options)
+                .map_err(anyhow::Error::msg)
+                .context("GPU full-LLM shader compilation failed")?;
+            if let Ok(binaries) = program.get_binaries() {
+                if let Some(binary) = binaries.first() {
+                    let _ = fs::create_dir_all(&cache_root);
+                    let temporary = cache_path.with_extension("tmp");
+                    if fs::write(&temporary, binary).is_ok() {
+                        let _ = fs::rename(temporary, &cache_path);
+                    }
+                }
+            }
+            program
+        };
         let kernels = LlmKernels::load(&program)?;
         Ok(Self {
             context,
