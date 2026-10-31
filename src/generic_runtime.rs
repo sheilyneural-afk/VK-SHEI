@@ -53,6 +53,15 @@ impl RuntimeManifest {
         Ok(())
     }
 
+    pub fn from_json_file(path: &Path) -> Result<Self> {
+        let bytes =
+            std::fs::read(path).map_err(|e| anyhow::anyhow!("read runtime manifest: {e}"))?;
+        let manifest: Self = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("parse runtime manifest: {e}"))?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
     pub fn supports_all<'a>(&self, required: impl IntoIterator<Item = &'a Capability>) -> bool {
         required
             .into_iter()
