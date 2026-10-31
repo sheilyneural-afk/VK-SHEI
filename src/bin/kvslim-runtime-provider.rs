@@ -18,6 +18,15 @@ use std::{
 fn digest(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(Sha256::digest(fs::read(path)?)))
 }
+
+fn available_memory_bytes() -> u64 {
+    fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| text.lines().find(|line| line.starts_with("MemAvailable:")).and_then(|line| line.split_whitespace().nth(1)).and_then(|value| value.parse::<u64>().ok()))
+        .unwrap_or(0)
+        .saturating_mul(1024)
+}
+
 fn load(
     model: &std::path::Path,
     weight_mode: &str,
@@ -29,17 +38,12 @@ fn load(
             .filter_map(|entry| entry.metadata().ok())
             .map(|meta| meta.len())
             .sum::<u64>();
-        let available_bytes = fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|text| {
-                text.lines()
-                    .find(|line| line.starts_with("MemAvailable:"))
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .and_then(|value| value.parse::<u64>().ok())
-            })
-            .unwrap_or(0)
-            .saturating_mul(1024);
-        if available_bytes >= model_bytes.saturating_mul(3) {
+        // Resident avoids rereading the full weight bundle for every decode.
+        // Keep a dynamic safety margin for KV, allocator fragmentation and the OS.
+        // The old fixed 3x rule forced streaming on 64 GB hosts even when the
+        // model plus a bounded 8 GiB working set fit comfortably.
+        let safety_margin = 8_u64 * 1024 * 1024 * 1024;
+        if available_memory_bytes() >= model_bytes.saturating_add(safety_margin) {
             "resident"
         } else {
             "stream"
@@ -47,6 +51,7 @@ fn load(
     } else {
         weight_mode
     };
+    eprintln!("runtime weight mode={selected_mode} requested={weight_mode}");
     let mut config: Value = serde_json::from_slice(&fs::read(model.join("config.json"))?)?;
     if config.get("max_context_tokens").is_none() {
         let max = config
