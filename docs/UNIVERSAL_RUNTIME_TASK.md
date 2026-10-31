@@ -104,8 +104,12 @@ La tarea no se considera terminada hasta que:
 - Contratos genéricos: implementados.
 - Dispatcher RuntimeHost: implementado.
 - Transporte IPC: implementado.
-- Handshake del worker: implementado.
-- Enrutamiento real de inferencia externa: pendiente.
-- Host IPC ejecutable: pendiente.
-- E2E con modelo real: pendiente.
-- Benchmark real: pendiente.
+- Handshake del proveedor externo: implementado.
+- Host IPC ejecutable: implementado.
+- E2E IPC determinista: implementado y pasa (`IPC_E2E_OK`).
+- Generación real a través del proveedor externo: validada; el modo residente alcanza ~3,4–3,7 tok/s de decode en la máquina de prueba.
+- Enrutamiento completo del worker HTTP hacia el host externo: pendiente.
+- SessionStore/SessionCoordinator conectado al worker HTTP: pendiente.
+- Snapshot/restore físico tras reinicio desde el worker HTTP: pendiente.
+- Benchmark comparativo completo entre backends: pendiente.
+- Arranque rápido con caché persistente de binarios OpenCL: pendiente.
