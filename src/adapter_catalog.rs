@@ -88,7 +88,7 @@ fn accelerator_capabilities() -> Vec<AcceleratorCapabilities> {
     #[allow(unused_mut)]
     let mut accelerators = Vec::new();
     #[cfg(feature = "accelerator-backend")]
-    if let Ok(runtime) = crate::opencl_backend::OpenClBackend::new() {
+    if let Ok(runtime) = crate::gpu_backend::GpuBackend::new() {
         let info = runtime.device_info();
         accelerators.push(AcceleratorCapabilities {
             backend: "accelerator".into(),
@@ -174,7 +174,7 @@ pub fn adapter_status() -> Vec<AdapterStatus> {
                 "accelerator-runtime" => {
                     #[cfg(feature = "accelerator-backend")]
                     {
-                        match crate::opencl_backend::OpenClBackend::new() {
+                        match crate::gpu_backend::GpuBackend::new() {
                             Ok(_) => (
                                 AdapterAvailability::RuntimeAvailable,
                                 "acelerador detectado".to_owned(),
@@ -312,7 +312,7 @@ pub fn create_adapter(adapter_id: &str) -> Result<Box<dyn ModelAdapter>> {
         "accelerator-runtime" => {
             #[cfg(feature = "accelerator-backend")]
             return Ok(Box::new(
-                crate::opencl_adapter::OpenClModelAdapter::default(),
+                crate::gpu_adapter::GpuModelAdapter::default(),
             ));
             #[cfg(not(feature = "accelerator-backend"))]
             bail!("accelerator adapter is not compiled");
@@ -332,5 +332,222 @@ pub fn create_adapter(adapter_id: &str) -> Result<Box<dyn ModelAdapter>> {
             bail!("LibTorch CPU adapter is not compiled");
         }
         other => bail!("unknown adapter: {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn write_config(dir: &Path, config: &str) {
+        std::fs::write(dir.join("config.json"), config).unwrap();
+    }
+
+    #[test]
+    fn compiled_adapters_have_unique_ids_and_default_activation() {
+        let adapters = compiled_adapters();
+        let ids: HashSet<_> = adapters.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids.len(), adapters.len(), "ids de adaptador duplicados");
+        for adapter in &adapters {
+            assert_eq!(adapter.activation, ActivationPolicy::Default);
+            assert!(
+                adapter.supported_model_types.is_empty(),
+                "{}: la familia del modelo la decide inspect(), no una etiqueta fija",
+                adapter.id
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_adapters_follow_enabled_features() {
+        let ids: Vec<_> = compiled_adapters().into_iter().map(|a| a.id).collect();
+        let has = |id: &str| ids.iter().any(|candidate| candidate == id);
+        assert_eq!(has("native-cpu-runtime"), cfg!(feature = "native-cpu-backend"));
+        assert_eq!(has("libtorch-cpu-runtime"), cfg!(feature = "torch-backend"));
+        assert_eq!(has("accelerator-runtime"), cfg!(feature = "accelerator-backend"));
+    }
+
+    #[test]
+    fn adapter_priorities_prefer_accelerator_then_torch_then_native() {
+        let priority = |id: &str| {
+            compiled_adapters()
+                .into_iter()
+                .find(|a| a.id == id)
+                .map(|a| a.priority)
+        };
+        if let (Some(native), Some(torch)) =
+            (priority("native-cpu-runtime"), priority("libtorch-cpu-runtime"))
+        {
+            assert!(torch > native);
+        }
+        if let (Some(cpu), Some(accel)) = (
+            priority("native-cpu-runtime").or(priority("libtorch-cpu-runtime")),
+            priority("accelerator-runtime"),
+        ) {
+            assert!(accel > cpu);
+        }
+    }
+
+    #[test]
+    fn adapter_status_covers_every_compiled_adapter_in_order() {
+        let descriptors = compiled_adapters();
+        let statuses = adapter_status();
+        assert_eq!(statuses.len(), descriptors.len());
+        for (status, descriptor) in statuses.iter().zip(&descriptors) {
+            assert_eq!(&status.descriptor, descriptor);
+            assert!(!status.reason.is_empty());
+            assert_ne!(
+                status.availability,
+                AdapterAvailability::RequiresProbe,
+                "{} no tiene política de disponibilidad",
+                descriptor.id
+            );
+        }
+    }
+
+    #[cfg(feature = "native-cpu-backend")]
+    #[test]
+    fn native_cpu_runtime_is_reported_available() {
+        let status = adapter_status()
+            .into_iter()
+            .find(|s| s.descriptor.id == "native-cpu-runtime")
+            .expect("native CPU compilado");
+        assert_eq!(status.availability, AdapterAvailability::RuntimeAvailable);
+    }
+
+    #[test]
+    fn host_capabilities_are_consistent() {
+        let host = host_capabilities();
+        assert_eq!(host.architecture, std::env::consts::ARCH);
+        assert!(host.cpu_available);
+        assert!(host.cpu_parallelism >= 1);
+        assert!(host.context_kv_core_available);
+        if let (Some(total), Some(available)) =
+            (host.memory_total_bytes, host.memory_available_bytes)
+        {
+            assert!(available <= total);
+        }
+        let any_available = host
+            .adapters
+            .iter()
+            .any(|s| s.availability == AdapterAvailability::RuntimeAvailable);
+        assert_eq!(host.inference_adapter_available, any_available);
+        assert_eq!(host.adapters, adapter_status());
+        // Sin el backend acelerador no se debe anunciar ningún dispositivo.
+        if !cfg!(feature = "accelerator-backend") {
+            assert!(host.accelerators.is_empty());
+        }
+    }
+
+    #[test]
+    fn host_capabilities_serialize_without_identity_fields() {
+        let json = serde_json::to_value(host_capabilities()).unwrap();
+        let keys: HashSet<_> = json.as_object().unwrap().keys().cloned().collect();
+        for forbidden in ["hostname", "user", "username", "home", "machine_id"] {
+            assert!(!keys.contains(forbidden), "campo de identidad: {forbidden}");
+        }
+    }
+
+    #[test]
+    fn create_adapter_rejects_unknown_id() {
+        let error = create_adapter("does-not-exist").err().unwrap();
+        assert!(error.to_string().contains("unknown adapter"));
+    }
+
+    #[test]
+    fn create_adapter_matches_compiled_features() {
+        assert_eq!(
+            create_adapter("native-cpu-runtime").is_ok(),
+            cfg!(feature = "native-cpu-backend")
+        );
+        assert_eq!(
+            create_adapter("libtorch-cpu-runtime").is_ok(),
+            cfg!(feature = "torch-backend")
+        );
+        if !cfg!(feature = "accelerator-backend") {
+            assert!(create_adapter("accelerator-runtime").is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_registry_mirrors_adapter_status() {
+        let registry = runtime_registry();
+        assert_eq!(registry.statuses(), adapter_status());
+    }
+
+    #[test]
+    fn runtime_registry_select_matches_available_selection() {
+        let registry = runtime_registry();
+        let expected = select_available_adapter(&adapter_status(), None, None);
+        match (registry.select(None), expected) {
+            (Ok(selected), Some(expected)) => {
+                assert_eq!(selected, expected);
+                assert!(registry.create_selected(&selected).is_ok());
+            }
+            (Err(_), None) => {}
+            (got, expected) => panic!("registro {got:?} distinto de la selección {expected:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_registry_refuses_unregistered_selection() {
+        let selection = AdapterSelection {
+            adapter_id: "does-not-exist".into(),
+            backend: "cpu".into(),
+            compute: ComputeKind::Cpu,
+        };
+        assert!(runtime_registry().create_selected(&selection).is_err());
+    }
+
+    #[test]
+    fn select_for_model_rejects_unknown_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "{}");
+        let error = select_for_model(dir.path(), Some("no-such-backend"), None)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("no runtime adapter"));
+    }
+
+    #[test]
+    fn select_available_for_model_rejects_unknown_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "{}");
+        let error = select_available_for_model(dir.path(), Some("no-such-backend"), None)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("no hay un runtime validado"));
+    }
+
+    #[cfg(feature = "native-cpu-backend")]
+    #[test]
+    fn select_for_model_requires_config_json() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(select_for_model(dir.path(), Some("cpu"), None).is_err());
+        assert!(select_available_for_model(dir.path(), Some("cpu"), None).is_err());
+    }
+
+    #[cfg(feature = "native-cpu-backend")]
+    #[test]
+    fn select_for_model_rejects_malformed_config() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "{not json");
+        assert!(select_for_model(dir.path(), Some("cpu"), None).is_err());
+        assert!(select_available_for_model(dir.path(), Some("cpu"), None).is_err());
+    }
+
+    /// Un config.json válido sin pesos no basta: inspect() es la autoridad final
+    /// y el feature compilado no autoriza el directorio por sí solo.
+    #[cfg(feature = "native-cpu-backend")]
+    #[test]
+    fn select_for_model_rejects_config_without_weights() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            r#"{"model_type":"llama","hidden_size":64,"num_hidden_layers":1}"#,
+        );
+        assert!(select_for_model(dir.path(), Some("cpu"), None).is_err());
+        assert!(select_available_for_model(dir.path(), Some("cpu"), None).is_err());
     }
 }

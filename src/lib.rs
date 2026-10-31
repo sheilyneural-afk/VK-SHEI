@@ -20,8 +20,11 @@ pub mod conversion_worker;
 pub mod decoder_layout;
 pub mod document_graph;
 pub mod engine;
+pub mod evidence_stats;
+pub mod fused_retrieval;
 pub mod inference_worker;
 pub mod ipc_transport;
+pub mod page_fusion;
 #[cfg(feature = "accelerator-backend")]
 pub mod prefill_calibration;
 #[cfg(feature = "torch-backend")]
@@ -55,13 +58,13 @@ pub mod portable_store;
 pub mod worker_registry;
 
 #[cfg(feature = "accelerator-backend")]
-pub mod opencl_backend;
+pub mod gpu_backend;
 
 #[cfg(feature = "accelerator-backend")]
-pub mod opencl_adapter;
+pub mod gpu_adapter;
 
 #[cfg(feature = "accelerator-backend")]
-pub mod opencl_llm;
+pub mod gpu_llm;
 
 pub mod gpu_region_store;
 

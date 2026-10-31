@@ -27,7 +27,7 @@ use mslim::{
     ipc_transport::IpcClient,
     model_bundle::validated_bundle_manifest,
     model_config::ModelSpec,
-    opencl_llm::{OpenClLlm, WeightMode},
+    gpu_llm::{GpuLlm, WeightMode},
     session_store::SessionStore,
 };
 use mslim_adapter_api::{CacheReceipt as RuntimeCacheReceipt, GenerationRequest, GenerationResult};
@@ -155,7 +155,7 @@ fn validate(request: &ChatRequest, served_model: &str) -> Result<usize, ApiError
     if request.document.as_ref().is_some_and(|d| !d.is_empty()) {
         return Err(invalid(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "document prefix caching is not implemented for the OpenCL engine",
+            "document prefix caching is not implemented for the GPU engine",
         ));
     }
     if let (Some(a), Some(b)) = (request.max_tokens, request.max_completion_tokens)
@@ -285,7 +285,7 @@ struct GpuAnswer {
 }
 
 struct GpuExecutor {
-    model: OpenClLlm,
+    model: GpuLlm,
     tokenizer: Tokenizer,
     chat_template: String,
     last_prompt_ids: Vec<u32>,
@@ -1463,9 +1463,9 @@ async fn main() -> Result<()> {
         )
     } else {
         let mut engine = if let Some(config) = lod {
-            OpenClLlm::load_with_gpu_region(&model, max_context, mode, config)?
+            GpuLlm::load_with_gpu_region(&model, max_context, mode, config)?
         } else {
-            OpenClLlm::load(&model, max_context, mode)?
+            GpuLlm::load(&model, max_context, mode)?
         };
         if micro_sigma.is_some() || micro_warmup.is_some() || micro_safety_fuse.is_some() {
             let mut policy = mslim::adaptive_extent::AxisPolicy::default();

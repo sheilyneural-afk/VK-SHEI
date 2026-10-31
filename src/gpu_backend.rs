@@ -16,7 +16,7 @@ use serde::Serialize;
 use std::{ptr, sync::Mutex, time::Instant};
 
 fn driver_error(stage: &str, error: impl std::fmt::Display) -> PortableError {
-    PortableError::BackendFailure(format!("OpenCL {stage}: {error}"))
+    PortableError::BackendFailure(format!("GPU {stage}: {error}"))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -25,7 +25,7 @@ pub struct GpuDeviceInfo {
     pub vendor: String,
     pub vendor_id: u32,
     pub driver_version: String,
-    pub opencl_device_type: u64,
+    pub gpu_device_type: u64,
     pub max_compute_units: u32,
     pub reported_global_memory_bytes: u64,
     pub max_allocation_bytes: u64,
@@ -50,16 +50,16 @@ struct Runtime {
     last_timings: Option<GpuTimings>,
 }
 
-pub struct OpenClBackend {
+pub struct GpuBackend {
     info: GpuDeviceInfo,
     runtime: Mutex<Runtime>,
 }
 
-impl OpenClBackend {
+impl GpuBackend {
     pub fn new() -> Result<Self, PortableError> {
         let all =
             get_all_devices(CL_DEVICE_TYPE_GPU).map_err(|e| driver_error("enumerate GPU", e))?;
-        let requested = std::env::var("MSLIM_OPENCL_DEVICE")
+        let requested = std::env::var("MSLIM_GPU_DEVICE")
             .unwrap_or_default()
             .to_ascii_lowercase();
         let device = all
@@ -72,7 +72,7 @@ impl OpenClBackend {
             })
             .ok_or_else(|| {
                 PortableError::UnsupportedDevice(format!(
-                    "no OpenCL GPU matches device filter {requested:?}"
+                    "no GPU matches device filter {requested:?}"
                 ))
             })?;
         let device_type = device
@@ -80,7 +80,7 @@ impl OpenClBackend {
             .map_err(|e| driver_error("device type", e))?;
         if device_type & CL_DEVICE_TYPE_GPU == 0 {
             return Err(PortableError::UnsupportedDevice(
-                "OpenCL selected device is not a GPU".into(),
+                "selected device is not a GPU".into(),
             ));
         }
         // OpenCL kernel loads aligned LE u16/u32 directly from raw bytes.
@@ -103,7 +103,7 @@ impl OpenClBackend {
             driver_version: device
                 .driver_version()
                 .map_err(|e| driver_error("driver", e))?,
-            opencl_device_type: device_type,
+            gpu_device_type: device_type,
             max_compute_units: device
                 .max_compute_units()
                 .map_err(|e| driver_error("compute units", e))?,
@@ -120,7 +120,7 @@ impl OpenClBackend {
             .map_err(|e| driver_error("create GPU command queue", e))?;
         let program = Program::create_and_build_from_source(
             &context,
-            include_str!("../assets/opencl_attention.cl"),
+            include_str!("../assets/gpu_attention.cl"),
             "-cl-std=CL1.2",
         )
         .map_err(|e| driver_error("compile GPU attention kernels", e))?;
@@ -149,39 +149,39 @@ impl OpenClBackend {
     fn dispatch(&self, cache: &ExactKvFrames, query: &[f32]) -> Result<Vec<f32>, PortableError> {
         let geometry = cache.geometry();
         if query.len() != geometry.query_elements() {
-            return Err(PortableError::ShapeMismatch("OpenCL Q shape"));
+            return Err(PortableError::ShapeMismatch("GPU Q shape"));
         }
         if query.iter().any(|value| !value.is_finite()) {
-            return Err(PortableError::NonFinite("OpenCL Q"));
+            return Err(PortableError::NonFinite("GPU Q"));
         }
         if cache.is_empty() {
             return Ok(vec![0.0; query.len()]);
         }
         let start = Instant::now();
         let tokens = u32::try_from(cache.tokens())
-            .map_err(|_| PortableError::InvalidGeometry("OpenCL token count > u32"))?;
+            .map_err(|_| PortableError::InvalidGeometry("GPU token count > u32"))?;
         let qheads = u32::try_from(geometry.query_heads)
-            .map_err(|_| PortableError::InvalidGeometry("OpenCL qheads > u32"))?;
+            .map_err(|_| PortableError::InvalidGeometry("GPU qheads > u32"))?;
         let kvheads = u32::try_from(geometry.kv_heads)
-            .map_err(|_| PortableError::InvalidGeometry("OpenCL kvheads > u32"))?;
+            .map_err(|_| PortableError::InvalidGeometry("GPU kvheads > u32"))?;
         let dimension = u32::try_from(geometry.head_dim)
-            .map_err(|_| PortableError::InvalidGeometry("OpenCL head_dim > u32"))?;
+            .map_err(|_| PortableError::InvalidGeometry("GPU head_dim > u32"))?;
         let score_items = (tokens as usize).checked_mul(geometry.query_heads).ok_or(
-            PortableError::InvalidGeometry("OpenCL score indexing overflow"),
+            PortableError::InvalidGeometry("GPU score indexing overflow"),
         )?;
         // Kernels use 32-bit unsigned global indices.
         u32::try_from(score_items)
-            .map_err(|_| PortableError::InvalidGeometry("OpenCL score count exceeds u32 range"))?;
+            .map_err(|_| PortableError::InvalidGeometry("GPU score count exceeds u32 range"))?;
         u32::try_from(geometry.query_elements())
-            .map_err(|_| PortableError::InvalidGeometry("OpenCL output count exceeds u32 range"))?;
+            .map_err(|_| PortableError::InvalidGeometry("GPU output count exceeds u32 range"))?;
         let score_size = score_items
             .checked_mul(4)
             .ok_or(PortableError::InvalidGeometry(
-                "OpenCL score allocation overflow",
+                "GPU score allocation overflow",
             ))?;
         if score_size as u64 > self.info.max_allocation_bytes {
             return Err(PortableError::InvalidGeometry(
-                "OpenCL score allocation exceeds device limit",
+                "GPU score allocation exceeds device limit",
             ));
         }
         let (first_key, first_value) = &cache.frames()[0];
@@ -192,7 +192,7 @@ impl OpenClBackend {
         for (key, value) in cache.frames() {
             if key_dtype != key.dtype() || value_dtype != value.dtype() {
                 return Err(PortableError::BackendFailure(
-                    "OpenCL backend requires uniform K and V formats across frames".into(),
+                    "GPU backend requires uniform K and V formats across frames".into(),
                 ));
             }
             kraw.extend_from_slice(key.as_le_bytes());
@@ -202,7 +202,7 @@ impl OpenClBackend {
             || vraw.len() as u64 > self.info.max_allocation_bytes
         {
             return Err(PortableError::InvalidGeometry(
-                "OpenCL KV allocation exceeds device limit",
+                "GPU KV allocation exceeds device limit",
             ));
         }
 
@@ -351,15 +351,15 @@ impl OpenClBackend {
             output_bytes: query.len() * 4,
         });
         if output_values.iter().any(|value| !value.is_finite()) {
-            return Err(PortableError::NonFinite("OpenCL output"));
+            return Err(PortableError::NonFinite("GPU output"));
         }
         Ok(output_values)
     }
 }
 
-impl AttentionBackend for OpenClBackend {
+impl AttentionBackend for GpuBackend {
     fn name(&self) -> &'static str {
-        "rust-opencl-gpu-qk-softmax-pv"
+        "rust-gpu-qk-softmax-pv"
     }
     fn decode(&self, cache: &ExactKvFrames, query: &[f32]) -> Result<Vec<f32>, PortableError> {
         self.dispatch(cache, query)
@@ -372,8 +372,8 @@ mod tests {
     use crate::portable::{AttentionGeometry, CpuReferenceBackend, RawTensor};
 
     fn gpu_roundtrip(dtype: FloatFormat) {
-        let device = OpenClBackend::new().expect("physical GPU required");
-        assert!(device.device_info().opencl_device_type & CL_DEVICE_TYPE_GPU != 0);
+        let device = GpuBackend::new().expect("physical GPU required");
+        assert!(device.device_info().gpu_device_type & CL_DEVICE_TYPE_GPU != 0);
         let shape = AttentionGeometry::new(4, 2, 4).unwrap();
         let k: Vec<f32> = (0..32).map(|i| (i as f32 % 11.0 - 5.0) * 0.0625).collect();
         let v: Vec<f32> = (0..32).map(|i| (i as f32 % 13.0 - 6.0) * 0.0625).collect();
@@ -403,7 +403,7 @@ mod tests {
     }
 
     fn gpu_geometry_roundtrip(query_heads: usize, kv_heads: usize) {
-        let backend = OpenClBackend::new().expect("physical GPU required");
+        let backend = GpuBackend::new().expect("physical GPU required");
         let geometry = AttentionGeometry::new(query_heads, kv_heads, 8).unwrap();
         let tokens = 5usize;
         let count = tokens * kv_heads * 8;

@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use mslim::gpu_region_store::GpuRegionConfig;
-use mslim::opencl_llm::{OpenClLlm, WeightMode};
+use mslim::gpu_llm::{GpuLlm, WeightMode};
 use serde_json::json;
 use std::{path::PathBuf, time::Instant};
 use tokenizers::Tokenizer;
@@ -206,7 +206,7 @@ fn main() -> Result<()> {
                     .cold_directory = Some(value);
             }
             "--help" | "-h" => {
-                println!("M-SLIM BF16 Rust/OpenCL full LLM inference, experimental");
+                println!("M-SLIM BF16 Rust/GPU full LLM inference, experimental");
                 println!(
                     "Usage: mslim-runtime-cli [--model dir] [--prompt Hola | --ids 1,2,3] [--max-new-tokens 1] [--max-context-tokens 128] [--resident|--stream-weights] [--load-only] [--verify-weights] [--logits] [--thinking] [--gpu-lod] [--lod-epsilon 0] [--lod-stage 64] [--gpu-dense-kv] [--gpu-prefill-batch 128|--gpu-prefill-fallback] [--prefill-profile PATH]"
                 );
@@ -239,27 +239,27 @@ fn main() -> Result<()> {
         "max_context_tokens smaller than prompt + generated tokens"
     );
     let startup = Instant::now();
-    eprintln!("Starting BF16 OpenCL model upload/validation (mode={mode:?})...");
+    eprintln!("Starting BF16 GPU model upload/validation (mode={mode:?})...");
     let mut runtime = if native_hip {
         #[cfg(feature = "hip-backend")]
         {
             if let Some(config) = lod {
-                OpenClLlm::load_with_gpu_region_native_hip(
+                GpuLlm::load_with_gpu_region_native_hip(
                     &model,
                     max_context_tokens,
                     mode,
                     config,
                 )?
             } else {
-                OpenClLlm::load_dense_native_hip(&model, max_context_tokens, mode)?
+                GpuLlm::load_dense_native_hip(&model, max_context_tokens, mode)?
             }
         }
         #[cfg(not(feature = "hip-backend"))]
         anyhow::bail!("Native gfx1103 hipBLASLt was not compiled; enable --features hip-backend")
     } else if let Some(config) = lod {
-        OpenClLlm::load_with_gpu_region(&model, max_context_tokens, mode, config)?
+        GpuLlm::load_with_gpu_region(&model, max_context_tokens, mode, config)?
     } else {
-        OpenClLlm::load(&model, max_context_tokens, mode)?
+        GpuLlm::load(&model, max_context_tokens, mode)?
     };
     if gpu_micro_sigma.is_some() || gpu_micro_warmup.is_some() || gpu_micro_open_fuse.is_some() {
         let mut policy = mslim::adaptive_extent::AxisPolicy::default();

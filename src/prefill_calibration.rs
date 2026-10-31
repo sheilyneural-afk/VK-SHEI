@@ -9,8 +9,9 @@ use crate::{
         CalibrationGates, CalibrationObservation, CalibrationProposal, CalibrationState,
         CalibrationTransaction, atomic_write, evaluate_candidate,
     },
-    opencl_adapter::OpenClModelAdapter,
-    opencl_llm::OpenClLlm,
+    evidence_stats::PairedTimingEvidence,
+    gpu_adapter::GpuModelAdapter,
+    gpu_llm::GpuLlm,
 };
 use anyhow::{Context, Result, bail, ensure};
 use mslim_adapter_api::ModelAdapter;
@@ -245,7 +246,7 @@ fn peak_rss_bytes() -> Result<u64> {
     value.checked_mul(1024).context("RSS overflow")
 }
 
-fn prepare_probe(runtime: &mut OpenClLlm, scratch: &Path, settings: PrefillSettings) -> Result<()> {
+fn prepare_probe(runtime: &mut GpuLlm, scratch: &Path, settings: PrefillSettings) -> Result<()> {
     let old = runtime.active_cold_directory();
     let directory = tempfile::Builder::new()
         .prefix("probe-")
@@ -263,7 +264,7 @@ fn prepare_probe(runtime: &mut OpenClLlm, scratch: &Path, settings: PrefillSetti
 }
 
 fn probe(
-    runtime: &mut OpenClLlm,
+    runtime: &mut GpuLlm,
     prompt: &[u32],
     decode_probes: usize,
 ) -> Result<(f64, Reference)> {
@@ -308,7 +309,7 @@ fn probe(
 }
 
 fn measure(
-    runtime: &mut OpenClLlm,
+    runtime: &mut GpuLlm,
     scratch: &Path,
     settings: PrefillSettings,
     prompts: &[Vec<u32>],
@@ -398,6 +399,32 @@ fn measure(
         },
         own_references,
     ))
+}
+
+/// Paired timing evidence for one candidate against the baseline. Samples are
+/// produced in the same context/repeat order by `measure`, so pairing by index
+/// is valid only when the token counts line up; otherwise nothing is claimed.
+/// The result is advisory report data and never feeds a gate decision.
+fn timing_evidence(baseline: &Measurement, candidate: &Measurement) -> Value {
+    let aligned = baseline.samples.len() == candidate.samples.len()
+        && baseline
+            .samples
+            .iter()
+            .zip(&candidate.samples)
+            .all(|(b, c)| b.tokens == c.tokens);
+    if !aligned {
+        return json!({"status": "samples_not_paired"});
+    }
+    let pairs = baseline
+        .samples
+        .iter()
+        .zip(&candidate.samples)
+        .map(|(b, c)| (b.prefill_micros, c.prefill_micros))
+        .collect::<Vec<_>>();
+    match PairedTimingEvidence::from_pairs(&pairs) {
+        Ok(evidence) => json!(evidence),
+        Err(error) => json!({"status": "invalid_timings", "error": error.to_string()}),
+    }
 }
 
 fn learn(
@@ -532,7 +559,7 @@ pub fn run_cli(args: Vec<String>) -> Result<Value> {
     let output = output.canonicalize()?;
     let report_path = output.join("report.json");
     eprintln!("prefill calibration evidence: {}", report_path.display());
-    let mut adapter = OpenClModelAdapter::default();
+    let mut adapter = GpuModelAdapter::default();
     adapter.load(&model, &config)?;
     let runtime = adapter.calibration_runtime_mut()?;
     let original = runtime.prefill_settings();
@@ -639,6 +666,7 @@ pub fn run_cli(args: Vec<String>) -> Result<Value> {
             reports.push(json!({
                 "profile": settings.id(),
                 "gates": gate,
+                "timing_evidence": timing_evidence(&baseline, &measurement),
             }));
             measurements.push(measurement);
         }
@@ -721,6 +749,7 @@ pub fn run_cli(args: Vec<String>) -> Result<Value> {
                 match canary {
                     Ok((fresh_baseline, fresh_candidate, gate)) => {
                         report["canary"] = json!({
+                            "timing_evidence": timing_evidence(&fresh_baseline, &fresh_candidate),
                             "baseline": fresh_baseline,
                             "candidate": fresh_candidate,
                             "gates": gate,
@@ -792,6 +821,71 @@ mod tests {
         assert!(options.promote.is_none());
         assert_eq!(options.candidates.len(), 2);
         assert!(parse_options(args(&["--candidates", "64:8,64:8"])).is_err());
+    }
+    fn measurement(timings: &[(usize, f64)]) -> Measurement {
+        let fingerprint = Fingerprint {
+            logits_sha256: String::new(),
+            prefill_kv_sha256: String::new(),
+            final_kv_sha256: String::new(),
+            greedy_tokens: Vec::new(),
+        };
+        Measurement {
+            settings: PrefillSettings {
+                batch_tokens: Some(32),
+                weight_reuse_tokens: 8,
+            },
+            observation: CalibrationObservation {
+                profile_id: "test".into(),
+                workload_id: "test".into(),
+                seed: 0,
+                sample_count: timings.len() as u64,
+                parity_ok: true,
+                maximum_exactness_error: 0.0,
+                maximum_certificate_error: 0.0,
+                throughput_tokens_per_second: 1.0,
+                latency_p95_ms: 1.0,
+                peak_memory_bytes: 1,
+                bytes_read_per_token: 0,
+            },
+            samples: timings
+                .iter()
+                .map(|&(tokens, prefill_micros)| Sample {
+                    tokens,
+                    prefill_micros,
+                    fingerprint: fingerprint.clone(),
+                    exact_match: true,
+                    maximum_logit_error: 0.0,
+                })
+                .collect(),
+        }
+    }
+    #[test]
+    fn timing_evidence_pairs_only_aligned_samples_and_is_advisory() {
+        let baseline = measurement(&[(128, 1000.0), (128, 1010.0), (256, 2000.0), (256, 1990.0)]);
+        let faster = measurement(&[(128, 800.0), (128, 805.0), (256, 1600.0), (256, 1590.0)]);
+        let evidence = timing_evidence(&baseline, &faster);
+        assert_eq!(evidence["claim"], "candidate_faster_with_confidence");
+        assert_eq!(
+            evidence["authority"],
+            "advisory_never_changes_a_gate_decision"
+        );
+        assert_eq!(evidence["pairs"], 4);
+
+        let misaligned = measurement(&[(128, 800.0), (64, 805.0), (256, 1600.0), (256, 1590.0)]);
+        assert_eq!(
+            timing_evidence(&baseline, &misaligned)["status"],
+            "samples_not_paired"
+        );
+        let short = measurement(&[(128, 800.0)]);
+        assert_eq!(
+            timing_evidence(&baseline, &short)["status"],
+            "samples_not_paired"
+        );
+        let invalid = measurement(&[(128, 0.0), (128, 805.0), (256, 1600.0), (256, 1590.0)]);
+        assert_eq!(
+            timing_evidence(&baseline, &invalid)["status"],
+            "invalid_timings"
+        );
     }
     #[test]
     fn report_integrity_detects_edited_measurements() {

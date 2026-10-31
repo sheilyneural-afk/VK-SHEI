@@ -1,7 +1,16 @@
 use anyhow::{Context, Result, bail};
 use mslim::document_graph::{DocumentGraph, RetrievalBudget, RetrievalScope};
+use mslim::fused_retrieval::{FusedRetrievalConfig, retrieve_fused};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Ranking used by `query`. `Routing` is the original deterministic ranking
+/// and stays the default; `Fused` adds a BM25 channel and fuses both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RankMode {
+    Routing,
+    Fused,
+}
 
 #[derive(Debug, Deserialize)]
 struct InputPage {
@@ -166,9 +175,17 @@ fn query(arguments: Vec<String>) -> Result<()> {
     let mut max_characters = 32_000usize;
     let mut graph_hops = 1usize;
     let mut scope = RetrievalScope::Focused;
+    let mut rank = RankMode::Routing;
     let mut values = arguments.into_iter();
     while let Some(argument) = values.next() {
         match argument.as_str() {
+            "--rank" => {
+                rank = match values.next().context("--rank requires a value")?.as_str() {
+                    "routing" => RankMode::Routing,
+                    "fused" => RankMode::Fused,
+                    value => bail!("unknown rank mode: {value}"),
+                }
+            }
             "--graph" => graph_path = values.next().map(PathBuf::from),
             "--text" => text = values.next(),
             "--max-pages" => {
@@ -202,16 +219,27 @@ fn query(arguments: Vec<String>) -> Result<()> {
     let graph_path = graph_path.context("query requires --graph")?;
     let text = text.context("query requires --text")?;
     let graph = DocumentGraph::load_verified(&graph_path)?;
-    let phase = graph.retrieve_phase_with_scope(
-        &text,
-        RetrievalBudget {
-            max_pages,
-            max_characters,
-            graph_hops,
-        },
-        scope,
-    )?;
-    println!("{}", serde_json::to_string_pretty(&phase)?);
+    let budget = RetrievalBudget {
+        max_pages,
+        max_characters,
+        graph_hops,
+    };
+    match rank {
+        RankMode::Routing => {
+            let phase = graph.retrieve_phase_with_scope(&text, budget, scope)?;
+            println!("{}", serde_json::to_string_pretty(&phase)?);
+        }
+        RankMode::Fused => {
+            let retrieval = retrieve_fused(
+                &graph,
+                &text,
+                budget,
+                scope,
+                FusedRetrievalConfig::default(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&retrieval)?);
+        }
+    }
     Ok(())
 }
 
@@ -224,6 +252,9 @@ fn print_help() {
         "  mslim-document build-text --document-id ID --version HASH --text document.txt --output graph.json [--page-characters 4000]"
     );
     println!(
-        "  mslim-document query --graph graph.json --text QUESTION [--scope focused|exhaustive] [--max-pages 8] [--max-characters 32000] [--graph-hops 1]"
+        "  mslim-document query --graph graph.json --text QUESTION [--scope focused|exhaustive] [--rank routing|fused] [--max-pages 8] [--max-characters 32000] [--graph-hops 1]"
+    );
+    println!(
+        "  --rank fused adds a BM25 channel and fuses it with the routing ranking; output is {{\"phase\":..., \"fusion\":...}}"
     );
 }

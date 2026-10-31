@@ -6,7 +6,7 @@
 //! CPU/GPU equality. GPU LOD fidelity is evaluated against dense GPU.
 
 use anyhow::{Context, Result, ensure};
-use mslim::opencl_llm::{OpenClLlm, WeightMode};
+use mslim::gpu_llm::{GpuLlm, WeightMode};
 use mslim::torch_runtime::{TorchChatMessage, TorchModelRuntime};
 use serde_json::json;
 use std::path::PathBuf;
@@ -82,7 +82,7 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "declared-decoder".to_owned());
 
     eprintln!("GPU model and BF16 KV reference comparison: {:?}", ids);
-    let mut gpu = OpenClLlm::load(&model, max_context, mode)?;
+    let mut gpu = GpuLlm::load(&model, max_context, mode)?;
     gpu.set_batch_prefill_tokens(gpu_prefill_batch)?;
     eprintln!(
         "GPU={} weights_loaded={}",
@@ -198,7 +198,7 @@ fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "comparison":"supported_dense_BF16_LibTorch_CPU_vs_native_Rust_OpenCL_iGPU",
+            "comparison":"supported_dense_BF16_LibTorch_CPU_vs_native_Rust_GPU_iGPU",
             "comparison_role":"cross_backend_diagnostic",
             "cpu_gpu_bitwise_parity_required":false,
             "interpretation":"CPU/GPU logit and KV differences are measurements, not by themselves proof of incorrect GPU inference",

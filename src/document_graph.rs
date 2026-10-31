@@ -283,6 +283,11 @@ impl DocumentGraph {
         self.pages.get(&page_number)
     }
 
+    /// Original pages in ascending page order.
+    pub fn pages(&self) -> impl Iterator<Item = &DocumentPage> {
+        self.pages.values()
+    }
+
     pub fn page_metadata(&self, page_number: u32) -> Option<&PageMicroMetadata> {
         self.metadata.get(&page_number)
     }
@@ -808,10 +813,19 @@ fn graph_micro_spans(text: &str) -> Vec<GraphMicroSpan> {
         .collect()
 }
 
-fn tokenize(text: &str) -> Vec<String> {
+pub(crate) fn tokenize(text: &str) -> Vec<String> {
     text.split(|character: char| !character.is_alphanumeric())
         .filter(|token| !token.is_empty())
         .map(|token| token.to_lowercase())
+        .collect()
+}
+
+/// Terms that carry routing signal: the filter used for page micro-metadata
+/// (at least three bytes and not a stopword) plus every number token.
+pub(crate) fn signal_terms(text: &str) -> BTreeSet<String> {
+    tokenize(text)
+        .into_iter()
+        .filter(|token| (token.len() >= 3 && !is_stopword(token)) || is_number_token(token))
         .collect()
 }
 

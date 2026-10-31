@@ -85,9 +85,11 @@ pub fn implementation_digest() -> &'static str {
     DIGEST.get_or_init(|| {
         let mut hash = Sha256::new();
         for source in [
-            include_str!("opencl_llm.rs"),
-            include_str!("opencl_llm/prefill.rs"),
-            include_str!("../assets/opencl_llm.cl"),
+            include_str!("gpu_llm/mod.rs"),
+            include_str!("gpu_llm/kernels.rs"),
+            include_str!("gpu_llm/gpu_resources.rs"),
+            include_str!("gpu_llm/prefill.rs"),
+            include_str!("../assets/gpu_llm.cl"),
             include_str!("gpu_region_store.rs"),
             include_str!("gpu_micro_regions.rs"),
             include_str!("adaptive_extent.rs"),

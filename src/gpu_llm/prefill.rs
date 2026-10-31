@@ -56,7 +56,7 @@ impl BatchKernels {
     ) -> Result<Self> {
         ensure!(
             [32, 64, 128].contains(&virtual_lanes),
-            "physical OpenCL prefill lanes must be 32,64,128"
+            "physical GPU prefill lanes must be 32,64,128"
         );
         ensure!(
             virtual_lanes == 128 || (reuse == 8 && !register_unrolled),
@@ -208,7 +208,7 @@ impl BatchKernels {
         #[cfg(feature = "hip-backend")]
         ensure!(
             wq.hip.is_none() && wk.hip.is_none() && wv.hip.is_none(),
-            "cannot use OpenCL projection fusion with HIP-owned BF16 weights"
+            "cannot use GPU projection fusion with HIP-owned BF16 weights"
         );
         let (h, q_count, kv_count, t) = (
             u32::try_from(hidden)?,
@@ -261,7 +261,7 @@ impl BatchKernels {
         #[cfg(feature = "hip-backend")]
         ensure!(
             gate.hip.is_none() && up.hip.is_none(),
-            "cannot fuse OpenCL BF16 SwiGLU with HIP-owned matrices"
+            "cannot fuse GPU BF16 SwiGLU with HIP-owned matrices"
         );
         let (h, m, t) = (
             u32::try_from(hidden)?,
@@ -503,7 +503,7 @@ impl BatchBuffers {
     }
 }
 
-impl OpenClLlm {
+impl GpuLlm {
     /// Processes the prompt layer-by-layer in token tiles. This replaces
     /// repeated ColdStore reads during prefill with temporary BF16 V in
     /// GPU memory, and only seals exact ColdStore pages after completion.

@@ -2,7 +2,7 @@
 //! Uses the same GQA geometry as configured-model by default but synthetic KV/Q.
 
 use anyhow::{Context, Result, bail, ensure};
-use mslim::opencl_backend::OpenClBackend;
+use mslim::gpu_backend::GpuBackend;
 use mslim::portable::{
     AttentionBackend, AttentionGeometry, CpuReferenceBackend, ExactKvFrames, FloatFormat, RawTensor,
 };
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
         );
     }
     let backend_started = Instant::now();
-    let gpu = OpenClBackend::new()?;
+    let gpu = GpuBackend::new()?;
     let gpu_compile_ms = backend_started.elapsed().as_secs_f64() * 1000.0;
     let cache = make_cache(geo, dtype, tokens, framesize, 0x7A1C_2026_1029)?;
     let mut random = 0x2026_1029_EB13_u64;
@@ -187,14 +187,14 @@ fn main() -> Result<()> {
     let gpu_median = median_ms(&gpu_times);
     let metrics = gpu
         .last_timings()
-        .context("missing OpenCL kernel metrics")?;
+        .context("missing GPU kernel metrics")?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "engine": "mslim-runtime-attention",
             "backend": gpu.name(),
             "hardware": gpu.device_info(),
-            "physical_gpu_discovered_via": "OpenCL CL_DEVICE_TYPE_GPU",
+            "physical_gpu_discovered_via": "GPU CL_DEVICE_TYPE_GPU",
             "model_config_used_only_for_geometry": model.map(|p|p.display().to_string()),
             "full_llm_inference_on_gpu": false,
             "test_data": "deterministic_synthetic_qkv",

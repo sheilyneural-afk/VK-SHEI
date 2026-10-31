@@ -78,6 +78,17 @@ fn loopback_url(raw: &str) -> Result<String> {
     Ok(raw.trim_end_matches('/').to_owned())
 }
 
+/// WorkerRegistry rejects empty and duplicate ids; the gateway adds the
+/// loopback-only restriction on top.
+fn parse_workers(assignments: &[String]) -> Result<Vec<(String, String)>> {
+    let registry = mslim::worker_registry::WorkerRegistry::from_assignments(assignments)?;
+    registry
+        .workers()
+        .iter()
+        .map(|worker| Ok((worker.id.clone(), loopback_url(&worker.endpoint)?)))
+        .collect()
+}
+
 async fn ready(state: State<Arc<AppState>>) -> impl IntoResponse {
     let mut available = Vec::new();
     for (id, endpoint) in state.workers.iter() {
@@ -187,65 +198,6 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
     has_engine && has_model && has_runtime_description && has_calibration && identity_matches
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worker_certificate_requires_matching_model_identity() {
-        let bundle = "a".repeat(64);
-        let valid = json!({
-            "engine": "mslim-engine",
-            "model_checkpoint": format!("runtime/models/{bundle}"),
-            "model_digest": bundle,
-            "model_metadata": {},
-            "calibration": {
-                "schema": "mslim.calibration_receipt/v3",
-                "status": "measured-sustained-execution",
-                "bundle": "a".repeat(64),
-                "adapter": "accelerator-runtime",
-                "identity_digest": "b".repeat(64),
-                "started_unix_seconds": 1,
-                "warmup_runs": 1,
-                "measured_runs": 3,
-                "decode_tokens_per_run": 8,
-                "context_samples": [{
-                    "prompt_tokens": 1,
-                    "prefill_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
-                    "decode_tokens": 8,
-                    "decode_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
-                    "status": "measured"
-                }],
-                "snapshot_contract": {
-                    "kind": "physical-coldstore-handle",
-                    "physical_kv_persisted": true,
-                    "restore_latency_measured_as_physical_kv_hydration": false
-                },
-                "validation_matrix_gate": "same-backend-and-kv-integrity-passed"
-            }
-        });
-        assert!(worker_capabilities_are_valid(Some(&valid)));
-        let mut invalid = valid.clone();
-        invalid["calibration"]["bundle"] = json!("c".repeat(64));
-        assert!(!worker_capabilities_are_valid(Some(&invalid)));
-        let mut legacy = valid;
-        legacy["calibration"]["schema"] = json!("kvslim.calibration_receipt/v2");
-        assert!(!worker_capabilities_are_valid(Some(&legacy)));
-    }
-
-    #[test]
-    fn bearer_auth_rejects_missing_or_wrong_tokens_without_plaintext_fallback() {
-        let mut headers = HeaderMap::new();
-        assert!(bearer_token(&headers).is_none());
-        headers.insert("authorization", "Basic secret".parse().unwrap());
-        assert!(bearer_token(&headers).is_none());
-        headers.insert("authorization", "Bearer right".parse().unwrap());
-        let supplied = bearer_token(&headers).unwrap();
-        assert!(constant_time_token_eq(b"right", supplied.as_bytes()));
-        assert!(!constant_time_token_eq(b"wrong", supplied.as_bytes()));
-    }
-}
-
 async fn models(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError> {
     let worker = select_worker(&state).await?;
     let response = state
@@ -343,13 +295,7 @@ async fn main() -> Result<()> {
         host_ip.is_loopback(),
         "the local gateway must bind loopback"
     );
-    let mut workers = Vec::new();
-    for assignment in assignments {
-        let (id, endpoint) = assignment
-            .split_once('=')
-            .context("worker must be id=endpoint")?;
-        workers.push((id.trim().to_owned(), loopback_url(endpoint.trim())?));
-    }
+    let workers = parse_workers(&assignments)?;
     let state = Arc::new(AppState {
         client: Client::builder().pool_max_idle_per_host(16).build()?,
         workers: Arc::new(workers),
@@ -374,4 +320,103 @@ async fn main() -> Result<()> {
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assignments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn parse_workers_accepts_loopback_and_trims() {
+        let workers = parse_workers(&assignments(&[
+            " a = http://127.0.0.1:9000/ ",
+            "b=http://localhost:9001",
+        ]))
+        .unwrap();
+        assert_eq!(
+            workers,
+            vec![
+                ("a".to_owned(), "http://127.0.0.1:9000".to_owned()),
+                ("b".to_owned(), "http://localhost:9001".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_workers_rejects_duplicate_and_empty_ids() {
+        assert!(
+            parse_workers(&assignments(&[
+                "a=http://127.0.0.1:9000",
+                "a=http://127.0.0.1:9001",
+            ]))
+            .is_err()
+        );
+        assert!(parse_workers(&assignments(&["=http://127.0.0.1:9000"])).is_err());
+        assert!(parse_workers(&assignments(&["missing-separator"])).is_err());
+    }
+
+    #[test]
+    fn parse_workers_rejects_non_loopback_or_non_root() {
+        assert!(parse_workers(&assignments(&["a=http://10.0.0.5:9000"])).is_err());
+        assert!(parse_workers(&assignments(&["a=https://127.0.0.1:9000"])).is_err());
+        assert!(parse_workers(&assignments(&["a=http://127.0.0.1:9000/v1"])).is_err());
+    }
+
+    #[test]
+    fn worker_certificate_requires_matching_model_identity() {
+        let bundle = "a".repeat(64);
+        let valid = json!({
+            "engine": "mslim-engine",
+            "model_checkpoint": format!("runtime/models/{bundle}"),
+            "model_digest": bundle,
+            "model_metadata": {},
+            "calibration": {
+                "schema": "mslim.calibration_receipt/v3",
+                "status": "measured-sustained-execution",
+                "bundle": "a".repeat(64),
+                "adapter": "accelerator-runtime",
+                "identity_digest": "b".repeat(64),
+                "started_unix_seconds": 1,
+                "warmup_runs": 1,
+                "measured_runs": 3,
+                "decode_tokens_per_run": 8,
+                "context_samples": [{
+                    "prompt_tokens": 1,
+                    "prefill_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                    "decode_tokens": 8,
+                    "decode_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                    "status": "measured"
+                }],
+                "snapshot_contract": {
+                    "kind": "physical-coldstore-handle",
+                    "physical_kv_persisted": true,
+                    "restore_latency_measured_as_physical_kv_hydration": false
+                },
+                "validation_matrix_gate": "same-backend-and-kv-integrity-passed"
+            }
+        });
+        assert!(worker_capabilities_are_valid(Some(&valid)));
+        let mut invalid = valid.clone();
+        invalid["calibration"]["bundle"] = json!("c".repeat(64));
+        assert!(!worker_capabilities_are_valid(Some(&invalid)));
+        let mut legacy = valid;
+        legacy["calibration"]["schema"] = json!("kvslim.calibration_receipt/v2");
+        assert!(!worker_capabilities_are_valid(Some(&legacy)));
+    }
+
+    #[test]
+    fn bearer_auth_rejects_missing_or_wrong_tokens_without_plaintext_fallback() {
+        let mut headers = HeaderMap::new();
+        assert!(bearer_token(&headers).is_none());
+        headers.insert("authorization", "Basic secret".parse().unwrap());
+        assert!(bearer_token(&headers).is_none());
+        headers.insert("authorization", "Bearer right".parse().unwrap());
+        let supplied = bearer_token(&headers).unwrap();
+        assert!(constant_time_token_eq(b"right", supplied.as_bytes()));
+        assert!(!constant_time_token_eq(b"wrong", supplied.as_bytes()));
+    }
 }

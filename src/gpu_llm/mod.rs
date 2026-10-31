@@ -17,29 +17,24 @@
 //! for arbitrary checkpoint architectures or devices. No GPU CPU fallback.
 
 use anyhow::{Context, Result, ensure};
-use memmap2::{Advice, MmapOptions};
 use opencl3::{
-    command_queue::{CL_QUEUE_PROFILING_ENABLE, CommandQueue},
-    context::Context as ClContext,
-    device::{CL_DEVICE_TYPE_GPU, Device, get_all_devices},
-    kernel::{ExecuteKernel, Kernel},
-    memory::{Buffer, CL_MEM_READ_WRITE},
-    program::Program,
+    kernel::ExecuteKernel,
+    memory::Buffer,
     types::CL_BLOCKING,
 };
-use safetensors::{Dtype, SafeTensors, tensor::TensorView};
+use safetensors::Dtype;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
-    fs::{self, File},
+    fs,
     path::{Path, PathBuf},
-    ptr,
     sync::atomic::{AtomicBool, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 mod prefill;
+mod kernels;
+mod gpu_resources;
 
 #[cfg(feature = "hip-backend")]
 use crate::native_hip::{HipRuntime, HipWeight};
@@ -50,6 +45,12 @@ use crate::{
     gpu_region_store::{GpuRegionConfig, GpuRegionStats, GpuRegionStore},
     model_config::ModelSpec,
     portable::AttentionGeometry,
+};
+
+pub(crate) use gpu_resources::GpuEngine;
+pub(crate) use kernels::{
+    CheckpointShards, GpuHotValues, GpuLayer, GpuWeight,
+    MicroSelectedDevice, RopeKernelConfig, VerifiedGpuPromptReplay, Workspace,
 };
 
 const LOCAL_WORK_SIZE: usize = 128;
@@ -148,1497 +149,6 @@ mod checkpoint_eos_tests {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct RopeKernelConfig {
-    theta: f32,
-    llama3_scaling: u32,
-    factor: f32,
-    low_freq_factor: f32,
-    high_freq_factor: f32,
-    original_max_position: f32,
-}
-
-impl RopeKernelConfig {
-    fn from_spec(spec: &ModelSpec) -> Result<Self> {
-        let theta = spec.rope_theta.context("missing RoPE theta")? as f32;
-        ensure!(theta.is_finite() && theta > 0.0, "invalid RoPE theta");
-        if let Some(scaling) = &spec.rope_scaling {
-            Ok(Self {
-                theta,
-                llama3_scaling: 1,
-                factor: scaling.factor as f32,
-                low_freq_factor: scaling.low_freq_factor as f32,
-                high_freq_factor: scaling.high_freq_factor as f32,
-                original_max_position: scaling.original_max_position_embeddings as f32,
-            })
-        } else {
-            Ok(Self {
-                theta,
-                llama3_scaling: 0,
-                factor: 1.0,
-                low_freq_factor: 1.0,
-                high_freq_factor: 2.0,
-                original_max_position: 1.0,
-            })
-        }
-    }
-
-    #[cfg(test)]
-    fn inverse_frequency(self, frequency_dim: usize, head_dim: usize) -> f32 {
-        let mut inverse = (-(frequency_dim as f32) * self.theta.ln() / head_dim as f32).exp();
-        if self.llama3_scaling != 0 {
-            let wavelength = std::f32::consts::TAU / inverse;
-            let low_wavelength = self.original_max_position / self.low_freq_factor;
-            let high_wavelength = self.original_max_position / self.high_freq_factor;
-            if wavelength > low_wavelength {
-                inverse /= self.factor;
-            } else if wavelength >= high_wavelength {
-                let smooth = (self.original_max_position / wavelength - self.low_freq_factor)
-                    / (self.high_freq_factor - self.low_freq_factor);
-                inverse = (1.0 - smooth) * (inverse / self.factor) + smooth * inverse;
-            }
-        }
-        inverse
-    }
-}
-
-struct GpuWeight {
-    data: Buffer<u8>,
-    #[cfg(feature = "hip-backend")]
-    hip: Option<HipWeight>,
-}
-
-struct GpuLayer {
-    input_norm: GpuWeight,
-    q: GpuWeight,
-    k: GpuWeight,
-    v: GpuWeight,
-    o: GpuWeight,
-    post_norm: GpuWeight,
-    gate: GpuWeight,
-    up: GpuWeight,
-    down: GpuWeight,
-}
-
-/// Read-only collection of every safetensors shard in one checkpoint.
-/// Tensor ownership is discovered from the files themselves instead of
-/// assuming that all weights live in one archive. This is deliberately kept
-/// independent of Hugging Face's optional index JSON: the BF16 payload is the
-/// authority and duplicate tensor names fail closed.
-struct CheckpointShards {
-    mappings: Vec<memmap2::Mmap>,
-    tensor_to_shard: HashMap<String, usize>,
-    payload_bytes: usize,
-}
-
-impl CheckpointShards {
-    fn open(model_dir: &Path, shard_names: &[String]) -> Result<Self> {
-        ensure!(
-            !shard_names.is_empty(),
-            "checkpoint has no safetensors shards"
-        );
-        let mut mappings = Vec::with_capacity(shard_names.len());
-        let mut tensor_to_shard = HashMap::new();
-        let mut payload_bytes = 0usize;
-        for (shard_index, shard_name) in shard_names.iter().enumerate() {
-            let path = model_dir.join(shard_name);
-            let file = File::open(&path)
-                .with_context(|| format!("open checkpoint shard {}", path.display()))?;
-            // SAFETY: Immutable, read-only mapping retained by this owner.
-            let mapping = unsafe { MmapOptions::new().map(&file)? };
-            // Sequential read-ahead improves streamed layer loading without
-            // allocating a second copy of the shard in process memory.
-            mapping.advise(Advice::Sequential)?;
-            let archive = SafeTensors::deserialize(&mapping)
-                .with_context(|| format!("parse checkpoint shard {}", path.display()))?;
-            for name in archive.names() {
-                let view = archive.tensor(name).with_context(|| {
-                    format!("read tensor directory {name} in {}", path.display())
-                })?;
-                payload_bytes = payload_bytes
-                    .checked_add(view.data().len())
-                    .context("checkpoint BF16 payload byte count overflow")?;
-                ensure!(
-                    tensor_to_shard
-                        .insert(name.to_owned(), shard_index)
-                        .is_none(),
-                    "duplicate checkpoint tensor across shards: {name}"
-                );
-            }
-            mappings.push(mapping);
-        }
-        Ok(Self {
-            mappings,
-            tensor_to_shard,
-            payload_bytes,
-        })
-    }
-
-    fn with_tensor<R>(
-        &self,
-        name: &str,
-        use_tensor: impl FnOnce(TensorView<'_>) -> Result<R>,
-    ) -> Result<R> {
-        let shard = *self
-            .tensor_to_shard
-            .get(name)
-            .with_context(|| format!("required original weight not found: {name}"))?;
-        let archive = SafeTensors::deserialize(
-            self.mappings
-                .get(shard)
-                .context("checkpoint tensor shard index invalid")?,
-        )?;
-        let view = archive
-            .tensor(name)
-            .with_context(|| format!("checkpoint tensor directory lost {name}"))?;
-        use_tensor(view)
-    }
-
-    fn payload_bytes(&self) -> usize {
-        self.payload_bytes
-    }
-
-    #[cfg(all(test, feature = "physical-conformance"))]
-    fn tensor_count(&self) -> usize {
-        self.tensor_to_shard.len()
-    }
-}
-
-struct GpuKv {
-    key: Buffer<u8>,
-    // Dense GPU: full BF16 value cache. LOD GPU: None, BF16 V stays
-    // in the ORIGINAL CPU ColdStore and only a bounded stage enters GPU.
-    value: Option<Buffer<u8>>,
-}
-
-struct LodStage {
-    values: Buffer<u8>,
-    indices: Buffer<u32>,
-    accumulator: Buffer<f32>,
-    selected_mass: Buffer<f32>,
-}
-
-/// Bounded HOT device tier for exact BF16 V in canonical GPU LOD mode.
-/// ColdStore remains the canonical verified authority, always appended.
-/// If the exact query history exceeds capacity, no partial approximation
-/// is attempted: full verified ColdStore staging resumes immediately.
-/// Only legal with epsilon=0, where the exact certificate selects all V.
-// GPU BF16 Q/K/V and the device-resident certified index/result
-// for the optional micro fused attention kernel.
-type MicroHotBuffers<'a> = (
-    &'a Buffer<u8>,
-    &'a Buffer<u8>,
-    &'a Buffer<u8>,
-    &'a Buffer<u32>,
-    &'a Buffer<u8>,
-);
-
-struct MicroSelectedDevice {
-    indices: Buffer<u32>,
-    last_positions: Vec<u32>,
-    upload_calls: usize,
-    reuse_hits: usize,
-}
-
-struct GpuHotValues {
-    values: Vec<Buffer<u8>>,
-    // Only configured by --gpu-micro-hot-v-tokens in explicitly positive
-    // epsilon mode. This is a BF16 device cache, NOT a replacement for
-    // the exact original CPU ColdStore.
-    micro_indices: Option<MicroSelectedDevice>,
-    capacity_tokens: usize,
-    valid_prefix_tokens: usize,
-    attention_calls: usize,
-    cold_fallback_calls: usize,
-    prefetched_bytes: usize,
-    micro_sparse_calls: usize,
-    micro_full_exact_fallback_calls: usize,
-}
-
-/// Optional same-prompt prefill replay for the original LOD GPU route.
-/// All BF16 bytes are copied directly from the PREVIOUS physical GPU
-/// computation while the original ColdStore is being sealed. On a
-/// hit, the next request revalidates SHA-256 and recreates the SAME
-/// canonical CPU ColdStore+4-bit axis before any generated token.
-/// Nothing is quantized, omitted, or approximated, and cache misses
-/// always compute the actual BF16 prefill normally.
-/// The cache is bounded and RAM-only (one exact prompt, no disk).
-struct VerifiedGpuPromptReplay {
-    ids: Vec<u32>,
-    kv: Vec<(Vec<u8>, Vec<u8>)>,
-    last_logits_bf16: Vec<u8>,
-    argmax: u32,
-    sha256: [u8; 32],
-    bytes: usize,
-}
-
-impl VerifiedGpuPromptReplay {
-    fn calculate_digest(
-        ids: &[u32],
-        kv: &[(Vec<u8>, Vec<u8>)],
-        logits: &[u8],
-        argmax: u32,
-    ) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let mut hash = Sha256::new();
-        hash.update(b"mslim-gpu-exact-prompt-replay-v1");
-        hash.update((ids.len() as u64).to_le_bytes());
-        for id in ids {
-            hash.update(id.to_le_bytes());
-        }
-        hash.update((kv.len() as u64).to_le_bytes());
-        for (key, value) in kv {
-            hash.update((key.len() as u64).to_le_bytes());
-            hash.update(key);
-            hash.update((value.len() as u64).to_le_bytes());
-            hash.update(value);
-        }
-        hash.update((logits.len() as u64).to_le_bytes());
-        hash.update(logits);
-        hash.update(argmax.to_le_bytes());
-        hash.finalize().into()
-    }
-
-    fn verify(&self) -> bool {
-        self.sha256
-            == Self::calculate_digest(&self.ids, &self.kv, &self.last_logits_bf16, self.argmax)
-    }
-}
-
-struct Workspace {
-    hidden0: Buffer<u8>,
-    hidden1: Buffer<u8>,
-    norm1: Buffer<u8>,
-    norm2: Buffer<u8>,
-    query: Buffer<u8>,
-    query_rope: Buffer<u8>,
-    key: Buffer<u8>,
-    key_rope: Buffer<u8>,
-    value: Buffer<u8>,
-    attention: Buffer<u8>,
-    attn_o: Buffer<u8>,
-    gate: Buffer<u8>,
-    up: Buffer<u8>,
-    activation: Buffer<u8>,
-    down: Buffer<u8>,
-    logits: Buffer<u8>,
-    token_id: Buffer<u32>,
-    scores: Buffer<f32>,
-    kv: Vec<GpuKv>,
-    lod_stage: Option<LodStage>,
-}
-
-struct LlmKernels {
-    embed: Kernel,
-    gemv: Kernel,
-    gemv_unroll4: Kernel,
-    fused_qkv: Kernel,
-    fused_swiglu: Kernel,
-    norm: Kernel,
-    rope: Kernel,
-    qk: Kernel,
-    micro_clear: Kernel,
-    micro_sparse_qk: Kernel,
-    micro_hot_fused: Kernel,
-    exact_hot_fused: Kernel,
-    softmax: Kernel,
-    pv: Kernel,
-    lod_pv_stage: Kernel,
-    lod_pv_finish: Kernel,
-    add: Kernel,
-    swiglu: Kernel,
-    argmax: Kernel,
-}
-
-impl LlmKernels {
-    fn load(program: &Program) -> Result<Self> {
-        let get = |name| {
-            Kernel::create(program, name).with_context(|| format!("GPU kernel missing: {name}"))
-        };
-        Ok(Self {
-            embed: get("llm_embed")?,
-            gemv: get("llm_gemv_bf16")?,
-            gemv_unroll4: get("llm_gemv_bf16_unroll4")?,
-            fused_qkv: get("llm_fused_qkv_bf16")?,
-            fused_swiglu: get("llm_fused_swiglu_bf16")?,
-            norm: get("llm_rmsnorm")?,
-            rope: get("llm_rope")?,
-            qk: get("llm_attention_qk")?,
-            micro_clear: get("llm_micro_clear_scores")?,
-            micro_sparse_qk: get("llm_micro_sparse_qk")?,
-            micro_hot_fused: get("llm_micro_hot_fused_attention")?,
-            exact_hot_fused: get("llm_exact_hot_fused_attention")?,
-            softmax: get("llm_attention_softmax")?,
-            pv: get("llm_attention_pv")?,
-            lod_pv_stage: get("llm_lod_pv_stage")?,
-            lod_pv_finish: get("llm_lod_pv_finish")?,
-            add: get("llm_add")?,
-            swiglu: get("llm_swiglu")?,
-            argmax: get("llm_argmax")?,
-        })
-    }
-}
-
-struct GpuEngine {
-    context: ClContext,
-    queue: CommandQueue,
-    // Keep program loaded while kernels are in use.
-    _program: Program,
-    kernels: LlmKernels,
-    pub name: String,
-    pub reported_gpu_memory: u64,
-    calibration_device_key: String,
-    pub max_gpu_allocation: u64,
-    gemv_unroll4_enabled: AtomicBool,
-    fused_decode_enabled: AtomicBool,
-    exact_hot_attention_enabled: AtomicBool,
-    #[cfg(feature = "hip-backend")]
-    hip: Option<HipRuntime>,
-}
-
-impl GpuEngine {
-    fn new(hip_enabled: bool) -> Result<Self> {
-        #[cfg(not(feature = "hip-backend"))]
-        ensure!(!hip_enabled, "native HIP support was not compiled");
-        #[cfg(feature = "hip-backend")]
-        let hip = if hip_enabled {
-            Some(HipRuntime::new()?)
-        } else {
-            None
-        };
-        let filter = std::env::var("MSLIM_OPENCL_DEVICE")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let devices =
-            get_all_devices(CL_DEVICE_TYPE_GPU).context("OpenCL no GPU devices available")?;
-        let device = devices
-            .into_iter()
-            .map(Device::new)
-            .find(|device| {
-                let name = device.name().unwrap_or_default().to_lowercase();
-                let vendor = device.vendor().unwrap_or_default().to_lowercase();
-                filter.is_empty() || name.contains(&filter) || vendor.contains(&filter)
-            })
-            .context("No matching real OpenCL GPU found")?;
-        ensure!(
-            device.dev_type()? & CL_DEVICE_TYPE_GPU != 0,
-            "OpenCL device is NOT a physical GPU"
-        );
-        ensure!(
-            device.endian_little()?,
-            "OpenCL GPU must be little-endian for BF16"
-        );
-        let name = device.name()?;
-        let reported_gpu_memory = device.global_mem_size()?;
-        let max_gpu_allocation = device.max_mem_alloc_size()?;
-        let context = ClContext::from_device(&device)?;
-        let queue = CommandQueue::create_default(&context, CL_QUEUE_PROFILING_ENABLE)?;
-        let shader = include_str!("../assets/opencl_llm.cl");
-        let build_options = "-cl-std=CL1.2";
-        let mut key_hasher = Sha256::new();
-        key_hasher.update(shader.as_bytes());
-        key_hasher.update(build_options.as_bytes());
-        key_hasher.update(name.as_bytes());
-        key_hasher.update(device.vendor()?.as_bytes());
-        key_hasher.update(device.driver_version()?.as_bytes());
-        key_hasher.update(device.version()?.as_bytes());
-        let cache_key = hex::encode(key_hasher.finalize());
-        let cache_root = std::env::var_os("MSLIM_OPENCL_CACHE_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::PathBuf::from("deploy/local-production/runtime/artifacts/opencl")
-            });
-        let cache_path = cache_root.join(format!("{cache_key}.bin"));
-        let program = if let Ok(binary) = fs::read(&cache_path) {
-            let binaries: [&[u8]; 1] = [&binary];
-            Program::create_and_build_from_binary(&context, &binaries, build_options)
-                .or_else(|_| {
-                    Program::create_and_build_from_source(&context, shader, build_options)
-                        .map_err(anyhow::Error::msg)
-                })
-                .context("load or compile cached GPU program")?
-        } else {
-            let program = Program::create_and_build_from_source(&context, shader, build_options)
-                .map_err(anyhow::Error::msg)
-                .context("GPU full-LLM shader compilation failed")?;
-            if let Ok(binaries) = program.get_binaries()
-                && let Some(binary) = binaries.first()
-            {
-                let _ = fs::create_dir_all(&cache_root);
-                let temporary = cache_path.with_extension("tmp");
-                if fs::write(&temporary, binary).is_ok() {
-                    let _ = fs::rename(temporary, &cache_path);
-                }
-            }
-            program
-        };
-        let kernels = LlmKernels::load(&program)?;
-        Ok(Self {
-            context,
-            queue,
-            _program: program,
-            kernels,
-            name,
-            reported_gpu_memory,
-            calibration_device_key: cache_key,
-            max_gpu_allocation,
-            gemv_unroll4_enabled: AtomicBool::new(false),
-            fused_decode_enabled: AtomicBool::new(false),
-            exact_hot_attention_enabled: AtomicBool::new(false),
-            #[cfg(feature = "hip-backend")]
-            hip,
-        })
-    }
-
-    fn alloc_u8(&self, bytes: usize) -> Result<Buffer<u8>> {
-        ensure!(
-            bytes > 0 && bytes as u64 <= self.max_gpu_allocation,
-            "GPU allocation {bytes} exceeds limit"
-        );
-        // SAFETY: The context is alive throughout the lifetime of the buffer.
-        unsafe {
-            Buffer::create(&self.context, CL_MEM_READ_WRITE, bytes, ptr::null_mut())
-                .context("GPU memory allocation failed")
-        }
-    }
-
-    fn alloc_scores(&self, count: usize) -> Result<Buffer<f32>> {
-        ensure!(
-            count > 0 && (count as u64) * 4 <= self.max_gpu_allocation,
-            "GPU score buffer too large"
-        );
-        // SAFETY: The context is alive throughout the lifetime of the buffer.
-        unsafe {
-            Buffer::create(&self.context, CL_MEM_READ_WRITE, count, ptr::null_mut())
-                .context("GPU score allocation failed")
-        }
-    }
-
-    fn alloc_indices(&self, count: usize) -> Result<Buffer<u32>> {
-        ensure!(
-            count > 0 && (count as u64) * 4 <= self.max_gpu_allocation,
-            "GPU LOD index staging too large"
-        );
-        // SAFETY: Context valid for the lifetime of the returned buffer.
-        unsafe {
-            Buffer::create(&self.context, CL_MEM_READ_WRITE, count, ptr::null_mut())
-                .context("GPU LOD index allocation failed")
-        }
-    }
-
-    fn alloc_result(&self) -> Result<Buffer<u32>> {
-        // SAFETY: The context is alive throughout the lifetime of the buffer.
-        unsafe {
-            Buffer::create(&self.context, CL_MEM_READ_WRITE, 1, ptr::null_mut())
-                .context("GPU result allocation failed")
-        }
-    }
-
-    fn copy(
-        &self,
-        source: &Buffer<u8>,
-        destination: &mut Buffer<u8>,
-        size: usize,
-        dest_byte_offset: usize,
-    ) -> Result<()> {
-        // SAFETY: Source and destination are valid OpenCL buffers with
-        // sufficient capacity (validated by the executor's shape constraints).
-        unsafe {
-            self.queue
-                .enqueue_copy_buffer(source, destination, 0, dest_byte_offset, size, &[])
-                .context("GPU BF16 buffer copy failed")?;
-        }
-        Ok(())
-    }
-
-    fn transfer(&self, destination: &mut Buffer<u8>, bytes: &[u8]) -> Result<()> {
-        // SAFETY: CL_BLOCKING retains bytes until DMA/transfer completes.
-        unsafe {
-            self.queue
-                .enqueue_write_buffer(destination, CL_BLOCKING, 0, bytes, &[])
-                .context("GPU upload of original BF16 bytes failed")?;
-        }
-        Ok(())
-    }
-
-    fn read_token(&self, source: &Buffer<u32>) -> Result<u32> {
-        let mut token = [0u32; 1];
-        // SAFETY: CL_BLOCKING retains the host buffer for the driver call.
-        unsafe {
-            self.queue
-                .enqueue_read_buffer(source, CL_BLOCKING, 0, &mut token, &[])
-                .context("GPU argmax readback failed")?;
-        }
-        Ok(token[0])
-    }
-
-    fn read_logits(&self, source: &Buffer<u8>, vocab: usize) -> Result<Vec<f32>> {
-        let mut bits = vec![0u8; vocab * 2];
-        // SAFETY: CL_BLOCKING retains the host buffer.
-        unsafe {
-            self.queue
-                .enqueue_read_buffer(source, CL_BLOCKING, 0, &mut bits, &[])
-                .context("GPU logits BF16 readback failed")?;
-        }
-        Ok(bits
-            .chunks_exact(2)
-            .map(|b| half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
-            .collect())
-    }
-
-    fn embed(
-        &self,
-        weight: &GpuWeight,
-        output: &Buffer<u8>,
-        token_id: u32,
-        hidden_size: u32,
-    ) -> Result<()> {
-        // SAFETY: Kernel signature and number/type of args match OpenCL source.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.embed)
-                .set_arg(&weight.data)
-                .set_arg(output)
-                .set_arg(&token_id)
-                .set_arg(&hidden_size)
-                .set_global_work_size(hidden_size as usize)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU BF16 embedding failed")?;
-        }
-        Ok(())
-    }
-
-    /// HIP native BF16 GEMM: row-major [rows,inner] weights and
-    /// [tokens,inner] activations; OpenCL buffers host-staged only at
-    /// layer matrix boundaries. All GEMM arithmetic executes on real
-    /// AMD gfx1103 hipBLASLt matrix hardware. No CPU neural math.
-    #[cfg(feature = "hip-backend")]
-    fn hip_matrix(
-        &self,
-        weight: &HipWeight,
-        input: &Buffer<u8>,
-        output: &Buffer<u8>,
-        inner: usize,
-        rows: usize,
-        tokens: usize,
-    ) -> Result<()> {
-        let native = self.hip.as_ref().context("no native HIP BF16 context")?;
-        let input_bytes = inner
-            .checked_mul(tokens)
-            .and_then(|n| n.checked_mul(2))
-            .context("HIP input size overflow")?;
-        let output_bytes = rows
-            .checked_mul(tokens)
-            .and_then(|n| n.checked_mul(2))
-            .context("HIP output size overflow")?;
-        let mut host_in = vec![0u8; input_bytes];
-        // SAFETY: OpenCL buffer is valid, this is a blocking readback of
-        // queued BF16 activations, with no CPU floating point compute.
-        unsafe {
-            self.queue
-                .enqueue_read_buffer(input, CL_BLOCKING, 0, &mut host_in, &[])
-                .context("OpenCL to native HIP matrix activation")?;
-        }
-        let mut host_out = vec![0u8; output_bytes];
-        native.gemm_bf16(weight, &host_in, &mut host_out, inner, rows, tokens)?;
-        // SAFETY: All GPU OpenCL buffers are owned by the inference
-        // context. Direct OpenCL C API accepts the existing buffer handle;
-        // CL_TRUE blocks until the BF16 output upload completes.
-        #[link(name = "OpenCL")]
-        unsafe extern "C" {
-            fn clEnqueueWriteBuffer(
-                command_queue: *mut std::ffi::c_void,
-                buffer: *mut std::ffi::c_void,
-                blocking_write: u32,
-                offset: usize,
-                cb: usize,
-                ptr: *const std::ffi::c_void,
-                num_events_in_wait_list: u32,
-                event_wait_list: *const std::ffi::c_void,
-                event: *mut std::ffi::c_void,
-            ) -> i32;
-        }
-        // SAFETY: ABI of OpenCL clEnqueueWriteBuffer, same cl_mem and
-        // cl_command_queue types used by opencl3. Blocking transfer.
-        let rc = unsafe {
-            clEnqueueWriteBuffer(
-                self.queue.get(),
-                output.get(),
-                1,
-                0,
-                host_out.len(),
-                host_out.as_ptr().cast(),
-                0,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-            )
-        };
-        ensure!(
-            rc == 0,
-            "OpenCL upload from native HIP BF16 matrix failed ({rc})"
-        );
-        Ok(())
-    }
-
-    fn gemv(
-        &self,
-        weight: &GpuWeight,
-        input: &Buffer<u8>,
-        output: &Buffer<u8>,
-        in_dim: usize,
-        out_dim: usize,
-    ) -> Result<()> {
-        #[cfg(feature = "hip-backend")]
-        if let Some(ref hip) = weight.hip {
-            return self.hip_matrix(hip, input, output, in_dim, out_dim, 1);
-        }
-        let in_dim_u32 = u32::try_from(in_dim)?;
-        let out_dim_u32 = u32::try_from(out_dim)?;
-        let global = out_dim
-            .checked_mul(LOCAL_WORK_SIZE)
-            .context("OpenCL GEMV workgroup count overflow")?;
-        // SAFETY: Matrices are validated BF16 [out_dim,in_dim]; the kernel
-        // allocates one workgroup of exactly 128 threads per output row.
-        unsafe {
-            ExecuteKernel::new(if self.gemv_unroll4_enabled.load(Ordering::Relaxed) {
-                &self.kernels.gemv_unroll4
-            } else {
-                &self.kernels.gemv
-            })
-            .set_arg(&weight.data)
-            .set_arg(input)
-            .set_arg(output)
-            .set_arg(&in_dim_u32)
-            .set_arg(&out_dim_u32)
-            .set_global_work_size(global)
-            .set_local_work_size(LOCAL_WORK_SIZE)
-            .enqueue_nd_range(&self.queue)
-            .with_context(|| format!("GPU BF16 GEMV [{out_dim} x {in_dim}] failed"))?;
-        }
-        Ok(())
-    }
-
-    /// Fused three original BF16 projections; no weight quantization,
-    /// no skipped Q/K/V values, same per-row summation order as GEMV.
-    fn project_fused_qkv(
-        &self,
-        weights: (&GpuWeight, &GpuWeight, &GpuWeight),
-        buffers: (&Buffer<u8>, &Buffer<u8>, &Buffer<u8>, &Buffer<u8>),
-        shape: (usize, usize, usize),
-    ) -> Result<()> {
-        let (q, k, v) = weights;
-        let (input, outq, outk, outv) = buffers;
-        let (hidden, qrows, kvrows) = shape;
-        ensure!(
-            qrows >= kvrows && hidden > 0 && kvrows > 0,
-            "fused GPU QKV projection shape invalid"
-        );
-        #[cfg(feature = "hip-backend")]
-        ensure!(
-            q.hip.is_none() && k.hip.is_none() && v.hip.is_none(),
-            "fused OpenCL QKV cannot read HIP-only BF16 weights"
-        );
-        let (d, n, m) = (
-            u32::try_from(hidden)?,
-            u32::try_from(qrows)?,
-            u32::try_from(kvrows)?,
-        );
-        // SAFETY: All matrix dimensions were validated by original
-        // BF16 safetensors loader, NDRanges 128 lanes per output row.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.fused_qkv)
-                .set_arg(&q.data)
-                .set_arg(&k.data)
-                .set_arg(&v.data)
-                .set_arg(input)
-                .set_arg(outq)
-                .set_arg(outk)
-                .set_arg(outv)
-                .set_arg(&d)
-                .set_arg(&n)
-                .set_arg(&m)
-                .set_global_work_size(qrows * LOCAL_WORK_SIZE)
-                .set_local_work_size(LOCAL_WORK_SIZE)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU BF16 fused QKV projection failed")?;
-        }
-        Ok(())
-    }
-
-    fn project_fused_swiglu(
-        &self,
-        weights: (&GpuWeight, &GpuWeight),
-        input: &Buffer<u8>,
-        output: &Buffer<u8>,
-        hidden: usize,
-        intermediate: usize,
-    ) -> Result<()> {
-        let (gate, up) = weights;
-        #[cfg(feature = "hip-backend")]
-        ensure!(
-            gate.hip.is_none() && up.hip.is_none(),
-            "OpenCL fused SwiGLU cannot access HIP-owned BF16 weights"
-        );
-        let (d, m) = (u32::try_from(hidden)?, u32::try_from(intermediate)?);
-        // SAFETY: Original weights and the single-token BF16 normalized
-        // input remain allocated through enqueue; kernel exactly reduces
-        // 128 lanes per MLP output row and rounds each original stage.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.fused_swiglu)
-                .set_arg(&gate.data)
-                .set_arg(&up.data)
-                .set_arg(input)
-                .set_arg(output)
-                .set_arg(&d)
-                .set_arg(&m)
-                .set_global_work_size(intermediate * LOCAL_WORK_SIZE)
-                .set_local_work_size(LOCAL_WORK_SIZE)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU BF16 fused SwiGLU GEMV failed")?;
-        }
-        Ok(())
-    }
-
-    fn norm(
-        &self,
-        input: &Buffer<u8>,
-        weight: &GpuWeight,
-        output: &Buffer<u8>,
-        hidden: u32,
-        eps: f32,
-    ) -> Result<()> {
-        // SAFETY: Workgroup size is 128 as declared by kernel attribute.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.norm)
-                .set_arg(input)
-                .set_arg(&weight.data)
-                .set_arg(output)
-                .set_arg(&hidden)
-                .set_arg(&eps)
-                .set_global_work_size(LOCAL_WORK_SIZE)
-                .set_local_work_size(LOCAL_WORK_SIZE)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU BF16 RMSNorm failed")?;
-        }
-        Ok(())
-    }
-
-    fn rope(
-        &self,
-        input: &Buffer<u8>,
-        output: &Buffer<u8>,
-        heads: u32,
-        head_dim: u32,
-        position: u32,
-        rope: RopeKernelConfig,
-    ) -> Result<()> {
-        // SAFETY: OpenCL kernel checks work index bounds.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.rope)
-                .set_arg(input)
-                .set_arg(output)
-                .set_arg(&heads)
-                .set_arg(&head_dim)
-                .set_arg(&position)
-                .set_arg(&rope.theta)
-                .set_arg(&rope.llama3_scaling)
-                .set_arg(&rope.factor)
-                .set_arg(&rope.low_freq_factor)
-                .set_arg(&rope.high_freq_factor)
-                .set_arg(&rope.original_max_position)
-                .set_global_work_size((heads as usize) * (head_dim as usize))
-                .enqueue_nd_range(&self.queue)
-                .context("GPU BF16 RoPE failed")?;
-        }
-        Ok(())
-    }
-
-    fn add(
-        &self,
-        left: &Buffer<u8>,
-        right: &Buffer<u8>,
-        output: &Buffer<u8>,
-        count: usize,
-    ) -> Result<()> {
-        let count_u32 = u32::try_from(count)?;
-        // SAFETY: OpenCL kernel checks work index bounds.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.add)
-                .set_arg(left)
-                .set_arg(right)
-                .set_arg(output)
-                .set_arg(&count_u32)
-                .set_global_work_size(count)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU BF16 residual add failed")?;
-        }
-        Ok(())
-    }
-
-    fn swiglu(
-        &self,
-        gate: &Buffer<u8>,
-        up: &Buffer<u8>,
-        output: &Buffer<u8>,
-        count: usize,
-    ) -> Result<()> {
-        let count_u32 = u32::try_from(count)?;
-        // SAFETY: OpenCL kernel checks work index bounds.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.swiglu)
-                .set_arg(gate)
-                .set_arg(up)
-                .set_arg(output)
-                .set_arg(&count_u32)
-                .set_global_work_size(count)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU BF16 SwiGLU failed")?;
-        }
-        Ok(())
-    }
-
-    fn attention(
-        &self,
-        query: &Buffer<u8>,
-        kv: (&Buffer<u8>, &Buffer<u8>),
-        scores: &Buffer<f32>,
-        output: &Buffer<u8>,
-        tokens: u32,
-        geometry: AttentionGeometry,
-    ) -> Result<()> {
-        let (key, value) = kv;
-        let qheads = u32::try_from(geometry.query_heads)?;
-        let kvheads = u32::try_from(geometry.kv_heads)?;
-        let dim = u32::try_from(geometry.head_dim)?;
-        // SAFETY: Each shader uses valid matching memory and scalars; this
-        // queue is in-order, so PV sees the completed softmax scores.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.qk)
-                .set_arg(query)
-                .set_arg(key)
-                .set_arg(scores)
-                .set_arg(&tokens)
-                .set_arg(&qheads)
-                .set_arg(&kvheads)
-                .set_arg(&dim)
-                .set_global_work_size((tokens as usize) * (qheads as usize))
-                .enqueue_nd_range(&self.queue)
-                .context("GPU attention QK failed")?;
-            ExecuteKernel::new(&self.kernels.softmax)
-                .set_arg(scores)
-                .set_arg(&tokens)
-                .set_arg(&qheads)
-                .set_global_work_size(qheads as usize)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU attention softmax failed")?;
-            ExecuteKernel::new(&self.kernels.pv)
-                .set_arg(scores)
-                .set_arg(value)
-                .set_arg(output)
-                .set_arg(&tokens)
-                .set_arg(&qheads)
-                .set_arg(&kvheads)
-                .set_arg(&dim)
-                .set_global_work_size((qheads as usize) * (dim as usize))
-                .enqueue_nd_range(&self.queue)
-                .context("GPU attention PV failed")?;
-        }
-        Ok(())
-    }
-
-    /// Sparse real Q·K GPU kernel, reached ONLY after original CPU
-    /// micro-links/4-bit LSH priorities + BF16 K-box omitted-mass proof.
-    /// All nonselected token scores become -INFINITY; original GPU
-    /// softmax and BF16 PV operate on certified real selected K/V.
-    fn micro_sparse_scores(
-        &self,
-        query: &Buffer<u8>,
-        keys: &Buffer<u8>,
-        scores: &Buffer<f32>,
-        positions: &[usize],
-        geometry: AttentionGeometry,
-        total: usize,
-    ) -> Result<()> {
-        ensure!(
-            !positions.is_empty() && positions.len() < total,
-            "GPU sparse micro path has invalid selected K count"
-        );
-        ensure!(
-            positions.windows(2).all(|w| w[0] < w[1]) && positions.iter().all(|&pos| pos < total),
-            "GPU sparse micro selected token IDs not sorted/unique"
-        );
-        let count = geometry
-            .query_heads
-            .checked_mul(total)
-            .context("GPU micro score scratch count overflow")?;
-        let score_count = u32::try_from(count)?;
-        let selected_count = u32::try_from(positions.len())?;
-        let total_count = u32::try_from(total)?;
-        let heads = u32::try_from(geometry.query_heads)?;
-        let kvheads = u32::try_from(geometry.kv_heads)?;
-        let dim = u32::try_from(geometry.head_dim)?;
-        let ids = positions
-            .iter()
-            .copied()
-            .map(u32::try_from)
-            .collect::<std::result::Result<Vec<u32>, _>>()?;
-        let mut indices = self.alloc_indices(ids.len())?;
-        // SAFETY: GPU score bounds are checked; all OpenCL indices
-        // originate from the canonical original CPU region IDs and
-        // were checked against the committed K length above.
-        unsafe {
-            self.queue
-                .enqueue_write_buffer(&mut indices, CL_BLOCKING, 0, &ids, &[])
-                .context("upload certified GPU micro token positions")?;
-            ExecuteKernel::new(&self.kernels.micro_clear)
-                .set_arg(scores)
-                .set_arg(&score_count)
-                .set_global_work_size(count)
-                .enqueue_nd_range(&self.queue)
-                .context("initialize omitted GPU QK micro scores")?;
-            ExecuteKernel::new(&self.kernels.micro_sparse_qk)
-                .set_arg(query)
-                .set_arg(keys)
-                .set_arg(&indices)
-                .set_arg(scores)
-                .set_arg(&selected_count)
-                .set_arg(&total_count)
-                .set_arg(&heads)
-                .set_arg(&kvheads)
-                .set_arg(&dim)
-                .set_global_work_size(positions.len() * geometry.query_heads)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU real BF16 QK only for certified micro regions")?;
-        }
-        // Temporary indices buffer cannot be freed while QK still
-        // references it; finish the queue before returning.
-        self.queue
-            .finish()
-            .context("GPU micro sparse QK indices lifetime")?;
-        Ok(())
-    }
-
-    /// One physical GPU BF16 attention kernel with QK, softmax and PV
-    /// fused. Indices are RESIDENT in GPU device memory and may be
-    /// reused across consultations. No K/V host read or cold store
-    /// access can occur inside this operation.
-    fn micro_hot_attention(
-        &self,
-        buffers: MicroHotBuffers<'_>,
-        selection: (usize, usize),
-        geometry: AttentionGeometry,
-    ) -> Result<()> {
-        let (query, keys, values, indices, output) = buffers;
-        let (selected, total) = selection;
-        ensure!(
-            selected > 0 && selected <= 2048 && selected < total,
-            "GPU BF16 micro fused requires 1..2048 selected positions"
-        );
-        let (selected, total, heads, kv, dim) = (
-            u32::try_from(selected)?,
-            u32::try_from(total)?,
-            u32::try_from(geometry.query_heads)?,
-            u32::try_from(geometry.kv_heads)?,
-            u32::try_from(geometry.head_dim)?,
-        );
-        // SAFETY: Selected indices originate from the certified original
-        // CPU micro-region planner and are checked before device upload.
-        // In-order OpenCL queue keeps live K/V and index buffers valid.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.micro_hot_fused)
-                .set_arg(query)
-                .set_arg(keys)
-                .set_arg(values)
-                .set_arg(indices)
-                .set_arg(output)
-                .set_arg(&selected)
-                .set_arg(&total)
-                .set_arg(&heads)
-                .set_arg(&kv)
-                .set_arg(&dim)
-                .set_global_work_size(geometry.query_heads * LOCAL_WORK_SIZE)
-                .set_local_work_size(LOCAL_WORK_SIZE)
-                .enqueue_nd_range(&self.queue)
-                .context("certified micro BF16 GPU-resident fused attention")?;
-        }
-        Ok(())
-    }
-
-    /// Optional exact BF16 GPU QK + softmax + PV in one physical
-    /// OpenCL kernel. Unlike sparse micro attention, this computes
-    /// EVERY token's real QK and V and has zero omitted probability
-    /// mass. The original CPU ColdStore and four-bit index remain
-    /// intact; this replaces only the GPU computation of attention.
-    fn exact_hot_fused_attention(
-        &self,
-        query: &Buffer<u8>,
-        key: &Buffer<u8>,
-        value: &Buffer<u8>,
-        output: &Buffer<u8>,
-        tokens: usize,
-        geometry: AttentionGeometry,
-    ) -> Result<()> {
-        ensure!(
-            (1..=2048).contains(&tokens),
-            "fused exact GPU attention supports up to 2048 BF16 KV tokens"
-        );
-        let (n, q, k, d) = (
-            u32::try_from(tokens)?,
-            u32::try_from(geometry.query_heads)?,
-            u32::try_from(geometry.kv_heads)?,
-            u32::try_from(geometry.head_dim)?,
-        );
-        // SAFETY: All BF16 buffers have original verified shape and
-        // valid lengths for n tokens; in-order queue prevents a race
-        // with preceding BF16 K/V updates.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.exact_hot_fused)
-                .set_arg(query)
-                .set_arg(key)
-                .set_arg(value)
-                .set_arg(output)
-                .set_arg(&n)
-                .set_arg(&q)
-                .set_arg(&k)
-                .set_arg(&d)
-                .set_global_work_size(geometry.query_heads * LOCAL_WORK_SIZE)
-                .set_local_work_size(LOCAL_WORK_SIZE)
-                .enqueue_nd_range(&self.queue)
-                .context("exact BF16 GPU fused QK-softmax-PV kernel failed")?;
-        }
-        Ok(())
-    }
-
-    /// Refresh GPU-resident certified indices ONLY when the CPU metadata
-    /// planner's selected position set actually changes. Repeated
-    /// related queries avoid repeated host-to-GPU index uploads.
-    fn micro_update_cached_indices(
-        &self,
-        cache: &mut MicroSelectedDevice,
-        positions: &[usize],
-        total: usize,
-    ) -> Result<()> {
-        ensure!(
-            !positions.is_empty() && positions.len() <= 2048 && positions.len() <= total,
-            "GPU micro hot positions invalid"
-        );
-        ensure!(
-            positions.iter().all(|&pos| pos < total) && positions.windows(2).all(|w| w[0] < w[1]),
-            "GPU micro positions must be increasing original token IDs"
-        );
-        let mapped = positions
-            .iter()
-            .copied()
-            .map(u32::try_from)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if mapped == cache.last_positions {
-            cache.reuse_hits += 1;
-            return Ok(());
-        }
-        // SAFETY: Device buffer is allocated for the largest supported
-        // cached micro index set; blocking copy ensures host mapped data
-        // remains live during transfer and before fused QK kernel.
-        unsafe {
-            self.queue
-                .enqueue_write_buffer(&mut cache.indices, CL_BLOCKING, 0, &mapped, &[])
-                .context("GPU upload changed certified micro selection")?;
-        }
-        cache.last_positions = mapped;
-        cache.upload_calls += 1;
-        Ok(())
-    }
-
-    /// Read a small BF16 K/V token or Q-vector. Unlike GPU weights, these
-    /// are CPU routing metadata and canonical ColdStore payload only.
-    fn read_bf16_bytes(&self, source: &Buffer<u8>, count: usize) -> Result<Vec<u8>> {
-        let mut result = vec![0u8; count];
-        // SAFETY: Source OpenCL BF16 buffer has at least count bytes, and
-        // CL_BLOCKING keeps result allocated until copying completes.
-        unsafe {
-            self.queue
-                .enqueue_read_buffer(source, CL_BLOCKING, 0, &mut result, &[])
-                .context("GPU canonical LOD BF16 token readback")?;
-        }
-        Ok(result)
-    }
-
-    /// Actual GPU QK + original CPU LOD's 4-bit index/LSH, exact-mass
-    /// certificate, canonical verified BF16 ColdStore reads, and GPU PV.
-    /// BF16 K stays on GPU. Historical V is NEVER allocated in GPU KV.
-    fn attention_gpu_region(
-        &self,
-        ws: &mut Workspace,
-        layer_index: usize,
-        tokens: usize,
-        lod: &mut GpuRegionStore,
-    ) -> Result<()> {
-        let geometry = lod.geometry();
-        let qheads = u32::try_from(geometry.query_heads)?;
-        let kvheads = u32::try_from(geometry.kv_heads)?;
-        let dim = u32::try_from(geometry.head_dim)?;
-        let tokens_u32 = u32::try_from(tokens)?;
-        let stage = ws
-            .lod_stage
-            .as_mut()
-            .context("GPU canonical LOD stage missing")?;
-        let keys = &ws.kv[layer_index].key;
-        let score_items = tokens
-            .checked_mul(geometry.query_heads)
-            .context("GPU micro score count overflow")?;
-        let micro_selection = if lod.config().epsilon > 0.0 {
-            let query =
-                self.read_bf16_bytes(&ws.query_rope, geometry.query_elements() * BYTES_PER_BF16)?;
-            lod.plan_micro_regions(layer_index, &query)?
-        } else {
-            None
-        };
-        let sparse = micro_selection.is_some();
-        if let Some(ref chosen) = micro_selection {
-            // Sparse execution is authorized ONLY by a positive-epsilon
-            // certified upper bound; never by LSH or micro links alone.
-            self.micro_sparse_scores(
-                &ws.query_rope,
-                keys,
-                &ws.scores,
-                &chosen.positions,
-                geometry,
-                tokens,
-            )?;
-        } else {
-            // Original GPU QK kernel, exact-score mass certificate and
-            // verified ColdStore path remain the fallback whenever
-            // region bounds are ambiguous or epsilon is zero.
-            // SAFETY: Original OpenCL dense QK signature, original BF16 K.
-            unsafe {
-                ExecuteKernel::new(&self.kernels.qk)
-                    .set_arg(&ws.query_rope)
-                    .set_arg(keys)
-                    .set_arg(&ws.scores)
-                    .set_arg(&tokens_u32)
-                    .set_arg(&qheads)
-                    .set_arg(&kvheads)
-                    .set_arg(&dim)
-                    .set_global_work_size(tokens * geometry.query_heads)
-                    .enqueue_nd_range(&self.queue)
-                    .context("GPU canonical LOD full BF16 QK fallback")?;
-            }
-        }
-        let selection = if let Some(selection) = micro_selection {
-            selection
-        } else if lod.config().epsilon == 0.0 {
-            lod.select_dense_exact(layer_index)?
-        } else {
-            let mut real_scores = vec![0.0f32; score_items];
-            // SAFETY: GPU actual BF16 K scores are read back only
-            // when conservative region metadata cannot certify.
-            unsafe {
-                self.queue
-                    .enqueue_read_buffer(&ws.scores, CL_BLOCKING, 0, &mut real_scores, &[])
-                    .context("GPU canonical exact-score fallback readback")?;
-            }
-            let query =
-                self.read_bf16_bytes(&ws.query_rope, geometry.query_elements() * BYTES_PER_BF16)?;
-            lod.select(layer_index, &query, &real_scores)?
-        };
-        ensure!(
-            !selection.positions.is_empty(),
-            "LOD selected no value tokens"
-        );
-
-        // SAFETY: Same kernel as dense GPU: scores replaced with softmax
-        // probabilities for the ENTIRE exact K history.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.softmax)
-                .set_arg(&ws.scores)
-                .set_arg(&tokens_u32)
-                .set_arg(&qheads)
-                .set_global_work_size(geometry.query_heads)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU canonical LOD full QK softmax")?;
-        }
-        let mut masses = vec![1.0f32; geometry.query_heads];
-        if selection.omitted > 0 && !sparse {
-            // In the fully scored path, renormalize retained V using
-            // the true full-softmax mass. In the sparse path, dropped
-            // scores were initialized to -INF, and the same softmax
-            // already normalizes ONLY the certified retained set.
-            let mut probabilities = vec![0.0f32; score_items];
-            // SAFETY: All score probabilities produced by GPU are ready,
-            // and blocking read stores their exact post-softmax FP32 bits.
-            unsafe {
-                self.queue
-                    .enqueue_read_buffer(&ws.scores, CL_BLOCKING, 0, &mut probabilities, &[])
-                    .context("GPU LOD selected mass readback")?;
-            }
-            for (head, mass) in masses.iter_mut().enumerate() {
-                let start = head * tokens;
-                let full = probabilities[start..start + tokens]
-                    .iter()
-                    .map(|&p| p as f64)
-                    .sum::<f64>();
-                let kept = selection
-                    .positions
-                    .iter()
-                    .map(|&pos| f64::from(probabilities[start + pos]))
-                    .sum::<f64>();
-                ensure!(
-                    full.is_finite() && full > 0.0 && kept > 0.0 && kept.is_finite(),
-                    "GPU canonical LOD zero/nonfinite selected softmax mass"
-                );
-                *mass = (kept / full) as f32;
-            }
-        }
-        let zeros = vec![0.0f32; geometry.query_elements()];
-        // SAFETY: Blocking writes initialize accumulator before GPU stages.
-        // No V copies are held beyond the configured GPU staging buffer.
-        unsafe {
-            self.queue
-                .enqueue_write_buffer(&mut stage.accumulator, CL_BLOCKING, 0, &zeros, &[])
-                .context("initialize GPU canonical LOD PV accumulators")?;
-            self.queue
-                .enqueue_write_buffer(&mut stage.selected_mass, CL_BLOCKING, 0, &masses, &[])
-                .context("upload GPU canonical LOD retained masses")?;
-        }
-        for chunk in selection.positions.chunks(lod.stage_tokens()) {
-            let values = lod.read_values(layer_index, chunk)?;
-            let ids = chunk
-                .iter()
-                .copied()
-                .map(u32::try_from)
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            // SAFETY: Staging buffers are sized to stage_tokens and
-            // driver copies are blocking and ordered after the previous
-            // PV stage. BF16 payload comes from canonical ColdStore.
-            unsafe {
-                self.queue
-                    .enqueue_write_buffer(&mut stage.values, CL_BLOCKING, 0, &values, &[])
-                    .context("upload verified exact BF16 V from CPU ColdStore")?;
-                self.queue
-                    .enqueue_write_buffer(&mut stage.indices, CL_BLOCKING, 0, &ids, &[])
-                    .context("upload selected exact token coordinates")?;
-                ExecuteKernel::new(&self.kernels.lod_pv_stage)
-                    .set_arg(&ws.scores)
-                    .set_arg(&stage.values)
-                    .set_arg(&stage.indices)
-                    .set_arg(&stage.accumulator)
-                    .set_arg(&u32::try_from(chunk.len())?)
-                    .set_arg(&tokens_u32)
-                    .set_arg(&qheads)
-                    .set_arg(&kvheads)
-                    .set_arg(&dim)
-                    .set_global_work_size(geometry.query_elements())
-                    .enqueue_nd_range(&self.queue)
-                    .context("GPU canonical exact BF16 V PV stage")?;
-            }
-        }
-        // SAFETY: All PV stage kernels are in-order on this queue,
-        // final kernel converts the aggregate to BF16 once per output.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.lod_pv_finish)
-                .set_arg(&stage.accumulator)
-                .set_arg(&stage.selected_mass)
-                .set_arg(&ws.attention)
-                .set_arg(&qheads)
-                .set_arg(&dim)
-                .set_global_work_size(geometry.query_elements())
-                .enqueue_nd_range(&self.queue)
-                .context("GPU canonical LOD final BF16 attention")?;
-        }
-        Ok(())
-    }
-
-    fn argmax(&self, logits: &Buffer<u8>, result: &Buffer<u32>, vocab_size: u32) -> Result<()> {
-        // SAFETY: One workgroup reads the logits and writes one token ID.
-        unsafe {
-            ExecuteKernel::new(&self.kernels.argmax)
-                .set_arg(logits)
-                .set_arg(result)
-                .set_arg(&vocab_size)
-                .set_global_work_size(LOCAL_WORK_SIZE)
-                .set_local_work_size(LOCAL_WORK_SIZE)
-                .enqueue_nd_range(&self.queue)
-                .context("GPU BF16 argmax failed")?;
-        }
-        Ok(())
-    }
-}
-
-impl GpuWeight {
-    fn load(
-        engine: &GpuEngine,
-        checkpoint: &CheckpointShards,
-        name: &str,
-        expected_shape: &[usize],
-    ) -> Result<Self> {
-        checkpoint.with_tensor(name, |view| {
-            Self::load_view(engine, name, expected_shape, view)
-        })
-    }
-
-    fn load_view(
-        engine: &GpuEngine,
-        name: &str,
-        expected_shape: &[usize],
-        view: TensorView<'_>,
-    ) -> Result<Self> {
-        ensure!(view.dtype() == Dtype::BF16, "{name} is not BF16");
-        ensure!(
-            view.shape() == expected_shape,
-            "weight {name} shape mismatch: found {:?}, expected {:?}",
-            view.shape(),
-            expected_shape
-        );
-        ensure!(
-            view.data().len() <= engine.max_gpu_allocation as usize,
-            "weight {name} exceeds max GPU buffer allocation"
-        );
-        // Only linear projection matrices use native HIP. BF16 token
-        // embeddings remain full OpenCL arrays for direct index access,
-        // all RMSNorm scales remain OpenCL; no duplicate large weights.
-        #[cfg(feature = "hip-backend")]
-        if !name.ends_with("embed_tokens.weight")
-            && view.shape().len() == 2
-            && let Some(hip) = engine.hip.as_ref()
-        {
-            let hip_weight = hip
-                .upload_bf16(view.data())
-                .with_context(|| format!("native gfx1103 HIP weight {name}"))?;
-            return Ok(Self {
-                data: engine.alloc_u8(2)?,
-                hip: Some(hip_weight),
-            });
-        }
-        let mut data = engine
-            .alloc_u8(view.data().len())
-            .with_context(|| format!("GPU memory for weight {name}"))?;
-        engine
-            .transfer(&mut data, view.data())
-            .with_context(|| format!("GPU upload for weight {name}"))?;
-        Ok(Self {
-            data,
-            #[cfg(feature = "hip-backend")]
-            hip: None,
-        })
-    }
-}
-
-impl GpuLayer {
-    fn load(
-        engine: &GpuEngine,
-        checkpoint: &CheckpointShards,
-        index: usize,
-        spec: &ModelSpec,
-    ) -> Result<Self> {
-        let p = format!("model.layers.{index}");
-        let hidden = spec.hidden_size;
-        let middle = spec
-            .intermediate_size
-            .context("model missing intermediate_size")?;
-        let qsize = spec.attention.query_elements();
-        let kvsize = spec.attention.kv_elements_per_token();
-        let weight = |name: &str, shape: &[usize]| {
-            GpuWeight::load(engine, checkpoint, &format!("{p}.{name}"), shape)
-        };
-        Ok(Self {
-            input_norm: weight("input_layernorm.weight", &[hidden])?,
-            q: weight("self_attn.q_proj.weight", &[qsize, hidden])?,
-            k: weight("self_attn.k_proj.weight", &[kvsize, hidden])?,
-            v: weight("self_attn.v_proj.weight", &[kvsize, hidden])?,
-            o: weight("self_attn.o_proj.weight", &[hidden, qsize])?,
-            post_norm: weight("post_attention_layernorm.weight", &[hidden])?,
-            gate: weight("mlp.gate_proj.weight", &[middle, hidden])?,
-            up: weight("mlp.up_proj.weight", &[middle, hidden])?,
-            down: weight("mlp.down_proj.weight", &[hidden, middle])?,
-        })
-    }
-}
-
-impl Workspace {
-    fn new(
-        engine: &GpuEngine,
-        spec: &ModelSpec,
-        max_tokens: usize,
-        lod: Option<&GpuRegionConfig>,
-    ) -> Result<Self> {
-        let hidden = spec
-            .hidden_size
-            .checked_mul(BYTES_PER_BF16)
-            .context("hidden bytes overflow")?;
-        let qsize = spec
-            .attention
-            .query_elements()
-            .checked_mul(2)
-            .context("Q bytes overflow")?;
-        let kvsize = spec
-            .attention
-            .kv_elements_per_token()
-            .checked_mul(2)
-            .context("KV bytes overflow")?;
-        let mid = spec
-            .intermediate_size
-            .context("missing MLP width")?
-            .checked_mul(2)
-            .context("MLP bytes overflow")?;
-        let vocab = spec
-            .vocab_size
-            .context("missing vocabulary")?
-            .checked_mul(2)
-            .context("vocabulary bytes overflow")?;
-        let capacity = max_tokens
-            .checked_mul(kvsize)
-            .context("KV capacity overflow")?;
-        let score_count = max_tokens
-            .checked_mul(spec.attention.query_heads)
-            .context("attention scratch overflow")?;
-        let mut kv = Vec::with_capacity(spec.num_hidden_layers);
-        for _ in 0..spec.num_hidden_layers {
-            kv.push(GpuKv {
-                key: engine.alloc_u8(capacity)?,
-                value: if lod.is_some() {
-                    None
-                } else {
-                    Some(engine.alloc_u8(capacity)?)
-                },
-            });
-        }
-        let lod_stage = if let Some(config) = lod {
-            let stage_values = config
-                .stage_tokens
-                .checked_mul(kvsize)
-                .context("GPU BF16 value staging overflow")?;
-            Some(LodStage {
-                values: engine.alloc_u8(stage_values)?,
-                indices: engine.alloc_indices(config.stage_tokens)?,
-                accumulator: engine.alloc_scores(spec.attention.query_elements())?,
-                selected_mass: engine.alloc_scores(spec.attention.query_heads)?,
-            })
-        } else {
-            None
-        };
-        Ok(Self {
-            hidden0: engine.alloc_u8(hidden)?,
-            hidden1: engine.alloc_u8(hidden)?,
-            norm1: engine.alloc_u8(hidden)?,
-            norm2: engine.alloc_u8(hidden)?,
-            query: engine.alloc_u8(qsize)?,
-            query_rope: engine.alloc_u8(qsize)?,
-            key: engine.alloc_u8(kvsize)?,
-            key_rope: engine.alloc_u8(kvsize)?,
-            value: engine.alloc_u8(kvsize)?,
-            attention: engine.alloc_u8(qsize)?,
-            attn_o: engine.alloc_u8(hidden)?,
-            gate: engine.alloc_u8(mid)?,
-            up: engine.alloc_u8(mid)?,
-            activation: engine.alloc_u8(mid)?,
-            down: engine.alloc_u8(hidden)?,
-            logits: engine.alloc_u8(vocab)?,
-            token_id: engine.alloc_result()?,
-            scores: engine.alloc_scores(score_count)?,
-            kv,
-            lod_stage,
-        })
-    }
-}
-
 /// Resident: full BF16 weights uploaded once to GPU global memory.
 /// Stream: upload one layer's weights at a time, lower GPU memory budget
 /// but potentially much slower. Embedding and LM head remain resident.
@@ -1691,7 +201,7 @@ fn digest_file(path: &Path) -> Result<String> {
     Ok(digest_bytes(&bytes))
 }
 
-pub struct OpenClLlm {
+pub struct GpuLlm {
     engine: GpuEngine,
     spec: ModelSpec,
     eos_token_ids: Vec<u32>,
@@ -1746,7 +256,7 @@ pub struct OpenClLlm {
     )>,
 }
 
-impl OpenClLlm {
+impl GpuLlm {
     /// Preserve original dense OpenCL inference exactly as the default.
     pub fn load(model_dir: impl AsRef<Path>, max_tokens: usize, mode: WeightMode) -> Result<Self> {
         Self::load_internal(model_dir, max_tokens, mode, None, false)
@@ -1982,7 +492,7 @@ impl OpenClLlm {
             backend: if self.native_hip_enabled() {
                 "native-hip"
             } else {
-                "opencl"
+                "gpu"
             }
             .into(),
             hardware_digest: sha256(&serde_json::to_vec(&hardware)?),
@@ -2242,7 +752,7 @@ impl OpenClLlm {
             #[cfg(feature = "hip-backend")]
             ensure!(
                 self.engine.hip.is_none(),
-                "cannot fuse OpenCL prefill with HIP-owned BF16 matrices"
+                "cannot fuse GPU prefill with HIP-owned BF16 matrices"
             );
         }
         self.prefill_fusion_mask = mask;
@@ -2361,7 +871,7 @@ impl OpenClLlm {
         #[cfg(feature = "hip-backend")]
         ensure!(
             !enabled || self.engine.hip.is_none(),
-            "OpenCL fused decode incompatible with separate HIP-owned matrices"
+            "GPU fused decode incompatible with separate HIP-owned matrices"
         );
         self.engine
             .fused_decode_enabled
@@ -2378,7 +888,7 @@ impl OpenClLlm {
         #[cfg(feature = "hip-backend")]
         ensure!(
             !enabled || self.engine.hip.is_none(),
-            "experimental fused exact OpenCL attention not supported with HIP-owned KV"
+            "experimental fused exact GPU attention not supported with HIP-owned KV"
         );
         self.engine
             .exact_hot_attention_enabled
@@ -2626,7 +1136,7 @@ impl OpenClLlm {
                             self.engine
                                 .queue
                                 .enqueue_read_buffer(&weight.data, CL_BLOCKING, offset, sample, &[])
-                                .with_context(|| format!("OpenCL BF16 readback {name} {offset}"))?;
+                                .with_context(|| format!("GPU BF16 readback {name} {offset}"))?;
                         }
                     }
                     #[cfg(not(feature = "hip-backend"))]
@@ -2637,7 +1147,7 @@ impl OpenClLlm {
                             self.engine
                                 .queue
                                 .enqueue_read_buffer(&weight.data, CL_BLOCKING, offset, sample, &[])
-                                .with_context(|| format!("OpenCL BF16 readback {name} {offset}"))?;
+                                .with_context(|| format!("GPU BF16 readback {name} {offset}"))?;
                         }
                     }
                     original_hash.update(original);
@@ -3784,7 +2294,7 @@ impl OpenClLlm {
     ) -> Result<Option<GpuStep>> {
         ensure!(
             !self.poisoned,
-            "OpenCL LLM state was poisoned by an earlier failed forward pass"
+            "GPU LLM state was poisoned by an earlier failed forward pass"
         );
         ensure!(
             self.position < self.max_tokens,
@@ -3878,7 +2388,7 @@ impl OpenClLlm {
         prompt_ids: &[u32],
         max_new_tokens: usize,
         capture_logits: bool,
-    ) -> Result<OpenClGeneration> {
+    ) -> Result<GpuGeneration> {
         self.generate_cancellable(
             prompt_ids,
             max_new_tokens,
@@ -3895,7 +2405,7 @@ impl OpenClLlm {
         max_new_tokens: usize,
         capture_logits: bool,
         cancel: &AtomicBool,
-    ) -> Result<OpenClGeneration> {
+    ) -> Result<GpuGeneration> {
         ensure!(!prompt_ids.is_empty(), "GPU prompt IDs empty");
         ensure!(
             (1..=512).contains(&max_new_tokens),
@@ -4018,7 +2528,7 @@ impl OpenClLlm {
             return Err(error.context("failed to commit exact GPU BF16 cold KV"));
         }
         generation_result?;
-        Ok(OpenClGeneration {
+        Ok(GpuGeneration {
             prompt_tokens: prompt_ids.len(),
             tokens: generated,
             steps,
@@ -4027,7 +2537,7 @@ impl OpenClLlm {
             total_seconds: started.elapsed().as_secs_f64(),
             device_name: self.engine.name.clone(),
             gpu_weight_payload_bytes: self.gpu_weight_payload_bytes,
-            runtime: "Rust_OpenCL_Full_BF16_no_LibTorch".to_owned(),
+            runtime: "Rust_GPU_Full_BF16_no_LibTorch".to_owned(),
             model_weights_dtype: "BF16".to_owned(),
             gpu_compute: "FP32_accumulators_BF16_intermediate_storage".to_owned(),
             hip_bf16_gemm_active: self.native_hip_enabled(),
@@ -4096,7 +2606,7 @@ impl OpenClLlm {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct OpenClGeneration {
+pub struct GpuGeneration {
     pub prompt_tokens: usize,
     pub tokens: Vec<u32>,
     pub steps: Vec<GpuStep>,
@@ -4190,7 +2700,7 @@ mod tests {
 
         #[test]
         #[ignore = "requires a physical accelerator and compatible checkpoint"]
-        fn gpu_actual_opencl_program_compiles_llama3_rope_kernels() {
+        fn gpu_actual_program_compiles_llama3_rope_kernels() {
             use super::*;
             let engine = GpuEngine::new(false).unwrap();
             assert!(!engine.name.is_empty());
@@ -4271,7 +2781,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires actual physical OpenCL GPU and a local configured-model BF16 checkpoint"]
+        #[ignore = "requires actual physical GPU and a local configured-model BF16 checkpoint"]
         fn gpu_actual_full_minicpm5_hola_and_independent_session_reset() {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
@@ -4283,7 +2793,7 @@ mod tests {
             let prompt = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
             let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 15);
-            let mut model = OpenClLlm::load(model, 64, WeightMode::Resident)
+            let mut model = GpuLlm::load(model, 64, WeightMode::Resident)
                 .expect("physical GPU must run the full 24-layer model");
             let first = model.generate(&ids, 2, false).unwrap();
             assert_eq!(first.tokens, vec![61973, 61]);
@@ -4307,7 +2817,7 @@ mod tests {
             let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
             let encoded = tokenizer.encode(text, false).unwrap();
             let ids = encoded.get_ids().to_vec();
-            let mut dense = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
+            let mut dense = GpuLlm::load(&model, 64, WeightMode::Resident).unwrap();
             let dense_result = dense.generate(&ids, 16, true).unwrap();
             let dense_ids = dense_result.tokens.clone();
             // Free dense weights before allocating another >2 GiB GPU runtime.
@@ -4318,7 +2828,7 @@ mod tests {
                 cold_directory: None,
             };
             let mut lod =
-                OpenClLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, cfg).unwrap();
+                GpuLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, cfg).unwrap();
             let lod_result = lod.generate(&ids, 16, true).unwrap();
             assert_eq!(dense_ids, lod_result.tokens);
             assert!(lod_result.gpu_region_components_active);
@@ -4352,11 +2862,11 @@ mod tests {
             let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
             let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 15);
-            let mut old = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
+            let mut old = GpuLlm::load(&model, 64, WeightMode::Resident).unwrap();
             let old_gen = old.generate(&ids, 16, true).unwrap();
             let old_kv = old.logical_kv_sha256().unwrap();
             drop(old);
-            let mut fast = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
+            let mut fast = GpuLlm::load(&model, 64, WeightMode::Resident).unwrap();
             fast.set_batch_prefill_tokens(Some(64)).unwrap();
             let new_gen = fast.generate(&ids, 16, true).unwrap();
             let new_kv = fast.logical_kv_sha256().unwrap();
@@ -4393,13 +2903,13 @@ mod tests {
                 cold_directory: None,
             };
             let mut old =
-                OpenClLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, config.clone())
+                GpuLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, config.clone())
                     .unwrap();
             let old_gen = old.generate(&ids, 16, true).unwrap();
             let old_pages = old.gpu_region_stats().unwrap().physical_cold_store_pages;
             drop(old);
             let mut fast =
-                OpenClLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, config).unwrap();
+                GpuLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, config).unwrap();
             fast.set_batch_prefill_tokens(Some(64)).unwrap();
             let new_gen = fast.generate(&ids, 16, true).unwrap();
             let new_stats = new_gen.gpu_region_stats.as_ref().unwrap();
@@ -4445,11 +2955,11 @@ mod tests {
             );
             let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut old = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            let mut old = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             let old_gen = old.generate(&ids, 2, true).unwrap();
             let old_sha = old.logical_kv_sha256().unwrap();
             drop(old);
-            let mut fast = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            let mut fast = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             fast.set_batch_prefill_tokens(Some(128)).unwrap();
             let dense_gen = fast.generate(&ids, 2, true).unwrap();
             let fast_sha = fast.logical_kv_sha256().unwrap();
@@ -4475,7 +2985,7 @@ mod tests {
                 cold_directory: None,
             };
             let mut lod =
-                OpenClLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, cfg).unwrap();
+                GpuLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, cfg).unwrap();
             lod.set_batch_prefill_tokens(Some(128)).unwrap();
             let lod_gen = lod.generate(&ids, 2, true).unwrap();
             assert_eq!(lod_gen.tokens, dense_gen.tokens);
@@ -4499,7 +3009,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires actual AMD OpenCL GPU; compares 375-token prefill and 16 logits"]
+        #[ignore = "requires actual AMD GPU; compares 375-token prefill and 16 logits"]
         fn gpu_actual_exact_hot_v_and_weight_reuse_matches_original_gpu_dense() {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
@@ -4514,13 +3024,13 @@ mod tests {
             );
             let ids = tok.encode(prompt, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut dense = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            let mut dense = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             dense.set_batch_prefill_tokens(Some(128)).unwrap();
             let original = dense.generate(&ids, 16, true).unwrap();
             let original_sha = dense.logical_kv_sha256().unwrap();
             drop(dense);
 
-            let mut lod = OpenClLlm::load_with_gpu_region(
+            let mut lod = GpuLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
@@ -4577,7 +3087,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "actual AMD Radeon needed: validates optimized OpenCL 375+16"]
+        #[ignore = "actual AMD Radeon needed: validates optimized GPU 375+16"]
         fn gpu_actual_reuse8_hot_v_unroll4_bit_exact_vs_dense_reference() {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
@@ -4595,12 +3105,12 @@ mod tests {
             );
             let ids = tok.encode(text, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut reference = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            let mut reference = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             reference.set_batch_prefill_tokens(Some(128)).unwrap();
             let expected = reference.generate(&ids, 16, true).unwrap();
             let sha = reference.logical_kv_sha256().unwrap();
             drop(reference);
-            let mut optimized = OpenClLlm::load_with_gpu_region(
+            let mut optimized = GpuLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
@@ -4660,7 +3170,7 @@ mod tests {
             let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
             let make = || {
-                let mut gpu = OpenClLlm::load_with_gpu_region(
+                let mut gpu = GpuLlm::load_with_gpu_region(
                     &model,
                     512,
                     WeightMode::Resident,
@@ -4677,7 +3187,7 @@ mod tests {
                 gpu.set_exact_hot_v_tokens(512).unwrap();
                 gpu
             };
-            let compute_hash = |gpu: &mut OpenClLlm| {
+            let compute_hash = |gpu: &mut GpuLlm| {
                 let token_bytes = gpu.spec.attention.kv_elements_per_token() * 2;
                 let positions = (0..gpu.position).collect::<Vec<_>>();
                 let mut hasher = Sha256::new();
@@ -4741,7 +3251,7 @@ mod tests {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-            let mut gpu = OpenClLlm::load_with_gpu_region(
+            let mut gpu = GpuLlm::load_with_gpu_region(
                 &model,
                 64,
                 WeightMode::Resident,
@@ -4765,7 +3275,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires physical AMD OpenCL GPU and original configured-model BF16 checkpoint"]
+        #[ignore = "requires physical AMD GPU and original configured-model BF16 checkpoint"]
         fn gpu_actual_fused_qkv_and_swiglu_identical_logits_and_exact_kv() {
             use super::*;
             use sha2::{Digest, Sha256};
@@ -4785,7 +3295,7 @@ mod tests {
             let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
             let create = |fused: bool| {
-                let mut gpu = OpenClLlm::load_with_gpu_region(
+                let mut gpu = GpuLlm::load_with_gpu_region(
                     &model,
                     512,
                     WeightMode::Resident,
@@ -4804,7 +3314,7 @@ mod tests {
                 gpu.set_decode_fused_kernels(fused).unwrap();
                 gpu
             };
-            let kv_hash = |gpu: &mut OpenClLlm| {
+            let kv_hash = |gpu: &mut GpuLlm| {
                 let mut sha = Sha256::new();
                 let bytes = gpu.spec.attention.kv_elements_per_token() * 2;
                 let all = (0..gpu.position).collect::<Vec<_>>();
@@ -4850,7 +3360,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires physical AMD OpenCL GPU, real shaders, original CPU ColdStore"]
+        #[ignore = "requires physical AMD GPU, real shaders, original CPU ColdStore"]
         fn gpu_actual_micro_regions_skip_real_qk_and_cold_v_with_error_bound() {
             use super::*;
             let geom = AttentionGeometry::new(2, 1, 4).unwrap();
@@ -5266,7 +3776,7 @@ mod tests {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-            let mut gpu = OpenClLlm::load_with_gpu_region(
+            let mut gpu = GpuLlm::load_with_gpu_region(
                 &model,
                 64,
                 WeightMode::Resident,
@@ -5317,7 +3827,7 @@ mod tests {
             assert_eq!(ids.len(), 375);
 
             // ORIGINAL GPU dense BF16 reference, no metadata/no approximation.
-            let mut reference = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            let mut reference = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             reference.set_batch_prefill_tokens(Some(128)).unwrap();
             reference.set_prefill_weight_reuse_tokens(8).unwrap();
             reference.set_decode_unroll4(true).unwrap();
@@ -5334,7 +3844,7 @@ mod tests {
                 cold_directory: None,
             };
             let mut runtime =
-                OpenClLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, config).unwrap();
+                GpuLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, config).unwrap();
             runtime.set_batch_prefill_tokens(Some(128)).unwrap();
             runtime.set_prefill_weight_reuse_tokens(8).unwrap();
             runtime.set_decode_unroll4(true).unwrap();
@@ -5448,7 +3958,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires Radeon OpenCL GPU: full BF16 QK-softmax-PV parity against original GPU kernels"]
+        #[ignore = "requires Radeon GPU: full BF16 QK-softmax-PV parity against original GPU kernels"]
         fn gpu_actual_exact_hot_fused_attention_parity_for_many_context_lengths() {
             use super::*;
             let engine = GpuEngine::new(false).unwrap();
@@ -5556,7 +4066,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "physical AMD OpenCL GPU and full configured-model BF16 checkpoint required"]
+        #[ignore = "physical AMD GPU and full configured-model BF16 checkpoint required"]
         fn gpu_actual_fused_exact_lod_375_logits_and_cold_kv_parity() {
             use super::*;
             use sha2::{Digest, Sha256};
@@ -5576,7 +4086,7 @@ mod tests {
             let prompt = tokenizer.encode(input, false).unwrap().get_ids().to_vec();
             assert_eq!(prompt.len(), 375);
             let build = |enabled: bool| {
-                let mut runtime = OpenClLlm::load_with_gpu_region(
+                let mut runtime = GpuLlm::load_with_gpu_region(
                     &model,
                     512,
                     WeightMode::Resident,
@@ -5596,7 +4106,7 @@ mod tests {
                 runtime.set_exact_hot_fused_attention(enabled).unwrap();
                 runtime
             };
-            let digest = |runtime: &mut OpenClLlm| {
+            let digest = |runtime: &mut GpuLlm| {
                 let mut hash = Sha256::new();
                 let size = runtime.position * runtime.spec.attention.kv_elements_per_token() * 2;
                 let positions = (0..runtime.position).collect::<Vec<_>>();
@@ -5678,7 +4188,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires physical AMD Phoenix OpenCL and original configured-model BF16 checkpoint"]
+        #[ignore = "requires physical AMD Phoenix GPU and original configured-model BF16 checkpoint"]
         fn gpu_actual_fused_exact_dense_15_full_logits_and_kv_sha() {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
@@ -5691,7 +4201,7 @@ mod tests {
             let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 15);
             let build = |fused: bool| {
-                let mut m = OpenClLlm::load(&model, 64, WeightMode::Resident).unwrap();
+                let mut m = GpuLlm::load(&model, 64, WeightMode::Resident).unwrap();
                 m.set_batch_prefill_tokens(Some(64)).unwrap();
                 m.set_prefill_weight_reuse_tokens(8).unwrap();
                 m.set_decode_unroll4(true).unwrap();
@@ -5744,7 +4254,7 @@ mod tests {
             );
             let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut gpu = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            let mut gpu = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             gpu.set_batch_prefill_tokens(Some(128)).unwrap();
             let strategies = [
                 (8usize, false),
@@ -5825,7 +4335,7 @@ mod tests {
             );
             let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut gpu = OpenClLlm::load(&model, 512, WeightMode::Resident).unwrap();
+            let mut gpu = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             gpu.set_batch_prefill_tokens(Some(128)).unwrap();
             gpu.set_prefill_weight_reuse_tokens(8).unwrap();
             gpu.set_prefill_register_unrolled(false).unwrap();
@@ -5899,7 +4409,7 @@ mod tests {
                 cold_directory: None,
             };
             let mut gpu =
-                OpenClLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, cfg).unwrap();
+                GpuLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, cfg).unwrap();
             gpu.set_batch_prefill_tokens(Some(128)).unwrap();
             gpu.set_prefill_weight_reuse_tokens(8).unwrap();
             gpu.set_exact_hot_v_tokens(512).unwrap();
@@ -5908,7 +4418,7 @@ mod tests {
             gpu.set_decode_fused_kernels(true).unwrap();
             gpu.set_exact_hot_fused_attention(true).unwrap();
             gpu.set_verified_gpu_prompt_replay(512).unwrap();
-            let full_hash = |runtime: &mut OpenClLlm| {
+            let full_hash = |runtime: &mut GpuLlm| {
                 let mut sha = Sha256::new();
                 let count = runtime.position;
                 let bytes = count * runtime.spec.attention.kv_elements_per_token() * 2;
@@ -6048,7 +4558,7 @@ mod tests {
             );
             assert!(ids_b.len() + 16 <= 512);
 
-            let mut gpu = OpenClLlm::load_with_gpu_region(
+            let mut gpu = GpuLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
@@ -6068,7 +4578,7 @@ mod tests {
             gpu.set_exact_hot_fused_attention(true).unwrap();
             gpu.set_verified_gpu_prompt_replay(512).unwrap();
             gpu.set_verified_gpu_prefix_replay(true).unwrap();
-            let hash = |runtime: &mut OpenClLlm| {
+            let hash = |runtime: &mut GpuLlm| {
                 let mut digest = Sha256::new();
                 let total = runtime.position;
                 let token_bytes = runtime.spec.attention.kv_elements_per_token() * 2;
@@ -6159,7 +4669,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires physical AMD OpenCL device: original BF16 fused batch projection parity"]
+        #[ignore = "requires physical AMD GPU device: original BF16 fused batch projection parity"]
         fn gpu_actual_prefill_fused_qkv_and_swiglu_match_original_128_lanes() {
             use super::*;
             let engine = GpuEngine::new(false).unwrap();
@@ -6325,7 +4835,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires real AMD OpenCL GPU and original configured-model checkpoint; full BF16 parity"]
+        #[ignore = "requires real AMD GPU and original configured-model checkpoint; full BF16 parity"]
         fn gpu_actual_fused_prefill_qkv_swiglu_375_full_logits_and_cold_kv_sha() {
             use super::*;
             use sha2::{Digest, Sha256};
@@ -6344,7 +4854,7 @@ mod tests {
             );
             let ids = tok.encode(chat, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut gpu = OpenClLlm::load_with_gpu_region(
+            let mut gpu = GpuLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
@@ -6362,7 +4872,7 @@ mod tests {
             gpu.set_decode_unroll4(true).unwrap();
             gpu.set_decode_fused_kernels(true).unwrap();
             gpu.set_exact_hot_fused_attention(true).unwrap();
-            let hash_cold = |engine: &mut OpenClLlm| {
+            let hash_cold = |engine: &mut GpuLlm| {
                 let n = engine.position;
                 let token_bytes = engine.spec.attention.kv_elements_per_token() * 2;
                 let locations = (0..n).collect::<Vec<_>>();
@@ -6501,7 +5011,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires physical AMD Radeon OpenCL and configured-model BF16 for batch size parity and speed"]
+        #[ignore = "requires physical AMD Radeon GPU and configured-model BF16 for batch size parity and speed"]
         fn gpu_actual_prefill_64_128_192_256_bit_exact_full_logits_kv_and_speed() {
             use super::*;
             use sha2::{Digest, Sha256};
@@ -6521,7 +5031,7 @@ mod tests {
             );
             let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut model = OpenClLlm::load_with_gpu_region(
+            let mut model = GpuLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
@@ -6539,7 +5049,7 @@ mod tests {
             model.set_decode_unroll4(true).unwrap();
             model.set_decode_fused_kernels(true).unwrap();
             model.set_exact_hot_fused_attention(true).unwrap();
-            let sha = |m: &mut OpenClLlm| {
+            let sha = |m: &mut GpuLlm| {
                 let mut h = Sha256::new();
                 h.update(b"M-SLIM-GPU-prefill-tile-physical-KV-v1");
                 let token_bytes = m.spec.attention.kv_elements_per_token() * 2;
@@ -6647,7 +5157,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "requires a physical OpenCL GPU and configured-model BF16 checkpoint"]
+        #[ignore = "requires a physical GPU and configured-model BF16 checkpoint"]
         fn gpu_actual_persistent_coldstore_restores_without_token_replay() {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
@@ -6660,7 +5170,7 @@ mod tests {
             };
             let ids = [128000_u32, 9906, 11, 1917, 0, 128001, 128006, 882];
             {
-                let mut source = OpenClLlm::load_with_gpu_region(
+                let mut source = GpuLlm::load_with_gpu_region(
                     &model,
                     32,
                     WeightMode::Resident,
@@ -6674,7 +5184,7 @@ mod tests {
             }
 
             let mut restored =
-                OpenClLlm::load_with_gpu_region(&model, 32, WeightMode::Resident, config).unwrap();
+                GpuLlm::load_with_gpu_region(&model, 32, WeightMode::Resident, config).unwrap();
             restored.set_exact_hot_v_tokens(32).unwrap();
             let receipt = restored.restore_session(&ids).unwrap();
             assert_eq!(receipt.tokens, ids.len());
@@ -6688,10 +5198,10 @@ mod tests {
     }
 
     #[test]
-    fn opencl_llm_bf16_kernel_compilation_only() {
+    fn gpu_llm_bf16_kernel_compilation_only() {
         // Offline build checks are regular cargo tests. Actual GPU runtime
         // and model execution are explicitly ignored and separately measured.
-        assert!(include_str!("../assets/opencl_llm.cl").contains("llm_gemv_bf16"));
-        assert!(include_str!("../assets/opencl_llm.cl").contains("llm_argmax"));
+        assert!(include_str!("../../assets/gpu_llm.cl").contains("llm_gemv_bf16"));
+        assert!(include_str!("../../assets/gpu_llm.cl").contains("llm_argmax"));
     }
 }

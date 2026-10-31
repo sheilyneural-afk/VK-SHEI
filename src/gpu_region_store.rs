@@ -333,7 +333,7 @@ impl GpuRegionStore {
     }
 
     /// Validation-only SHA-256 of the complete logical BF16 K/V state.
-    /// The serialization is identical to `OpenClLlm::logical_kv_sha256`:
+    /// The serialization is identical to `GpuLlm::logical_kv_sha256`:
     /// K then V, layer-major, with every tensor ordered
     /// `[1, kv_heads, tokens, head_dim]`.
     pub fn logical_kv_sha256(&mut self) -> Result<String> {

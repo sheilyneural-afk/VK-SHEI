@@ -1,0 +1,47 @@
+{
+  "note": "Preguntas escritas a mano en lenguaje natural, sin copiar las frases del texto. 'marker' es un fragmento literal de la pasada que contiene la respuesta; la(s) pagina(s) gold son las que contienen ese marker.",
+  "sets": [
+    {"doc": "docs/ADAPTIVE_CALIBRATION.md", "questions": [
+      {"q": "¿Cuántos perfiles y observaciones como máximo admite el estimador de tiempos?", "marker": "32 perfiles y 4096 observaciones"},
+      {"q": "¿Qué ocurre si el proceso muere de golpe en mitad de una activación?", "marker": "SIGKILL, apagado o fallo de disco"},
+      {"q": "¿Qué parámetros del prefill puede modificar un perfil?", "marker": "Solo `batch_tokens`"},
+      {"q": "¿La memoria que reporta el informe es la de la tarjeta gráfica?", "marker": "no es VRAM"},
+      {"q": "¿Cómo activo el perfil calibrado desde la línea de comandos?", "marker": "CLI local: `--prefill-profile"},
+      {"q": "¿Por qué hay que releer los decimales conservando todos sus bits?", "marker": "float_roundtrip"},
+      {"q": "¿Qué pasa si trabajo con una longitud de contexto que nunca se midió?", "marker": "no extrapola"},
+      {"q": "¿La autorización del operador prueba quién es realmente?", "marker": "firma criptográfica ni acredita"},
+      {"q": "¿Ordenar los candidatos con el predictor reduce el tiempo de la campaña?", "marker": "mide todos los candidatos"},
+      {"q": "¿Qué comandos lanzo para pasar el linter con avisos como errores?", "marker": "cargo-local.sh clippy"},
+      {"q": "¿Se pueden aprovechar las muestras de la fase en sombra para la prueba final?", "marker": "No se reciclan las"},
+      {"q": "¿Con qué valor arranca la covarianza del estimador?", "marker": "diagonal con valor 1000"}
+    ]},
+    {"doc": "docs/VALIDATION.md", "questions": [
+      {"q": "¿Cuáles son las cuatro configuraciones que enfrenta la matriz de paridad?", "marker": "cpu-exact-coldstore"},
+      {"q": "¿Cuál fue la mayor diferencia de logits entre procesador y gráfica?", "marker": "0.234375"},
+      {"q": "¿Qué condiciones hacen falta para dar por buena la igualdad en un mismo backend?", "marker": "exact_same_backend_passed"},
+      {"q": "¿Qué hay que evaluar antes de permitir descartar entradas de la caché de forma aproximada?", "marker": "Para autorizar"},
+      {"q": "¿Durante cuánto tiempo se guardan los recibos antiguos?", "marker": "conserva únicamente la matriz más reciente"},
+      {"q": "¿La matriz de paridad vuelve a cargar el estado guardado?", "marker": "no restaura ese snapshot"},
+      {"q": "¿Qué autoridad debe declarar la instantánea física de la ruta GPU exacta?", "marker": "canonical-bf16-coldstore"},
+      {"q": "¿En qué orden se recorren las dimensiones al serializar para el hash lógico?", "marker": "layer-major, head, token, dim"},
+      {"q": "¿Qué le falta al recibo para enlazarlo con una revisión concreta del código?", "marker": "identidad de commit"},
+      {"q": "¿Se aceptaría un backend que no sea determinista?", "marker": "no la aprobaría"}
+    ]},
+    {"doc": "README.md", "questions": [
+      {"q": "¿Por qué el gateway descarta al worker cuando elige una ruta?", "marker": "Con esos tres formatos distintos"},
+      {"q": "¿Qué peticiones HTTP no acepta el servicio?", "marker": "rechaza `stream: true`"},
+      {"q": "¿Qué variable de entorno necesita el gateway para autenticar?", "marker": "MSLIM_GATEWAY_TOKEN"},
+      {"q": "¿Qué archivo compila realmente como el binario del servidor?", "marker": "autobins = false"},
+      {"q": "¿Qué capacidades obligatorias debe ofrecer un proveedor externo?", "marker": "`snapshot_kv` y `restore_kv`"},
+      {"q": "¿Cuál es la opción de compilación activada por defecto?", "marker": "es la feature por defecto"},
+      {"q": "¿Hay ejecutables instalados ahora mismo en el despliegue local?", "marker": "no contiene los binarios instalados"},
+      {"q": "¿Cómo guarda ColdStore las páginas de la caché y cómo protege su integridad?", "marker": "append-only"},
+      {"q": "¿Qué verifica una restauración de sesión antes de aceptarse?", "marker": "Un restore comprueba modelo"},
+      {"q": "¿Qué implica que un estado sea elegible para activación revisada?", "marker": "no significa que exista una release"},
+      {"q": "¿Qué parte reinicia el script de pruebas de punta a punta?", "marker": "reinicia solo el worker"},
+      {"q": "¿Cuántos tokens de respuesta admite cada petición?", "marker": "entre 1 y 512 tokens"},
+      {"q": "¿La matriz da por certificado el perfil de producción local?", "marker": "No certifica automáticamente el perfil"},
+      {"q": "¿Transmitir pesos por flujo es lo mismo que enviar la respuesta por SSE?", "marker": "no streaming SSE"}
+    ]}
+  ]
+}

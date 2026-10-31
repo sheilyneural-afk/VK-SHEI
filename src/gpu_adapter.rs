@@ -12,15 +12,15 @@ use serde_json::{Value, json};
 
 use crate::gpu_region_store::GpuRegionConfig;
 use crate::model_bundle::ModelBundle;
-use crate::opencl_llm::{OpenClLlm, WeightMode};
+use crate::gpu_llm::{GpuLlm, WeightMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OpenClKvMode {
+enum GpuKvMode {
     Dense,
     ExactColdStore,
 }
 
-impl OpenClKvMode {
+impl GpuKvMode {
     fn parse(config: &Value) -> Result<Self> {
         match config
             .get("mslim_kv_mode")
@@ -43,16 +43,16 @@ impl OpenClKvMode {
     }
 }
 
-pub struct OpenClModelAdapter {
+pub struct GpuModelAdapter {
     capabilities: AdapterCapabilities,
     model_dir: Option<PathBuf>,
-    runtime: Option<OpenClLlm>,
+    runtime: Option<GpuLlm>,
     last_logits: Option<Vec<f32>>,
     cached_prompt: Vec<u32>,
-    kv_mode: OpenClKvMode,
+    kv_mode: GpuKvMode,
 }
 
-impl Default for OpenClModelAdapter {
+impl Default for GpuModelAdapter {
     fn default() -> Self {
         Self {
             capabilities: AdapterCapabilities {
@@ -67,18 +67,18 @@ impl Default for OpenClModelAdapter {
             runtime: None,
             last_logits: None,
             cached_prompt: Vec::new(),
-            kv_mode: OpenClKvMode::ExactColdStore,
+            kv_mode: GpuKvMode::ExactColdStore,
         }
     }
 }
 
-impl OpenClModelAdapter {
-    pub(crate) fn calibration_runtime_mut(&mut self) -> Result<&mut OpenClLlm> {
+impl GpuModelAdapter {
+    pub(crate) fn calibration_runtime_mut(&mut self) -> Result<&mut GpuLlm> {
         self.runtime.as_mut().context("accelerator is not loaded")
     }
 }
 
-impl ModelAdapter for OpenClModelAdapter {
+impl ModelAdapter for GpuModelAdapter {
     fn capabilities(&self) -> &AdapterCapabilities {
         &self.capabilities
     }
@@ -109,14 +109,14 @@ impl ModelAdapter for OpenClModelAdapter {
             .and_then(Value::as_u64)
             .context("model configuration must declare a context limit")?
             as usize;
-        let kv_mode = OpenClKvMode::parse(config)?;
+        let kv_mode = GpuKvMode::parse(config)?;
         let epsilon = config
             .get("mslim_lod_epsilon")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         ensure!(
-            kv_mode == OpenClKvMode::ExactColdStore || epsilon == 0.0,
-            "dense OpenCL mode cannot declare a positive LOD epsilon"
+            kv_mode == GpuKvMode::ExactColdStore || epsilon == 0.0,
+            "dense GPU mode cannot declare a positive LOD epsilon"
         );
         let stage_tokens = config
             .get("mslim_stage_tokens")
@@ -132,7 +132,7 @@ impl ModelAdapter for OpenClModelAdapter {
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
-        let cold_directory = if kv_mode == OpenClKvMode::ExactColdStore
+        let cold_directory = if kv_mode == GpuKvMode::ExactColdStore
             && let Some(root) = cold_directory_root
         {
             fs::create_dir_all(&root).context("create canonical ColdStore root")?;
@@ -162,10 +162,10 @@ impl ModelAdapter for OpenClModelAdapter {
             other => anyhow::bail!("unsupported mslim_weight_mode: {other}"),
         };
         let mut runtime = match kv_mode {
-            OpenClKvMode::Dense => OpenClLlm::load(model_dir, max_tokens, mode)
+            GpuKvMode::Dense => GpuLlm::load(model_dir, max_tokens, mode)
                 .context("load dense accelerator model adapter")?,
-            OpenClKvMode::ExactColdStore => {
-                OpenClLlm::load_with_gpu_region(model_dir, max_tokens, mode, lod)
+            GpuKvMode::ExactColdStore => {
+                GpuLlm::load_with_gpu_region(model_dir, max_tokens, mode, lod)
                     .context("load exact canonical accelerator model adapter")?
             }
         };
@@ -185,7 +185,7 @@ impl ModelAdapter for OpenClModelAdapter {
             runtime.set_prefill_weight_reuse_tokens(count)?;
         }
 
-        if kv_mode == OpenClKvMode::ExactColdStore {
+        if kv_mode == GpuKvMode::ExactColdStore {
             let hot_tokens = config
                 .get("mslim_hot_v_tokens")
                 .and_then(Value::as_u64)
@@ -250,7 +250,7 @@ impl ModelAdapter for OpenClModelAdapter {
                 .context("mslim_prefill_profile must be a path")?;
             runtime.apply_promoted_prefill_profile(Path::new(path))?;
         }
-        self.capabilities.supports_kv_restore = kv_mode == OpenClKvMode::Dense || physical_restore;
+        self.capabilities.supports_kv_restore = kv_mode == GpuKvMode::Dense || physical_restore;
         self.kv_mode = kv_mode;
         self.model_dir = Some(model_dir.to_owned());
         self.runtime = Some(runtime);
@@ -347,10 +347,10 @@ impl ModelAdapter for OpenClModelAdapter {
         let runtime = self
             .runtime
             .as_mut()
-            .context("OpenCL adapter is not loaded")?;
+            .context("GPU adapter is not loaded")?;
         Ok(Some(json!({
             "schema": "mslim.logical-kv-integrity/v1",
-            "authority": if self.kv_mode == OpenClKvMode::Dense {
+            "authority": if self.kv_mode == GpuKvMode::Dense {
                 "dense-device-bf16-kv"
             } else {
                 "canonical-bf16-coldstore"
@@ -364,11 +364,11 @@ impl ModelAdapter for OpenClModelAdapter {
     }
 
     fn snapshot_kv(&self) -> Result<Vec<u8>> {
-        if self.kv_mode == OpenClKvMode::Dense {
+        if self.kv_mode == GpuKvMode::Dense {
             let runtime = self
                 .runtime
                 .as_ref()
-                .context("OpenCL adapter is not loaded")?;
+                .context("GPU adapter is not loaded")?;
             return serde_json::to_vec(&json!({
                 "schema": "mslim.runtime.replay-snapshot/v1",
                 "model_dir": self.model_dir,
@@ -376,16 +376,16 @@ impl ModelAdapter for OpenClModelAdapter {
                 "authority": "logical-token-replay",
                 "kv_mode": self.kv_mode.label(),
             }))
-            .context("serialize dense OpenCL logical replay snapshot");
+            .context("serialize dense GPU logical replay snapshot");
         }
         ensure!(
             self.capabilities.supports_kv_restore,
-            "physical OpenCL K/V snapshots require mslim_cold_directory"
+            "physical GPU K/V snapshots require mslim_cold_directory"
         );
         let runtime = self
             .runtime
             .as_ref()
-            .context("OpenCL adapter is not loaded")?;
+            .context("GPU adapter is not loaded")?;
         serde_json::to_vec(&json!({
             "schema": "mslim.runtime.physical-coldstore-snapshot/v1",
             "model_dir": self.model_dir,
@@ -394,42 +394,42 @@ impl ModelAdapter for OpenClModelAdapter {
             "authority": "canonical-bf16-coldstore",
             "kv_mode": self.kv_mode.label(),
         }))
-        .context("serialize physical OpenCL ColdStore snapshot handle")
+        .context("serialize physical GPU ColdStore snapshot handle")
     }
 
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
-        if self.kv_mode == OpenClKvMode::Dense {
+        if self.kv_mode == GpuKvMode::Dense {
             let envelope: Value = serde_json::from_slice(snapshot)
-                .context("parse dense OpenCL logical replay snapshot")?;
+                .context("parse dense GPU logical replay snapshot")?;
             ensure!(
                 envelope.get("schema").and_then(Value::as_str)
                     == Some("mslim.runtime.replay-snapshot/v1"),
-                "unsupported dense OpenCL snapshot schema"
+                "unsupported dense GPU snapshot schema"
             );
             let expected_dir = envelope
                 .get("model_dir")
                 .and_then(Value::as_str)
-                .context("dense OpenCL snapshot missing model identity")?;
+                .context("dense GPU snapshot missing model identity")?;
             ensure!(
                 self.model_dir.as_deref() == Some(Path::new(expected_dir)),
-                "dense OpenCL snapshot model identity mismatch"
+                "dense GPU snapshot model identity mismatch"
             );
             let tokens = envelope
                 .get("tokens")
                 .and_then(Value::as_array)
-                .context("dense OpenCL snapshot missing token history")?
+                .context("dense GPU snapshot missing token history")?
                 .iter()
                 .map(|value| {
                     value
                         .as_u64()
                         .and_then(|token| u32::try_from(token).ok())
-                        .context("invalid token in dense OpenCL snapshot")
+                        .context("invalid token in dense GPU snapshot")
                 })
                 .collect::<Result<Vec<_>>>()?;
             let runtime = self
                 .runtime
                 .as_mut()
-                .context("OpenCL adapter is not loaded")?;
+                .context("GPU adapter is not loaded")?;
             runtime.reset_session()?;
             for &token in &tokens {
                 runtime.forward_token(token, false)?;
@@ -440,14 +440,14 @@ impl ModelAdapter for OpenClModelAdapter {
         }
         ensure!(
             self.capabilities.supports_kv_restore,
-            "physical OpenCL K/V restore requires mslim_cold_directory"
+            "physical GPU K/V restore requires mslim_cold_directory"
         );
         let envelope: Value = serde_json::from_slice(snapshot)
-            .context("parse physical OpenCL ColdStore snapshot handle")?;
+            .context("parse physical GPU ColdStore snapshot handle")?;
         ensure!(
             envelope.get("schema").and_then(Value::as_str)
                 == Some("mslim.runtime.physical-coldstore-snapshot/v1"),
-            "unsupported physical OpenCL snapshot schema"
+            "unsupported physical GPU snapshot schema"
         );
         ensure!(
             envelope.get("authority").and_then(Value::as_str) == Some("canonical-bf16-coldstore"),
@@ -456,42 +456,48 @@ impl ModelAdapter for OpenClModelAdapter {
         let expected_dir = envelope
             .get("model_dir")
             .and_then(Value::as_str)
-            .context("physical OpenCL snapshot missing model identity")?;
+            .context("physical GPU snapshot missing model identity")?;
         let current_dir = self
             .model_dir
             .as_deref()
-            .context("OpenCL adapter is not loaded")?;
+            .context("GPU adapter is not loaded")?;
         ensure!(
             Path::new(expected_dir) == current_dir,
-            "physical OpenCL snapshot model identity mismatch"
+            "physical GPU snapshot model identity mismatch"
         );
         let tokens = envelope
             .get("tokens")
             .and_then(Value::as_array)
-            .context("physical OpenCL snapshot missing token history")?
+            .context("physical GPU snapshot missing token history")?
             .iter()
             .map(|value| {
                 value
                     .as_u64()
                     .and_then(|token| u32::try_from(token).ok())
-                    .context("invalid token in physical OpenCL snapshot")
+                    .context("invalid token in physical GPU snapshot")
             })
             .collect::<Result<Vec<_>>>()?;
         let cold_directory = envelope
             .get("cold_directory")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .context("physical OpenCL snapshot missing ColdStore namespace")?;
+            .context("physical GPU snapshot missing ColdStore namespace")?;
         let runtime = self
             .runtime
             .as_mut()
-            .context("OpenCL adapter is not loaded")?;
-        runtime.reset_session_at(Some(cold_directory))?;
-        if !tokens.is_empty() {
+            .context("GPU adapter is not loaded")?;
+        if tokens.is_empty() {
+            // Empty snapshot: start in a fresh namespace so a previously-filled
+            // pages-exact.kv in cold_directory is not mistaken for the restored
+            // state. The calibration loop restores this snapshot many times in
+            // the same directory; each run must see an empty ColdStore.
+            runtime.reset_session()?;
+        } else {
+            runtime.reset_session_at(Some(cold_directory))?;
             let receipt = runtime.restore_session(&tokens)?;
             ensure!(
                 receipt.tokens == tokens.len(),
-                "physical OpenCL restore returned an incomplete prefix"
+                "physical GPU restore returned an incomplete prefix"
             );
         }
         self.last_logits = None;
@@ -506,7 +512,7 @@ mod tests {
 
     #[test]
     fn unloaded_adapter_does_not_claim_physical_restore() {
-        let adapter = OpenClModelAdapter::default();
+        let adapter = GpuModelAdapter::default();
         assert!(!adapter.capabilities().supports_kv_restore);
         assert!(!adapter.capabilities().supports_streaming);
         assert!(adapter.snapshot_kv().is_err());
@@ -515,13 +521,13 @@ mod tests {
     #[test]
     fn kv_mode_is_explicit_and_fail_closed() {
         assert_eq!(
-            OpenClKvMode::parse(&json!({"mslim_kv_mode": "dense"})).unwrap(),
-            OpenClKvMode::Dense
+            GpuKvMode::parse(&json!({"mslim_kv_mode": "dense"})).unwrap(),
+            GpuKvMode::Dense
         );
         assert_eq!(
-            OpenClKvMode::parse(&json!({"mslim_kv_mode": "exact-coldstore"})).unwrap(),
-            OpenClKvMode::ExactColdStore
+            GpuKvMode::parse(&json!({"mslim_kv_mode": "exact-coldstore"})).unwrap(),
+            GpuKvMode::ExactColdStore
         );
-        assert!(OpenClKvMode::parse(&json!({"mslim_kv_mode": "automatic"})).is_err());
+        assert!(GpuKvMode::parse(&json!({"mslim_kv_mode": "automatic"})).is_err());
     }
 }

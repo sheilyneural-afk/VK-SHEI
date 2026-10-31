@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use mslim::{
     ipc_transport::{read_request, write_response},
-    opencl_adapter::OpenClModelAdapter,
+    gpu_adapter::GpuModelAdapter,
     runtime_host::RuntimeHost,
 };
 use mslim_adapter_api::{ModelAdapter, ModelAdapterSession, ModelIdentity, RuntimeSession};
@@ -74,7 +74,7 @@ fn load(
     config["mslim_cold_directory"] = Value::String(cold_dir.display().to_string());
     config["mslim_hot_v_tokens"] = 512u64.into();
     config["mslim_decode_unroll4"] = Value::Bool(true);
-    let mut adapter = OpenClModelAdapter::default();
+    let mut adapter = GpuModelAdapter::default();
     adapter.load(model, &config)?;
     let identity = ModelIdentity {
         model_digest: digest(&model.join("config.json"))?,
