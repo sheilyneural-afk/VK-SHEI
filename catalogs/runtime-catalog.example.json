@@ -1,0 +1,12 @@
+{
+  "schema": "kvslim.runtime.catalog/v1",
+  "catalog_id": "official-runtime-sources",
+  "entries": [
+    {"id":"opencl","source_page":"https://www.khronos.org/opencl/","artifact_url":null,"sha256":null,"requires_system_driver":true},
+    {"id":"vulkan-spirv","source_page":"https://www.khronos.org/vulkan/","artifact_url":null,"sha256":null,"requires_system_driver":true},
+    {"id":"cuda","source_page":"https://developer.nvidia.com/cuda-toolkit","artifact_url":null,"sha256":null,"requires_system_driver":true},
+    {"id":"rocm","source_page":"https://rocm.docs.amd.com/","artifact_url":null,"sha256":null,"requires_system_driver":true},
+    {"id":"metal","source_page":"https://developer.apple.com/metal/","artifact_url":null,"sha256":null,"requires_system_driver":true},
+    {"id":"llvm-cpu","source_page":"https://llvm.org/","artifact_url":null,"sha256":null,"requires_system_driver":false}
+  ]
+}
