@@ -108,8 +108,11 @@ La tarea no se considera terminada hasta que:
 - Host IPC ejecutable: implementado.
 - E2E IPC determinista: implementado y pasa (`IPC_E2E_OK`).
 - Generación real a través del proveedor externo: validada; el modo residente alcanza ~3,4–3,7 tok/s de decode en la máquina de prueba.
-- Enrutamiento completo del worker HTTP hacia el host externo: pendiente.
-- SessionStore/SessionCoordinator conectado al worker HTTP: pendiente.
-- Snapshot/restore físico tras reinicio desde el worker HTTP: pendiente.
+- Enrutamiento HTTP completo al host externo: implementado; con `--runtime-manifest` el worker hace Probe/OpenSession y no carga un motor local como sustituto.
+- Continuidad física del worker: implementada mediante `SnapshotKv`/`RestoreKv`/`Release` por IPC y `SessionStore` persistente, con validación de identidad, recibo y generación.
+- El proveedor externo mantiene el modelo residente y acepta reconexiones secuenciales del worker; un reinicio HTTP no obliga a recompilar ni a recargar el runtime externo.
+- `SessionCoordinator`: sigue disponible como biblioteca; el worker HTTP usa directamente `SessionStore` en el hilo propietario de la sesión externa para evitar duplicar coordinadores.
+- Caché persistente de binarios compilados: implementada y validada en `opencl_llm`.
+- Reinicio HTTP + restore con un proveedor real: falta ejecutar la prueba E2E completa en la máquina objetivo.
 - Benchmark comparativo completo entre backends: pendiente.
-- Arranque rápido con caché persistente de binarios OpenCL: pendiente.
+- `production-gate`: pendiente hasta que pasen el E2E real de reinicio y el benchmark reproducible.

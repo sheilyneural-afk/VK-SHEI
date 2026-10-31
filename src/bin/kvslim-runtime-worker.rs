@@ -13,13 +13,22 @@ use axum::{
     routing::{get, post},
 };
 use kvslim::{
-    continuity_contract::ContinuityRequest,
-    generic_runtime::{IPC_SCHEMA, IpcOperation, IpcRequest, RuntimeManifest},
+    continuity_contract::{
+        CACHE_RECEIPT_SCHEMA, CacheMode as ContinuityCacheMode, CacheReceipt as ContinuityReceipt,
+        ContinuityOperation, ContinuityRequest,
+    },
+    generic_runtime::{
+        Capability, IPC_SCHEMA, IpcOperation, IpcRequest, IpcResponse, RuntimeManifest,
+    },
     gpu_canonical_lod::CanonicalGpuLodConfig,
     inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
     ipc_transport::IpcClient,
     model_config::ModelSpec,
-    opencl_llm::{OpenClGeneration, OpenClLlm, WeightMode},
+    opencl_llm::{OpenClLlm, WeightMode},
+    session_store::SessionStore,
+};
+use kvslim_adapter_api::{
+    CacheReceipt as RuntimeCacheReceipt, GenerationRequest, GenerationResult,
 };
 use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
@@ -86,8 +95,8 @@ struct ChatRequest {
     #[serde(default)]
     user: Option<String>,
     /// Optional provider-neutral continuity capability. The worker validates it
-    /// fail-closed; physical resume/snapshot is only enabled once a backend
-    /// implementation is attached.
+    /// fail-closed; physical resume/snapshot is routed only through an attached
+    /// external runtime session.
     #[serde(default)]
     continuity: Option<ContinuityRequest>,
     #[serde(flatten)]
@@ -246,16 +255,27 @@ fn render_prompt(
     Ok(rendered)
 }
 
-#[derive(Clone)]
+enum GpuOperation {
+    Generate {
+        messages: Vec<ChatMessage>,
+        max_tokens: usize,
+        enable_thinking: bool,
+    },
+    Continuity(ContinuityRequest),
+}
+
 struct GpuJob {
-    messages: Vec<ChatMessage>,
-    max_tokens: usize,
-    enable_thinking: bool,
+    operation: GpuOperation,
 }
 
 struct GpuAnswer {
     text: String,
-    generation: OpenClGeneration,
+    prompt_tokens: usize,
+    tokens: Vec<u32>,
+    prefill_seconds: Option<f64>,
+    total_seconds: Option<f64>,
+    diagnostics: Value,
+    continuity: Option<Value>,
 }
 
 struct GpuExecutor {
@@ -271,11 +291,15 @@ impl InferenceExecutor for GpuExecutor {
     type Error = anyhow::Error;
 
     fn execute(&mut self, request: GpuJob, cancel: &AtomicBool) -> Result<GpuAnswer> {
-        let text = render_prompt(
-            &self.chat_template,
-            &request.messages,
-            request.enable_thinking,
-        )?;
+        let GpuOperation::Generate {
+            messages,
+            max_tokens,
+            enable_thinking,
+        } = request.operation
+        else {
+            bail!("physical continuity requires an external runtime session");
+        };
+        let text = render_prompt(&self.chat_template, &messages, enable_thinking)?;
         let input = self
             .tokenizer
             .encode(text.as_str(), false)
@@ -290,16 +314,345 @@ impl InferenceExecutor for GpuExecutor {
         }
         let generated = self
             .model
-            .generate_cancellable(ids, request.max_tokens, false, cancel)?;
+            .generate_cancellable(ids, max_tokens, false, cancel)?;
         self.last_prompt_ids = ids.to_vec();
         let output = self
             .tokenizer
             .decode(&generated.tokens, true)
             .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
+        let diagnostics = serde_json::to_value(&generated)?;
         Ok(GpuAnswer {
             text: output,
-            generation: generated,
+            prompt_tokens: generated.prompt_tokens,
+            tokens: generated.tokens,
+            prefill_seconds: Some(generated.prefill_seconds),
+            total_seconds: Some(generated.total_seconds),
+            diagnostics,
+            continuity: None,
         })
+    }
+}
+
+struct ExternalExecutor {
+    client: IpcClient,
+    tokenizer: Tokenizer,
+    chat_template: String,
+    session_id: String,
+    request_sequence: u64,
+    session_store: SessionStore,
+}
+
+impl ExternalExecutor {
+    fn next_request_id(&mut self, operation: &str) -> String {
+        self.request_sequence = self.request_sequence.wrapping_add(1);
+        format!("worker-{operation}-{}", self.request_sequence)
+    }
+}
+
+impl ExternalExecutor {
+    fn send(
+        &mut self,
+        label: &str,
+        operation: IpcOperation,
+        payload: Value,
+    ) -> Result<IpcResponse> {
+        let request_id = self.next_request_id(label);
+        let response = self.client.request(&IpcRequest {
+            schema: IPC_SCHEMA.into(),
+            operation,
+            request_id,
+            session_id: Some(self.session_id.clone()),
+            tensors: Vec::new(),
+            payload,
+        })?;
+        ensure!(
+            response.ok,
+            "external runtime {label} rejected: {}",
+            response.error.unwrap_or_else(|| "unknown error".into())
+        );
+        ensure!(
+            response.session_id.as_deref() == Some(self.session_id.as_str()),
+            "external runtime {label} returned an unexpected session_id"
+        );
+        Ok(response)
+    }
+
+    fn continuity_answer(payload: Value) -> GpuAnswer {
+        GpuAnswer {
+            text: String::new(),
+            prompt_tokens: 0,
+            tokens: Vec::new(),
+            prefill_seconds: None,
+            total_seconds: None,
+            diagnostics: Value::Null,
+            continuity: Some(payload),
+        }
+    }
+
+    fn execute_continuity(
+        &mut self,
+        request: ContinuityRequest,
+        cancel: &AtomicBool,
+    ) -> Result<GpuAnswer> {
+        ensure!(
+            !cancel.load(std::sync::atomic::Ordering::Acquire),
+            "continuity operation cancelled before dispatch"
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("continuity clock")?
+            .as_secs();
+        request
+            .validate_at(now)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        match request.operation {
+            ContinuityOperation::Snapshot => {
+                let response = self.send("snapshot", IpcOperation::SnapshotKv, Value::Null)?;
+                let snapshot_bytes: Vec<u8> = serde_json::from_value(
+                    response
+                        .payload
+                        .get("snapshot_bytes")
+                        .cloned()
+                        .context("snapshot response has no bytes")?,
+                )?;
+                let runtime_receipt: RuntimeCacheReceipt = serde_json::from_value(
+                    response
+                        .payload
+                        .get("receipt")
+                        .cloned()
+                        .context("snapshot response has no receipt")?,
+                )?;
+                ensure!(
+                    runtime_receipt.model_digest == request.model_digest
+                        && runtime_receipt.tokenizer_digest == request.tokenizer_digest,
+                    "external snapshot identity does not match continuity request"
+                );
+                let previous = self
+                    .session_store
+                    .latest(&request.opaque_session_handle)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                let previous_generation = previous.as_ref().map(|g| g.generation).unwrap_or(0);
+                ensure!(
+                    previous.is_none() && request.expected_generation == 0
+                        || previous.is_some() && previous_generation == request.expected_generation,
+                    "snapshot generation does not match SessionStore"
+                );
+                let resulting_generation = if previous.is_none() {
+                    0
+                } else {
+                    previous_generation + 1
+                };
+                let state = json!({
+                    "snapshot_bytes": snapshot_bytes,
+                    "runtime_receipt": runtime_receipt,
+                    "model_digest": request.model_digest,
+                    "tokenizer_digest": request.tokenizer_digest,
+                    "prefix_digest": request.prefix_digest,
+                });
+                self.session_store
+                    .prepare_and_commit(&request.opaque_session_handle, resulting_generation, state)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                let receipt = ContinuityReceipt {
+                    schema: CACHE_RECEIPT_SCHEMA.into(),
+                    operation: ContinuityOperation::Snapshot,
+                    opaque_session_handle: request.opaque_session_handle.clone(),
+                    previous_generation: request.expected_generation,
+                    resulting_generation,
+                    model_digest: request.model_digest.clone(),
+                    tokenizer_digest: request.tokenizer_digest.clone(),
+                    prefix_digest: request.prefix_digest.clone(),
+                    policy_digest: request.policy_digest.clone(),
+                    reused_tokens: 0,
+                    restored_bytes: 0,
+                    mode: ContinuityCacheMode::Exact,
+                };
+                let receipt_hash = receipt
+                    .canonical_hash_for_at(&request, now)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                Ok(Self::continuity_answer(json!({
+                    "operation": "snapshot",
+                    "receipt": receipt,
+                    "receipt_hash": receipt_hash,
+                })))
+            }
+            ContinuityOperation::Resume => {
+                let generation = self
+                    .session_store
+                    .latest(&request.opaque_session_handle)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                    .context("continuity session not found")?;
+                ensure!(
+                    generation.generation == request.expected_generation,
+                    "resume generation does not match SessionStore"
+                );
+                ensure!(
+                    generation.state.get("model_digest").and_then(Value::as_str)
+                        == Some(request.model_digest.as_str())
+                        && generation
+                            .state
+                            .get("tokenizer_digest")
+                            .and_then(Value::as_str)
+                            == Some(request.tokenizer_digest.as_str())
+                        && generation
+                            .state
+                            .get("prefix_digest")
+                            .and_then(Value::as_str)
+                            == Some(request.prefix_digest.as_str()),
+                    "continuity identity or prefix mismatch"
+                );
+                let snapshot_bytes: Vec<u8> = serde_json::from_value(
+                    generation
+                        .state
+                        .get("snapshot_bytes")
+                        .cloned()
+                        .context("stored continuity snapshot has no bytes")?,
+                )?;
+                let runtime_receipt: RuntimeCacheReceipt = serde_json::from_value(
+                    generation
+                        .state
+                        .get("runtime_receipt")
+                        .cloned()
+                        .context("stored continuity snapshot has no runtime receipt")?,
+                )?;
+                ensure!(
+                    snapshot_bytes.len() as u64 <= request.bounds.max_restored_bytes,
+                    "stored snapshot exceeds restore bound"
+                );
+                self.send(
+                    "restore",
+                    IpcOperation::RestoreKv,
+                    json!({
+                        "snapshot_bytes": snapshot_bytes,
+                        "receipt": runtime_receipt,
+                    }),
+                )?;
+                let receipt = ContinuityReceipt {
+                    schema: CACHE_RECEIPT_SCHEMA.into(),
+                    operation: ContinuityOperation::Resume,
+                    opaque_session_handle: request.opaque_session_handle.clone(),
+                    previous_generation: request.expected_generation,
+                    resulting_generation: generation.generation,
+                    model_digest: request.model_digest.clone(),
+                    tokenizer_digest: request.tokenizer_digest.clone(),
+                    prefix_digest: request.prefix_digest.clone(),
+                    policy_digest: request.policy_digest.clone(),
+                    reused_tokens: runtime_receipt
+                        .reused_tokens
+                        .min(request.bounds.max_reused_tokens),
+                    restored_bytes: snapshot_bytes.len() as u64,
+                    mode: ContinuityCacheMode::Exact,
+                };
+                let receipt_hash = receipt
+                    .canonical_hash_for_at(&request, now)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                Ok(Self::continuity_answer(json!({
+                    "operation": "resume",
+                    "receipt": receipt,
+                    "receipt_hash": receipt_hash,
+                })))
+            }
+            ContinuityOperation::Release => {
+                self.send("release", IpcOperation::Release, Value::Null)?;
+                let receipt = ContinuityReceipt {
+                    schema: CACHE_RECEIPT_SCHEMA.into(),
+                    operation: ContinuityOperation::Release,
+                    opaque_session_handle: request.opaque_session_handle.clone(),
+                    previous_generation: request.expected_generation,
+                    resulting_generation: request.expected_generation,
+                    model_digest: request.model_digest.clone(),
+                    tokenizer_digest: request.tokenizer_digest.clone(),
+                    prefix_digest: request.prefix_digest.clone(),
+                    policy_digest: request.policy_digest.clone(),
+                    reused_tokens: 0,
+                    restored_bytes: 0,
+                    mode: ContinuityCacheMode::Exact,
+                };
+                let receipt_hash = receipt
+                    .canonical_hash_for_at(&request, now)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                Ok(Self::continuity_answer(json!({
+                    "operation": "release",
+                    "receipt": receipt,
+                    "receipt_hash": receipt_hash,
+                })))
+            }
+        }
+    }
+}
+
+impl InferenceExecutor for ExternalExecutor {
+    type Request = GpuJob;
+    type Response = GpuAnswer;
+    type Error = anyhow::Error;
+
+    fn execute(&mut self, request: GpuJob, cancel: &AtomicBool) -> Result<GpuAnswer> {
+        match request.operation {
+            GpuOperation::Continuity(request) => self.execute_continuity(request, cancel),
+            GpuOperation::Generate {
+                messages,
+                max_tokens,
+                enable_thinking,
+            } => {
+                ensure!(
+                    !cancel.load(std::sync::atomic::Ordering::Acquire),
+                    "external runtime generation cancelled before dispatch"
+                );
+                let text = render_prompt(&self.chat_template, &messages, enable_thinking)?;
+                let input = self
+                    .tokenizer
+                    .encode(text.as_str(), false)
+                    .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+                let generation_request = GenerationRequest {
+                    input_tokens: input.get_ids().to_vec(),
+                    max_new_tokens: max_tokens,
+                    temperature: None,
+                    seed: None,
+                };
+                let response = self.send(
+                    "generate",
+                    IpcOperation::Prefill,
+                    serde_json::to_value(&generation_request)?,
+                )?;
+                let generation: GenerationResult = serde_json::from_value(response.payload)
+                    .context("decode external runtime generation result")?;
+                ensure!(
+                    !cancel.load(std::sync::atomic::Ordering::Acquire),
+                    "external runtime generation cancelled after dispatch"
+                );
+                let output = self
+                    .tokenizer
+                    .decode(&generation.output_tokens, true)
+                    .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
+                let diagnostics = serde_json::to_value(&generation)?;
+                Ok(GpuAnswer {
+                    text: output,
+                    prompt_tokens: generation.prompt_tokens,
+                    tokens: generation.output_tokens,
+                    prefill_seconds: generation.stats.prefill_seconds,
+                    total_seconds: generation.stats.total_seconds,
+                    diagnostics,
+                    continuity: None,
+                })
+            }
+        }
+    }
+}
+
+enum RuntimeExecutor {
+    Local(GpuExecutor),
+    External(ExternalExecutor),
+}
+
+impl InferenceExecutor for RuntimeExecutor {
+    type Request = GpuJob;
+    type Response = GpuAnswer;
+    type Error = anyhow::Error;
+
+    fn execute(&mut self, request: GpuJob, cancel: &AtomicBool) -> Result<GpuAnswer> {
+        match self {
+            Self::Local(executor) => executor.execute(request, cancel),
+            Self::External(executor) => executor.execute(request, cancel),
+        }
     }
 }
 
@@ -352,7 +705,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "load_seconds":state.load_seconds,
         "model_weights":"original_BF16_unchanged",
         "neural_arithmetic":"measured-device-kernels-with-declared-precision",
-        "full_llm_layers_computed_on_gpu":true,
+        "full_llm_layers_computed_on_gpu": if state.runtime_manifest.is_some() { Value::Null } else { json!(true) },
         "kvslim_lod_active":state.lod_epsilon.is_some(),
         "canonical_cpu_kvslim_lod_components_active":state.lod_epsilon.is_some(),
         "canonical_cpu_lod_modules":["adaptive_extent::ParallelContextAxis",
@@ -470,8 +823,12 @@ async fn chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let max_tokens = validate(&request, &state.model_id)?;
-    if let Some(continuity) = request.continuity.as_ref() {
+    let max_tokens = if request.continuity.is_some() {
+        0
+    } else {
+        validate(&request, &state.model_id)?
+    };
+    let operation = if let Some(continuity) = request.continuity.clone() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| invalid(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -479,18 +836,17 @@ async fn chat(
         continuity
             .validate_at(now)
             .map_err(|e| invalid(StatusCode::BAD_REQUEST, e.to_string()))?;
-        return Err(invalid(
-            StatusCode::NOT_IMPLEMENTED,
-            "continuity contract is validated, but this worker build has no physical session store attached; refusing to pretend resume/snapshot/release succeeded",
-        ));
-    }
-    let response = state
-        .worker
-        .try_submit(GpuJob {
+        GpuOperation::Continuity(continuity)
+    } else {
+        GpuOperation::Generate {
             messages: request.messages,
             max_tokens,
             enable_thinking: request.enable_thinking,
-        })
+        }
+    };
+    let response = state
+        .worker
+        .try_submit(GpuJob { operation })
         .map_err(|err| match err {
             SubmitError::QueueFull => invalid(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -526,12 +882,14 @@ async fn chat(
                 "local runtime worker stopped",
             ),
         })?;
+    if let Some(continuity) = result.continuity {
+        return Ok(Json(continuity));
+    }
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| invalid(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .as_secs();
-    let generation = result.generation;
-    let finish_reason = if generation.tokens.len() >= max_tokens {
+    let finish_reason = if result.tokens.len() >= max_tokens {
         "length"
     } else {
         "stop"
@@ -544,56 +902,14 @@ async fn chat(
         "choices":[{"index":0,"message":{"role":"assistant","content":result.text},
             "finish_reason":finish_reason}],
         "usage":{
-            "prompt_tokens":generation.prompt_tokens,
-            "completion_tokens":generation.tokens.len(),
-            "total_tokens":generation.prompt_tokens+generation.tokens.len(),
-            "prefill_seconds":generation.prefill_seconds,
-            "latency_seconds":generation.total_seconds,
-            "gpu_model_load_seconds":generation.model_load_seconds,
-            "engine":"local-accelerator-runtime",
-            "gpu_weight_bytes":generation.gpu_weight_payload_bytes,
-            "gpu_device":generation.device_name,
-            "kvslim_lod_active":generation.canonical_cpu_lod_components_active,
-            "canonical_cpu_lod_components_active":generation.canonical_cpu_lod_components_active,
-            "canonical_cpu_lod_stats":generation.canonical_cpu_lod_stats,
-            "gpu_kv_capacity_bytes":generation.gpu_kv_capacity_bytes,
-            "gpu_prefill_batch_tokens":generation.gpu_prefill_batch_tokens,
-            "gpu_prefill_weight_reuse_tokens":generation.gpu_prefill_weight_reuse_tokens,
-            "gpu_hot_v_capacity_tokens":generation.gpu_hot_v_capacity_tokens,
-            "gpu_verified_prompt_replay_max_tokens":generation.gpu_verified_prompt_replay_max_tokens,
-            "gpu_verified_prefix_replay_enabled":generation.gpu_verified_prefix_replay_enabled,
-            "gpu_verified_prefix_reused_tokens":generation.gpu_verified_prefix_reused_tokens,
-            "gpu_verified_prefix_restored_bytes":generation.gpu_verified_prefix_restored_bytes,
-            "gpu_verified_prompt_replay_hit":generation.gpu_verified_prompt_replay_hit,
-            "gpu_verified_prompt_replay_cached_tokens":generation.gpu_verified_prompt_replay_cached_tokens,
-            "gpu_verified_prompt_replay_cached_bytes":generation.gpu_verified_prompt_replay_cached_bytes,
-            "gpu_verified_prompt_replay_restored_bytes":generation.gpu_verified_prompt_replay_restored_bytes,
-            "gpu_verified_prompt_replay_sha256_verified":generation.gpu_verified_prompt_replay_sha256_verified,
+            "prompt_tokens":result.prompt_tokens,
+            "completion_tokens":result.tokens.len(),
+            "total_tokens":result.prompt_tokens+result.tokens.len(),
+            "prefill_seconds":result.prefill_seconds,
+            "latency_seconds":result.total_seconds,
+            "engine":if state.runtime_manifest.is_some() { "external-runtime" } else { "local-accelerator-runtime" },
+            "runtime_diagnostics":result.diagnostics,
             "paging_unit":"microregion/page",
-            "microregion_states":generation.canonical_cpu_lod_stats.as_ref().map(|s| s.micro_region_states),
-            "microregions_omitted":generation.canonical_cpu_lod_stats.as_ref().map(|s| s.micro_omitted_regions),
-            "microregions_linked_seen":generation.canonical_cpu_lod_stats.as_ref().map(|s| s.micro_linked_regions_seen),
-            "omitted_k_dot_products":generation.canonical_cpu_lod_stats.as_ref().map(|s| s.micro_omitted_k_dot_products),
-            "coldstore_pages":generation.canonical_cpu_lod_stats.as_ref().map(|s| s.physical_cold_store_pages),
-            "microregion_fallback_queries":generation.canonical_cpu_lod_stats.as_ref().map(|s| s.micro_dense_fallback_queries),
-            "gpu_micro_hot_v_capacity_tokens":generation.gpu_micro_hot_v_capacity_tokens,
-            "gpu_micro_hot_sparse_calls":generation.gpu_micro_hot_sparse_calls,
-            "gpu_micro_hot_exact_fallback_calls":generation.gpu_micro_hot_exact_fallback_calls,
-            "gpu_micro_selection_upload_calls":generation.gpu_micro_selection_upload_calls,
-            "gpu_micro_selection_cache_hits":generation.gpu_micro_selection_cache_hits,
-            "gpu_hot_v_attention_calls":generation.gpu_hot_v_attention_calls,
-            "gpu_hot_v_cold_fallback_calls":generation.gpu_hot_v_cold_fallback_calls,
-            "gpu_hot_v_prefetch_bytes":generation.gpu_hot_v_prefetch_bytes,
-            "gpu_decode_unroll4":generation.gpu_decode_unroll4,
-            "gpu_decode_fused_kernels":generation.gpu_decode_fused_kernels,
-            "gpu_exact_hot_fused_attention":generation.gpu_exact_hot_fused_attention,
-            "gpu_deferred_cold_enabled":generation.gpu_deferred_cold_enabled,
-            "gpu_deferred_cold_activated":generation.gpu_deferred_cold_activated,
-            "gpu_deferred_cold_commit_seconds":generation.gpu_deferred_cold_commit_seconds,
-            "gpu_deferred_cold_committed_token_layers":generation.gpu_deferred_cold_committed_token_layers,
-            "gpu_prefill_batches":generation.gpu_prefill_batches,
-            "gpu_prefill_cold_seal_seconds":generation.gpu_prefill_cold_seal_seconds,
-            "gpu_prefill_temporary_v_capacity_bytes":generation.gpu_prefill_temporary_v_capacity_bytes,
             "torch_used":false
         }
     })))
@@ -814,9 +1130,20 @@ async fn main() -> Result<()> {
         .context("model path must have a stable directory name")?
         .to_owned();
     let started = Instant::now();
+    let mut external_client: Option<(IpcClient, String)> = None;
     let (runtime_manifest, runtime_session_id) = if let Some(path) = runtime_manifest_path {
         let manifest = RuntimeManifest::from_json_file(&path)
             .with_context(|| format!("load runtime manifest {}", path.display()))?;
+        let required = [
+            Capability::Prefill,
+            Capability::Decode,
+            Capability::SnapshotKv,
+            Capability::RestoreKv,
+        ];
+        ensure!(
+            manifest.supports_all(required.iter()),
+            "runtime manifest does not prove generation and physical continuity capabilities"
+        );
         let endpoint = manifest
             .endpoint
             .as_deref()
@@ -842,7 +1169,7 @@ async fn main() -> Result<()> {
             request_id: format!("open-{}", started.elapsed().as_nanos()),
             session_id: None,
             tensors: Vec::new(),
-            payload: json!({"model_dir": model.display().to_string(), "model_id": model_id}),
+            payload: json!({"model_dir": model.display().to_string(), "model_id": model_id.clone()}),
         };
         let response = client.request(&open)?;
         ensure!(
@@ -853,82 +1180,172 @@ async fn main() -> Result<()> {
         let session_id = response
             .session_id
             .context("runtime open_session returned no session_id")?;
+        external_client = Some((client, session_id.clone()));
         (Some(manifest.id), Some(session_id))
     } else {
         (None, None)
     };
-    let mut engine = if let Some(config) = lod {
-        OpenClLlm::load_with_canonical_lod(&model, max_context, mode, config)?
+    let (
+        worker,
+        gpu_device,
+        load_seconds,
+        weight_mode_label,
+        lod_epsilon,
+        lod_stage,
+        gpu_micro_axis_sigma,
+        gpu_micro_axis_warmup,
+        gpu_micro_axis_safety_fuse,
+        gpu_kv_capacity_bytes,
+        gpu_prefill_batch_tokens,
+        gpu_prefill_weight_reuse_tokens,
+        gpu_hot_v_capacity_tokens,
+        gpu_verified_prompt_replay_max_tokens,
+        gpu_verified_shared_prefix_enabled,
+        gpu_micro_hot_v_capacity_tokens,
+        gpu_decode_unroll4,
+        gpu_deferred_cold_enabled,
+        gpu_decode_fused_kernels,
+        gpu_exact_hot_fused_attention,
+    ) = if let Some((client, session_id)) = external_client {
+        let session_root = std::env::var_os("KVSLIM_SESSION_STORE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("deploy/local-production/runtime/sessions")
+            });
+        let session_store = SessionStore::open(session_root)
+            .map_err(|e| anyhow::anyhow!("open SessionStore: {e}"))?;
+        let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+        let worker = InferenceWorker::spawn(
+            RuntimeExecutor::External(ExternalExecutor {
+                client,
+                tokenizer,
+                chat_template: chat_template.clone(),
+                session_id,
+                request_sequence: 0,
+                session_store,
+            }),
+            4,
+        )?;
+        (
+            worker,
+            "external-runtime".to_owned(),
+            started.elapsed().as_secs_f64(),
+            "External",
+            None,
+            None,
+            None,
+            None,
+            None,
+            0usize,
+            None,
+            0usize,
+            0usize,
+            0usize,
+            false,
+            0usize,
+            false,
+            false,
+            false,
+            false,
+        )
     } else {
-        OpenClLlm::load(&model, max_context, mode)?
+        let mut engine = if let Some(config) = lod {
+            OpenClLlm::load_with_canonical_lod(&model, max_context, mode, config)?
+        } else {
+            OpenClLlm::load(&model, max_context, mode)?
+        };
+        if micro_sigma.is_some() || micro_warmup.is_some() || micro_safety_fuse.is_some() {
+            let mut policy = kvslim::adaptive_extent::AxisPolicy::default();
+            if let Some(value) = micro_sigma {
+                policy.novelty_sigma = value;
+            }
+            if let Some(value) = micro_warmup {
+                policy.warmup_observations = value;
+            }
+            if let Some(value) = micro_safety_fuse {
+                policy.open_extent_safety_limit = Some(value);
+            }
+            engine.set_gpu_micro_axis_policy(policy)?;
+        }
+        let gpu_micro_axis_sigma = engine.gpu_micro_axis_policy().map(|p| p.novelty_sigma);
+        let gpu_micro_axis_warmup = engine
+            .gpu_micro_axis_policy()
+            .map(|p| p.warmup_observations);
+        let gpu_micro_axis_safety_fuse = engine
+            .gpu_micro_axis_policy()
+            .and_then(|p| p.open_extent_safety_limit);
+        engine.set_batch_prefill_tokens(prefill_batch_tokens)?;
+        engine.set_prefill_weight_reuse_tokens(prefill_weight_reuse)?;
+        engine.set_exact_hot_v_tokens(hot_v_tokens)?;
+        engine.set_verified_gpu_prompt_replay(verified_prompt_replay_tokens)?;
+        engine.set_verified_gpu_prefix_replay(verified_shared_prefix)?;
+        engine.set_micro_hot_v_tokens(micro_hot_v_tokens)?;
+        engine.set_decode_unroll4(decode_unroll4)?;
+        engine.set_deferred_cold_commit(deferred_cold)?;
+        engine.set_decode_fused_kernels(fused_decode)?;
+        engine.set_exact_hot_fused_attention(exact_hot_fused)?;
+        let gpu_exact_hot_fused_attention = engine.exact_hot_fused_attention_enabled();
+        let gpu_deferred_cold_enabled = engine.deferred_cold_enabled();
+        let gpu_decode_fused_kernels = engine.decode_fused_kernels();
+        let gpu_prefill_batch_tokens = engine.batch_prefill_tokens();
+        let gpu_prefill_weight_reuse_tokens = engine.prefill_weight_reuse_tokens();
+        let gpu_hot_v_capacity_tokens = engine.exact_hot_v_capacity_tokens();
+        let gpu_verified_prompt_replay_max_tokens = engine.verified_gpu_prompt_replay_max_tokens();
+        let gpu_verified_shared_prefix_enabled = engine.verified_gpu_prefix_replay_enabled();
+        let gpu_micro_hot_v_capacity_tokens = engine.micro_hot_v_capacity_tokens();
+        let gpu_decode_unroll4 = engine.decode_unroll4();
+        let lod_epsilon = engine.canonical_lod_config().map(|x| x.epsilon);
+        let lod_stage = engine.canonical_lod_config().map(|x| x.stage_tokens);
+        let gpu_kv_capacity_bytes = engine.canonical_lod_gpu_kv_capacity_bytes();
+        let gpu_device = engine.device_name().to_owned();
+        let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+        let worker = InferenceWorker::spawn(
+            RuntimeExecutor::Local(GpuExecutor {
+                model: engine,
+                tokenizer,
+                chat_template: chat_template.clone(),
+                last_prompt_ids: Vec::new(),
+            }),
+            4,
+        )?;
+        (
+            worker,
+            gpu_device,
+            started.elapsed().as_secs_f64(),
+            if mode == WeightMode::Resident {
+                "Resident"
+            } else {
+                "Stream"
+            },
+            lod_epsilon,
+            lod_stage,
+            gpu_micro_axis_sigma,
+            gpu_micro_axis_warmup,
+            gpu_micro_axis_safety_fuse,
+            gpu_kv_capacity_bytes,
+            gpu_prefill_batch_tokens,
+            gpu_prefill_weight_reuse_tokens,
+            gpu_hot_v_capacity_tokens,
+            gpu_verified_prompt_replay_max_tokens,
+            gpu_verified_shared_prefix_enabled,
+            gpu_micro_hot_v_capacity_tokens,
+            gpu_decode_unroll4,
+            gpu_deferred_cold_enabled,
+            gpu_decode_fused_kernels,
+            gpu_exact_hot_fused_attention,
+        )
     };
-    if micro_sigma.is_some() || micro_warmup.is_some() || micro_safety_fuse.is_some() {
-        let mut policy = kvslim::adaptive_extent::AxisPolicy::default();
-        if let Some(value) = micro_sigma {
-            policy.novelty_sigma = value;
-        }
-        if let Some(value) = micro_warmup {
-            policy.warmup_observations = value;
-        }
-        if let Some(value) = micro_safety_fuse {
-            policy.open_extent_safety_limit = Some(value);
-        }
-        engine.set_gpu_micro_axis_policy(policy)?;
-    }
-    let gpu_micro_axis_sigma = engine.gpu_micro_axis_policy().map(|p| p.novelty_sigma);
-    let gpu_micro_axis_warmup = engine
-        .gpu_micro_axis_policy()
-        .map(|p| p.warmup_observations);
-    let gpu_micro_axis_safety_fuse = engine
-        .gpu_micro_axis_policy()
-        .and_then(|p| p.open_extent_safety_limit);
-    engine.set_batch_prefill_tokens(prefill_batch_tokens)?;
-    engine.set_prefill_weight_reuse_tokens(prefill_weight_reuse)?;
-    engine.set_exact_hot_v_tokens(hot_v_tokens)?;
-    engine.set_verified_gpu_prompt_replay(verified_prompt_replay_tokens)?;
-    engine.set_verified_gpu_prefix_replay(verified_shared_prefix)?;
-    engine.set_micro_hot_v_tokens(micro_hot_v_tokens)?;
-    engine.set_decode_unroll4(decode_unroll4)?;
-    engine.set_deferred_cold_commit(deferred_cold)?;
-    engine.set_decode_fused_kernels(fused_decode)?;
-    engine.set_exact_hot_fused_attention(exact_hot_fused)?;
-    let gpu_exact_hot_fused_attention = engine.exact_hot_fused_attention_enabled();
-    let gpu_deferred_cold_enabled = engine.deferred_cold_enabled();
-    let gpu_decode_fused_kernels = engine.decode_fused_kernels();
-    let gpu_prefill_batch_tokens = engine.batch_prefill_tokens();
-    let gpu_prefill_weight_reuse_tokens = engine.prefill_weight_reuse_tokens();
-    let gpu_hot_v_capacity_tokens = engine.exact_hot_v_capacity_tokens();
-    let gpu_verified_prompt_replay_max_tokens = engine.verified_gpu_prompt_replay_max_tokens();
-    let gpu_verified_shared_prefix_enabled = engine.verified_gpu_prefix_replay_enabled();
-    let gpu_micro_hot_v_capacity_tokens = engine.micro_hot_v_capacity_tokens();
-    let gpu_decode_unroll4 = engine.decode_unroll4();
-    let lod_epsilon = engine.canonical_lod_config().map(|x| x.epsilon);
-    let lod_stage = engine.canonical_lod_config().map(|x| x.stage_tokens);
-    let gpu_kv_capacity_bytes = engine.canonical_lod_gpu_kv_capacity_bytes();
-    let gpu_device = engine.device_name().to_owned();
-    let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
-        .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
-    let worker = InferenceWorker::spawn(
-        GpuExecutor {
-            model: engine,
-            tokenizer,
-            chat_template,
-            last_prompt_ids: Vec::new(),
-        },
-        4,
-    )?;
     let state = AppState {
         worker,
         model_id,
         model_dir: model.display().to_string(),
         gpu_device,
-        load_seconds: started.elapsed().as_secs_f64(),
+        load_seconds,
         max_context_tokens: max_context,
-        weight_mode: if mode == WeightMode::Resident {
-            "Resident"
-        } else {
-            "Stream"
-        },
+        weight_mode: weight_mode_label,
         lod_epsilon,
         lod_stage,
         gpu_micro_axis_sigma,

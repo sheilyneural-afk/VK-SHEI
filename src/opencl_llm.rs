@@ -544,7 +544,9 @@ impl GpuEngine {
         let cache_key = hex::encode(key_hasher.finalize());
         let cache_root = std::env::var_os("KVSLIM_OPENCL_CACHE_DIR")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("deploy/local-production/runtime/artifacts/opencl"));
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from("deploy/local-production/runtime/artifacts/opencl")
+            });
         let cache_path = cache_root.join(format!("{cache_key}.bin"));
         let program = if let Ok(binary) = fs::read(&cache_path) {
             let binaries: [&[u8]; 1] = [&binary];

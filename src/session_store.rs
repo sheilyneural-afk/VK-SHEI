@@ -1,7 +1,8 @@
 //! Persistent semantic session store.
 //!
-//! This store owns only continuity metadata and verified microstate. It never
-//! claims to persist or restore physical KV tensors.
+//! This store owns continuity metadata and opaque, verified session payloads.
+//! It never interprets or mutates physical KV tensors; a runtime owner may store
+//! a provider snapshot here only after validating its receipt and identity.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, io, path::PathBuf};

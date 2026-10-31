@@ -59,7 +59,17 @@ impl RuntimeHost {
         if request.request_id.is_empty() {
             bail!("request_id is required");
         }
+        if !matches!(
+            request.operation,
+            IpcOperation::Probe | IpcOperation::OpenSession
+        ) && request.session_id.as_deref() != Some(self.session_id.as_str())
+        {
+            bail!("invalid or missing runtime session_id");
+        }
         match request.operation {
+            IpcOperation::Probe | IpcOperation::OpenSession if request.session_id.is_some() => {
+                bail!("probe/open_session must not carry a session_id")
+            }
             IpcOperation::Probe => Ok((
                 None,
                 json!({"capabilities": self.session.capabilities()}),
@@ -242,7 +252,7 @@ mod tests {
             schema: IPC_SCHEMA.into(),
             operation: IpcOperation::Prefill,
             request_id: "2".into(),
-            session_id: None,
+            session_id: Some("s".into()),
             tensors: vec![],
             payload: serde_json::to_value(GenerationRequest {
                 input_tokens: vec![1],
@@ -253,5 +263,15 @@ mod tests {
             .unwrap(),
         });
         assert!(r.ok);
+        let r = h.dispatch(IpcRequest {
+            schema: IPC_SCHEMA.into(),
+            operation: IpcOperation::Decode,
+            request_id: "wrong-session".into(),
+            session_id: Some("other".into()),
+            tensors: vec![],
+            payload: Value::Null,
+        });
+        assert!(!r.ok);
+        assert!(r.error.unwrap().contains("session_id"));
     }
 }

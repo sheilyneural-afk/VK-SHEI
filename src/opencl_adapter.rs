@@ -184,7 +184,9 @@ impl ModelAdapter for OpenClModelAdapter {
             .context("local accelerator adapter is not loaded")?;
         ensure!(!input.is_empty(), "accelerator prefill vacío");
         if self.cached_prompt == input && runtime.position() >= input.len() {
-            return Ok(json!({"tokens": input.len(), "position": runtime.position(), "mode": "verified-prefix-reuse", "reused_tokens": input.len()}));
+            return Ok(
+                json!({"tokens": input.len(), "position": runtime.position(), "mode": "verified-prefix-reuse", "reused_tokens": input.len()}),
+            );
         }
         if runtime.position() != 0 {
             runtime.reset_session()?;

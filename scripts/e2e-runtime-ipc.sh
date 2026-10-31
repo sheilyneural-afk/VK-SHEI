@@ -80,7 +80,7 @@ generated = call(
 )
 assert generated["payload"]["output_tokens"] == [33]
 
-snapshot = call("snapshot_kv", "e2e-snapshot", session)
+snapshot = call("snapshot_kv", "e2e-snapshot", None, session)
 payload = snapshot["payload"]
 call("restore_kv", "e2e-restore",
      {"snapshot_bytes": payload["snapshot_bytes"], "receipt": payload["receipt"]},

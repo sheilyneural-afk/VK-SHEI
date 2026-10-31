@@ -22,7 +22,12 @@ fn digest(path: &std::path::Path) -> Result<String> {
 fn available_memory_bytes() -> u64 {
     fs::read_to_string("/proc/meminfo")
         .ok()
-        .and_then(|text| text.lines().find(|line| line.starts_with("MemAvailable:")).and_then(|line| line.split_whitespace().nth(1)).and_then(|value| value.parse::<u64>().ok()))
+        .and_then(|text| {
+            text.lines()
+                .find(|line| line.starts_with("MemAvailable:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<u64>().ok())
+        })
         .unwrap_or(0)
         .saturating_mul(1024)
 }
@@ -77,8 +82,8 @@ fn load(
     };
     Ok(Box::new(ModelAdapterSession::new(adapter, identity)))
 }
-fn serve(mut stream: UnixStream, session: Box<dyn RuntimeSession>, id: &str) -> Result<()> {
-    let mut host = RuntimeHost::new(session, id)?;
+fn serve(stream: UnixStream, host: &mut RuntimeHost) -> Result<()> {
+    let mut stream = stream;
     loop {
         let request = match read_request(&mut stream) {
             Ok(r) => r,
@@ -137,8 +142,16 @@ fn main() -> Result<()> {
         "external runtime provider listening on {}",
         socket.display()
     );
-    if let Some(stream) = listener.incoming().next() {
-        serve(stream?, session, &session_id)?;
+    let mut host = RuntimeHost::new(session, &session_id)?;
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if let Err(error) = serve(stream, &mut host) {
+                    eprintln!("external runtime connection failed: {error:#}");
+                }
+            }
+            Err(error) => eprintln!("external runtime accept failed: {error:#}"),
+        }
     }
     Ok(())
 }
