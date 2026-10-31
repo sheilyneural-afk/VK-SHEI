@@ -11,6 +11,11 @@ source "$env_file"
 
 "$script_dir/verify-release.sh"
 
+if [ -n "${KVSLIM_RUNTIME_MANIFEST:-}" ]; then
+  [ -f "$KVSLIM_RUNTIME_MANIFEST" ] || { echo "runtime manifest missing: $KVSLIM_RUNTIME_MANIFEST" >&2; exit 1; }
+  "$script_dir/verify-runtime-manifest.sh" "$KVSLIM_RUNTIME_MANIFEST"
+fi
+
 binary="$root/deploy/local-production/runtime/bin/kvslim-server"
 : "${KVSLIM_GATEWAY_TOKEN:?KVSLIM_GATEWAY_TOKEN must be set}"
 
