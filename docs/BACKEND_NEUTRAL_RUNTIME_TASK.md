@@ -1,8 +1,8 @@
-# Tarea maestra: KV-SHEI universal con runtime externo
+# Arquitectura backend-neutral de KV-SHEI
 
 ## Objetivo
 
-Completar la separación entre KV-SHEI y cualquier implementación concreta. El núcleo debe seleccionar por manifiestos y capacidades; el proceso externo debe ejecutar el modelo. No se acepta declarar universalidad solo porque exista un `Probe/OpenSession`.
+Completar la separación entre KV-SHEI y cualquier implementación concreta. El núcleo debe seleccionar por manifiestos y capacidades; el proceso externo debe ejecutar el modelo. No se debe declarar compatibilidad general solo porque exista un `Probe/OpenSession`.
 
 ## Banderas de trabajo
 
@@ -11,7 +11,7 @@ Completar la separación entre KV-SHEI y cualquier implementación concreta. El 
 - `external-routing`: el worker enruta Prefill/Decode/Snapshot/Restore al host externo.
 - `session-recovery`: persistencia, reinicio y restauración de sesión.
 - `e2e-real`: prueba con bundle real y generación real.
-- `benchmark`: comparación densa, KV reutilizada y M-SLIM.
+- `benchmark`: comparación entre rutas, reutilización de K/V y M-SLIM.
 - `production-gate`: solo se activa cuando todas las anteriores pasan.
 
 Las banderas son gates de validación, no sustitutos de funcionalidad. Una bandera no puede marcarse como completada por un mock.
@@ -63,7 +63,7 @@ Medir con el mismo modelo y prompt:
 - tokens por segundo;
 - bytes leídos;
 - bytes evitados;
-- tokens KV reutilizados;
+- tokens de K/V reutilizados;
 - tiempo de snapshot;
 - tiempo de restore;
 - memoria residente;
@@ -99,7 +99,7 @@ La tarea no se considera terminada hasta que:
 - el health no afirma capacidades no demostradas;
 - el árbol de trabajo queda limpio y el commit queda identificado.
 
-## Estado actual
+## Implementación de referencia
 
 - Contratos genéricos: implementados.
 - Dispatcher RuntimeHost: implementado.
@@ -107,13 +107,13 @@ La tarea no se considera terminada hasta que:
 - Handshake del proveedor externo: implementado.
 - Host IPC ejecutable: implementado.
 - E2E IPC determinista: implementado y pasa (`IPC_E2E_OK`).
-- Generación real a través del proveedor externo: validada; el modo residente alcanza ~3,4–3,7 tok/s de decode en la máquina de prueba.
+- Generación a través del proveedor externo: observada en la máquina de referencia; la velocidad no se generaliza a otros equipos.
 - Enrutamiento HTTP completo al host externo: implementado; con `--runtime-manifest` el worker hace Probe/OpenSession y no carga un motor local como sustituto.
 - Continuidad física del worker: implementada mediante `SnapshotKv`/`RestoreKv`/`Release` por IPC y `SessionStore` persistente, con validación de identidad, recibo y generación.
 - El proveedor externo mantiene el modelo residente y acepta reconexiones secuenciales del worker; un reinicio HTTP no obliga a recompilar ni a recargar el runtime externo.
 - `SessionCoordinator`: sigue disponible como biblioteca; el worker HTTP usa directamente `SessionStore` en el hilo propietario de la sesión externa para evitar duplicar coordinadores.
 - Caché persistente de binarios compilados: implementada y validada en `opencl_llm`.
 - Reinicio HTTP + restore con el proveedor real: probado con `scripts/e2e-worker-external-restart.sh`; `REAL_EXTERNAL_RESTART_E2E_OK`, snapshot exacto y restore de 351 bytes tras reiniciar el worker.
-- Benchmark reproducible: implementado en el mismo script. En `stream`, el bundle local de 8B tarda 103,56 s por un token (52,64 s prefill + 50,90 s decode) porque recarga las capas en cada llamada. En `auto/resident`, el mismo caso tarda 1,68 s y la segunda petición 0,31 s con reutilización de KV.
-- Benchmark comparativo completo entre backends: pendiente; la medición confirma que `stream` solo debe usarse como fallback de memoria.
-- `production-gate`: pendiente solo por el benchmark comparativo, paridad de calidad y un objetivo de latencia aceptable para el hardware.
+- Benchmark reproducible: existe un script de medición. La cifra observada depende del bundle, la ruta y el hardware; no se presenta como rendimiento general.
+- El benchmark comparativo entre backends es específico de cada perfil; la medición confirma que `stream` se utiliza como fallback de memoria cuando el perfil residente no es viable.
+- `production-gate`: no se declara; faltan una matriz de modelos y hardware, paridad de calidad y objetivos de latencia definidos.

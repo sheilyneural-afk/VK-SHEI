@@ -21,7 +21,7 @@ use mslim::{
     generic_runtime::{
         Capability, IPC_SCHEMA, IpcOperation, IpcRequest, IpcResponse, RuntimeManifest,
     },
-    gpu_canonical_lod::CanonicalGpuLodConfig,
+    gpu_region_store::GpuRegionConfig,
     inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
     ipc_transport::IpcClient,
     model_config::ModelSpec,
@@ -856,11 +856,11 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "weight_mode":state.weight_mode,
         "load_seconds":state.load_seconds,
         "model_weights":"original_BF16_unchanged",
-        "neural_arithmetic":"measured-device-kernels-with-declared-precision",
+        "device_matrix_arithmetic":"measured-device-kernels-with-declared-precision",
         "full_llm_layers_computed_on_gpu": if state.runtime_manifest.is_some() { Value::Null } else { json!(true) },
         "mslim_lod_active":state.lod_epsilon.is_some(),
-        "canonical_cpu_mslim_lod_components_active":state.lod_epsilon.is_some(),
-        "canonical_cpu_lod_modules":["adaptive_extent::ParallelContextAxis",
+        "gpu_region_components_active":state.lod_epsilon.is_some(),
+        "gpu_region_modules":["adaptive_extent::ParallelContextAxis",
             "cold_store::ColdStore","attention_certificate::select_by_exact_mass"],
         "gpu_lod_epsilon":state.lod_epsilon,
         "gpu_micro_axis_novelty_sigma":state.gpu_micro_axis_sigma,
@@ -933,15 +933,15 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "compute_precision":"FP32 accumulations, BF16 model weights and KV",
         "models_verified":[],
         "mslim_lod_active":state.lod_epsilon.is_some(),
-        "canonical_cpu_lod_components_active":state.lod_epsilon.is_some(),
-        "canonical_lod_epsilon":state.lod_epsilon,
+        "gpu_region_components_active":state.lod_epsilon.is_some(),
+        "gpu_region_epsilon":state.lod_epsilon,
         "gpu_micro_axis_novelty_sigma":state.gpu_micro_axis_sigma,
         "gpu_micro_axis_warmup":state.gpu_micro_axis_warmup,
         "gpu_micro_axis_open_safety_fuse":state.gpu_micro_axis_safety_fuse,
         "micro_metadata_sparse_qk_opt_in":state.lod_epsilon.is_some_and(|e|e>0.0),
         "micro_metadata_scope":"original CPU 4bit/LSH and communicating_dimensions prioritize CPU semantic regions. BF16 K min/max and omitted softmax mass bound certify possible QK/V avoidance. Ambiguous boxes fall back to original full GPU QK and ColdStore. Exact epsilon=0 never prunes",
         "micro_metadata_memory":"Bounded 512 regions per layer, disables sparse metadata on fragmentation; exact K/V always in original BF16 storage",
-        "canonical_lod_stage_tokens":state.lod_stage,
+        "gpu_region_stage_tokens":state.lod_stage,
         "gpu_kv_capacity_bytes":state.gpu_kv_capacity_bytes,
         "gpu_prefill_batch_tokens":state.gpu_prefill_batch_tokens,
         "gpu_prefill_weight_reuse_tokens":state.gpu_prefill_weight_reuse_tokens,
@@ -961,7 +961,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_hot_v_policy":"Canonical ColdStore V exact always; bounded BF16 hot tier only at epsilon=0",
         "gpu_prefill_cold_pages":"batched up to 64 BF16 tokens/page using original ColdStore",
         "gpu_prefill_temporary_v_residency":"released after cold seal; no permanent extra GPU V cache",
-         "canonical_lod_scope":"hierarchical best-first Grid/Chunk/Page selection over original CPU index/LSH and micro-links; ColdStore and conservative BF16-box omitted-mass certificates authorize positive-epsilon pruning; exact epsilon=0 remains dense",
+         "gpu_region_scope":"hierarchical best-first Grid/Chunk/Page selection over original CPU index/LSH and micro-links; ColdStore and conservative BF16-box omitted-mass certificates authorize positive-epsilon pruning; exact epsilon=0 remains dense",
         "parity_with_cpu":null,
         "server_backend": if state.runtime_manifest.is_some() { "external-runtime-session" } else { "local-runtime" },
         "max_context_tokens":state.max_context_tokens,
@@ -1098,9 +1098,9 @@ async fn main() -> Result<()> {
     // authority and enable verified prefix replay between independent turns.
     // Positive-epsilon pruning is still explicit; --gpu-dense-kv remains the
     // low-overhead escape hatch for short, stateless workloads.
-    let mut lod: Option<CanonicalGpuLodConfig> = Some(CanonicalGpuLodConfig {
+    let mut lod: Option<GpuRegionConfig> = Some(GpuRegionConfig {
         epsilon: 0.0,
-        ..CanonicalGpuLodConfig::default()
+        ..GpuRegionConfig::default()
     });
     let mut micro_sigma: Option<f32> = None;
     let mut micro_warmup: Option<usize> = None;
@@ -1210,7 +1210,7 @@ async fn main() -> Result<()> {
                 fused_decode = false;
             }
             "--gpu-lod" => {
-                lod.get_or_insert_with(CanonicalGpuLodConfig::default);
+                lod.get_or_insert_with(GpuRegionConfig::default);
             }
             "--gpu-dense-kv" => {
                 lod = None;
@@ -1234,17 +1234,16 @@ async fn main() -> Result<()> {
             }
             "--lod-epsilon" => {
                 let e = args.next().context("missing --lod-epsilon")?.parse()?;
-                lod.get_or_insert_with(CanonicalGpuLodConfig::default)
-                    .epsilon = e;
+                lod.get_or_insert_with(GpuRegionConfig::default).epsilon = e;
             }
             "--lod-stage" => {
                 let n = args.next().context("missing --lod-stage")?.parse()?;
-                lod.get_or_insert_with(CanonicalGpuLodConfig::default)
+                lod.get_or_insert_with(GpuRegionConfig::default)
                     .stage_tokens = n;
             }
             "--lod-cold-dir" => {
                 let p = args.next().context("missing --lod-cold-dir")?.into();
-                lod.get_or_insert_with(CanonicalGpuLodConfig::default)
+                lod.get_or_insert_with(GpuRegionConfig::default)
                     .cold_directory = Some(p);
             }
             "--allow-network" => allow_network = true,
@@ -1412,7 +1411,7 @@ async fn main() -> Result<()> {
         )
     } else {
         let mut engine = if let Some(config) = lod {
-            OpenClLlm::load_with_canonical_lod(&model, max_context, mode, config)?
+            OpenClLlm::load_with_gpu_region(&model, max_context, mode, config)?
         } else {
             OpenClLlm::load(&model, max_context, mode)?
         };
@@ -1456,9 +1455,9 @@ async fn main() -> Result<()> {
         let gpu_verified_shared_prefix_enabled = engine.verified_gpu_prefix_replay_enabled();
         let gpu_micro_hot_v_capacity_tokens = engine.micro_hot_v_capacity_tokens();
         let gpu_decode_unroll4 = engine.decode_unroll4();
-        let lod_epsilon = engine.canonical_lod_config().map(|x| x.epsilon);
-        let lod_stage = engine.canonical_lod_config().map(|x| x.stage_tokens);
-        let gpu_kv_capacity_bytes = engine.canonical_lod_gpu_kv_capacity_bytes();
+        let lod_epsilon = engine.gpu_region_config().map(|x| x.epsilon);
+        let lod_stage = engine.gpu_region_config().map(|x| x.stage_tokens);
+        let gpu_kv_capacity_bytes = engine.gpu_region_gpu_kv_capacity_bytes();
         let gpu_device = engine.device_name().to_owned();
         let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;

@@ -1,4 +1,4 @@
-//! Universal context/KV inference engine.
+//! Backend-neutral context/KV inference engine.
 //!
 //! The canonical architecture keeps model weights and authoritative K/V in
 //! BF16. A four-bit parallel dimension index locates reversible token
@@ -58,7 +58,7 @@ pub mod opencl_adapter;
 #[cfg(feature = "accelerator-backend")]
 pub mod opencl_llm;
 
-pub mod gpu_canonical_lod;
+pub mod gpu_region_store;
 
 #[cfg(feature = "hip-backend")]
 pub mod native_hip;

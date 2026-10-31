@@ -47,7 +47,7 @@ use crate::native_hip::{HipRuntime, HipWeight};
 use opencl3::memory::ClMem;
 
 use crate::{
-    gpu_canonical_lod::{CanonicalGpuLod, CanonicalGpuLodConfig, CanonicalGpuLodStats},
+    gpu_region_store::{GpuRegionConfig, GpuRegionStats, GpuRegionStore},
     model_config::ModelSpec,
     portable::AttentionGeometry,
 };
@@ -1262,12 +1262,12 @@ impl GpuEngine {
     /// Actual GPU QK + original CPU LOD's 4-bit index/LSH, exact-mass
     /// certificate, canonical verified BF16 ColdStore reads, and GPU PV.
     /// BF16 K stays on GPU. Historical V is NEVER allocated in GPU KV.
-    fn attention_canonical_lod(
+    fn attention_gpu_region(
         &self,
         ws: &mut Workspace,
         layer_index: usize,
         tokens: usize,
-        lod: &mut CanonicalGpuLod,
+        lod: &mut GpuRegionStore,
     ) -> Result<()> {
         let geometry = lod.geometry();
         let qheads = u32::try_from(geometry.query_heads)?;
@@ -1555,7 +1555,7 @@ impl Workspace {
         engine: &GpuEngine,
         spec: &ModelSpec,
         max_tokens: usize,
-        lod: Option<&CanonicalGpuLodConfig>,
+        lod: Option<&GpuRegionConfig>,
     ) -> Result<Self> {
         let hidden = spec
             .hidden_size
@@ -1669,7 +1669,7 @@ pub struct GpuWeightVerification {
 /// Receipt for a physical K/V session restored from the canonical persistent
 /// ColdStore.  No transformer layer or LM head is evaluated during restore.
 #[derive(Clone, Debug, Serialize)]
-pub struct CanonicalSessionRestore {
+pub struct SessionRestore {
     pub tokens: usize,
     pub layers: usize,
     pub gpu_key_bytes: usize,
@@ -1706,7 +1706,7 @@ pub struct OpenClLlm {
     session_tokens: Vec<u32>,
     max_tokens: usize,
     poisoned: bool,
-    lod: Option<CanonicalGpuLod>,
+    lod: Option<GpuRegionStore>,
     hot_values: Option<GpuHotValues>,
     // GPU-only opt-in lossless transaction optimization:
     // skip blocking K/V CPU readbacks during in-flight exact decode;
@@ -1748,11 +1748,11 @@ impl OpenClLlm {
 
     /// Opt-in canonical CPU M-SLIM index/certification/ColdStore reused
     /// with real GPU QK and chunked BF16 PV, without altering dense mode.
-    pub fn load_with_canonical_lod(
+    pub fn load_with_gpu_region(
         model_dir: impl AsRef<Path>,
         max_tokens: usize,
         mode: WeightMode,
-        lod: CanonicalGpuLodConfig,
+        lod: GpuRegionConfig,
     ) -> Result<Self> {
         lod.validate()?;
         Self::load_internal(model_dir, max_tokens, mode, Some(lod), false)
@@ -1762,11 +1762,11 @@ impl OpenClLlm {
     /// SAME original BF16 weights/canonical CPU LOD and OpenCL attention.
     /// CPU and OpenCL-only paths are untouched and selectable.
     #[cfg(feature = "hip-backend")]
-    pub fn load_with_canonical_lod_native_hip(
+    pub fn load_with_gpu_region_native_hip(
         model_dir: impl AsRef<Path>,
         max_tokens: usize,
         mode: WeightMode,
-        lod: CanonicalGpuLodConfig,
+        lod: GpuRegionConfig,
     ) -> Result<Self> {
         Self::load_internal(model_dir, max_tokens, mode, Some(lod), true)
     }
@@ -1783,7 +1783,7 @@ impl OpenClLlm {
         model_dir: impl AsRef<Path>,
         max_tokens: usize,
         mode: WeightMode,
-        lod_config: Option<CanonicalGpuLodConfig>,
+        lod_config: Option<GpuRegionConfig>,
         hip_enabled: bool,
     ) -> Result<Self> {
         ensure!(
@@ -1890,7 +1890,7 @@ impl OpenClLlm {
         )?;
         let workspace = Workspace::new(&engine, &spec, max_tokens, lod_config.as_ref())?;
         let lod = lod_config
-            .map(|config| CanonicalGpuLod::new(spec.attention, spec.num_hidden_layers, config))
+            .map(|config| GpuRegionStore::new(spec.attention, spec.num_hidden_layers, config))
             .transpose()?;
 
         let mut layers = Vec::new();
@@ -1967,11 +1967,11 @@ impl OpenClLlm {
         }
     }
 
-    pub fn canonical_lod_enabled(&self) -> bool {
+    pub fn gpu_region_enabled(&self) -> bool {
         self.lod.is_some()
     }
-    pub fn canonical_lod_config(&self) -> Option<&CanonicalGpuLodConfig> {
-        self.lod.as_ref().map(CanonicalGpuLod::config)
+    pub fn gpu_region_config(&self) -> Option<&GpuRegionConfig> {
+        self.lod.as_ref().map(GpuRegionStore::config)
     }
     /// Optional GPU-only sensitivity for the same original CPU
     /// content-defined ParallelContextAxis. The model, CPU and BF16
@@ -1992,7 +1992,7 @@ impl OpenClLlm {
         lod.set_gpu_axis_policy(policy)
     }
     pub fn gpu_micro_axis_policy(&self) -> Option<&crate::adaptive_extent::AxisPolicy> {
-        self.lod.as_ref().map(CanonicalGpuLod::axis_policy)
+        self.lod.as_ref().map(GpuRegionStore::axis_policy)
     }
 
     /// Optional GPU-only accelerated prompt prefill. None retains the
@@ -2430,11 +2430,11 @@ impl OpenClLlm {
         self.deferred_cold_enabled
     }
 
-    pub fn canonical_lod_stats(&self) -> Option<CanonicalGpuLodStats> {
+    pub fn gpu_region_stats(&self) -> Option<GpuRegionStats> {
         self.lod.as_ref().map(|lod| lod.stats.clone())
     }
 
-    pub fn canonical_lod_gpu_kv_capacity_bytes(&self) -> usize {
+    pub fn gpu_region_gpu_kv_capacity_bytes(&self) -> usize {
         let per_layer = self.max_tokens * self.spec.attention.kv_elements_per_token() * 2;
         let keys = per_layer * self.spec.num_hidden_layers;
         if let Some(lod) = &self.lod {
@@ -2591,10 +2591,7 @@ impl OpenClLlm {
     /// closed. On an upload failure the OpenCL context is poisoned because GPU
     /// buffers may have been modified partially, while `position` and token
     /// history remain unchanged.
-    pub fn restore_canonical_session(
-        &mut self,
-        token_ids: &[u32],
-    ) -> Result<CanonicalSessionRestore> {
+    pub fn restore_session(&mut self, token_ids: &[u32]) -> Result<SessionRestore> {
         ensure!(!self.poisoned, "GPU runtime poisoned; restart the worker");
         ensure!(
             self.position == 0 && self.session_tokens.is_empty(),
@@ -2702,7 +2699,7 @@ impl OpenClLlm {
         self.last_prompt_replay_hit = false;
         self.last_prompt_replay_sha_verified = true;
 
-        Ok(CanonicalSessionRestore {
+        Ok(SessionRestore {
             tokens: token_ids.len(),
             layers,
             gpu_key_bytes: layer_bytes * layers,
@@ -2759,7 +2756,7 @@ impl OpenClLlm {
                 config.cold_directory = Some(directory);
             }
             let policy = lod.axis_policy().clone();
-            self.lod = Some(CanonicalGpuLod::new_with_axis_policy(
+            self.lod = Some(GpuRegionStore::new_with_axis_policy(
                 self.spec.attention,
                 self.spec.num_hidden_layers,
                 config,
@@ -3220,7 +3217,7 @@ impl OpenClLlm {
         layer: &GpuLayer,
         ws: &mut Workspace,
         step: (usize, usize, bool),
-        lod: Option<&mut CanonicalGpuLod>,
+        lod: Option<&mut GpuRegionStore>,
         hot: Option<&mut GpuHotValues>,
     ) -> Result<()> {
         let (layer_index, position, defer_cold) = step;
@@ -3449,10 +3446,10 @@ impl OpenClLlm {
                         // no silent approximation; use original verified
                         // CPU ColdStore + GPU attention path.
                         hot.cold_fallback_calls += 1;
-                        engine.attention_canonical_lod(ws, layer_index, position + 1, lod)?;
+                        engine.attention_gpu_region(ws, layer_index, position + 1, lod)?;
                     }
                 } else {
-                    engine.attention_canonical_lod(ws, layer_index, position + 1, lod)?;
+                    engine.attention_gpu_region(ws, layer_index, position + 1, lod)?;
                 }
             }
         } else {
@@ -3874,9 +3871,9 @@ impl OpenClLlm {
             gpu_compute: "FP32_accumulators_BF16_intermediate_storage".to_owned(),
             hip_bf16_gemm_active: self.native_hip_enabled(),
             mslim_lod_active: false,
-            canonical_cpu_lod_components_active: self.lod.is_some(),
-            canonical_cpu_lod_stats: self.canonical_lod_stats(),
-            gpu_kv_capacity_bytes: self.canonical_lod_gpu_kv_capacity_bytes(),
+            gpu_region_components_active: self.lod.is_some(),
+            gpu_region_stats: self.gpu_region_stats(),
+            gpu_kv_capacity_bytes: self.gpu_region_gpu_kv_capacity_bytes(),
             gpu_prefill_batch_tokens: self.batch_prefill_tokens,
             gpu_prefill_weight_reuse_tokens: self.prefill_weight_reuse_tokens,
             gpu_prefill_register_unrolled: self.prefill_register_unrolled,
@@ -3952,8 +3949,8 @@ pub struct OpenClGeneration {
     pub gpu_compute: String,
     pub hip_bf16_gemm_active: bool,
     pub mslim_lod_active: bool,
-    pub canonical_cpu_lod_components_active: bool,
-    pub canonical_cpu_lod_stats: Option<CanonicalGpuLodStats>,
+    pub gpu_region_components_active: bool,
+    pub gpu_region_stats: Option<GpuRegionStats>,
     pub gpu_kv_capacity_bytes: usize,
     pub gpu_prefill_batch_tokens: Option<usize>,
     pub gpu_prefill_weight_reuse_tokens: usize,
@@ -4138,7 +4135,7 @@ mod tests {
 
         #[test]
         #[ignore = "requires physical GPU and real configured-model checkpoint"]
-        fn gpu_actual_canonical_lod_zero_matches_dense_gpu_outputs() {
+        fn gpu_actual_gpu_region_zero_matches_dense_gpu_outputs() {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
@@ -4154,18 +4151,18 @@ mod tests {
             let dense_ids = dense_result.tokens.clone();
             // Free dense weights before allocating another >2 GiB GPU runtime.
             drop(dense);
-            let cfg = CanonicalGpuLodConfig {
+            let cfg = GpuRegionConfig {
                 epsilon: 0.0,
                 stage_tokens: 4,
                 cold_directory: None,
             };
             let mut lod =
-                OpenClLlm::load_with_canonical_lod(&model, 64, WeightMode::Resident, cfg).unwrap();
+                OpenClLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, cfg).unwrap();
             let lod_result = lod.generate(&ids, 16, true).unwrap();
             assert_eq!(dense_ids, lod_result.tokens);
-            assert!(lod_result.canonical_cpu_lod_components_active);
+            assert!(lod_result.gpu_region_components_active);
             assert!(lod_result.gpu_kv_capacity_bytes < 64 * 2 * 2 * 128 * 24 * 2);
-            let stats = lod_result.canonical_cpu_lod_stats.as_ref().unwrap();
+            let stats = lod_result.gpu_region_stats.as_ref().unwrap();
             assert!(stats.exact_v_tokens_read_from_cold > 0);
             assert_eq!(stats.exact_v_tokens_skipped, 0);
             assert!(stats.four_bit_index_payload_bytes > 0);
@@ -4229,27 +4226,22 @@ mod tests {
             .unwrap();
             let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
             let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
-            let config = CanonicalGpuLodConfig {
+            let config = GpuRegionConfig {
                 epsilon: 0.0,
                 stage_tokens: 8,
                 cold_directory: None,
             };
-            let mut old = OpenClLlm::load_with_canonical_lod(
-                &model,
-                64,
-                WeightMode::Resident,
-                config.clone(),
-            )
-            .unwrap();
+            let mut old =
+                OpenClLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, config.clone())
+                    .unwrap();
             let old_gen = old.generate(&ids, 16, true).unwrap();
-            let old_pages = old.canonical_lod_stats().unwrap().physical_cold_store_pages;
+            let old_pages = old.gpu_region_stats().unwrap().physical_cold_store_pages;
             drop(old);
             let mut fast =
-                OpenClLlm::load_with_canonical_lod(&model, 64, WeightMode::Resident, config)
-                    .unwrap();
+                OpenClLlm::load_with_gpu_region(&model, 64, WeightMode::Resident, config).unwrap();
             fast.set_batch_prefill_tokens(Some(64)).unwrap();
             let new_gen = fast.generate(&ids, 16, true).unwrap();
-            let new_stats = new_gen.canonical_cpu_lod_stats.as_ref().unwrap();
+            let new_stats = new_gen.gpu_region_stats.as_ref().unwrap();
             assert_eq!(
                 old_gen.tokens, new_gen.tokens,
                 "GPU LOD batch prefill changed token IDs"
@@ -4316,13 +4308,13 @@ mod tests {
                 );
             }
             drop(fast);
-            let cfg = CanonicalGpuLodConfig {
+            let cfg = GpuRegionConfig {
                 epsilon: 0.0,
                 stage_tokens: 64,
                 cold_directory: None,
             };
             let mut lod =
-                OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, cfg).unwrap();
+                OpenClLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, cfg).unwrap();
             lod.set_batch_prefill_tokens(Some(128)).unwrap();
             let lod_gen = lod.generate(&ids, 2, true).unwrap();
             assert_eq!(lod_gen.tokens, dense_gen.tokens);
@@ -4332,7 +4324,7 @@ mod tests {
                     "3-batch prefill+canonical LOD changed BF16 logits at {step}"
                 );
             }
-            let stats = lod_gen.canonical_cpu_lod_stats.as_ref().unwrap();
+            let stats = lod_gen.gpu_region_stats.as_ref().unwrap();
             assert!(
                 stats.physical_cold_store_pages < 300,
                 "GPU LOD prefill did not group cold pages into <=64-token pages"
@@ -4367,11 +4359,11 @@ mod tests {
             let original_sha = dense.logical_kv_sha256().unwrap();
             drop(dense);
 
-            let mut lod = OpenClLlm::load_with_canonical_lod(
+            let mut lod = OpenClLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
-                CanonicalGpuLodConfig::default(),
+                GpuRegionConfig::default(),
             )
             .unwrap();
             lod.set_batch_prefill_tokens(Some(128)).unwrap();
@@ -4394,7 +4386,7 @@ mod tests {
             assert_eq!(current.gpu_hot_v_valid_prefix_tokens, 390);
             assert_eq!(
                 current
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .exact_v_tokens_read_from_cold,
@@ -4403,7 +4395,7 @@ mod tests {
             );
             assert!(
                 current
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .physical_cold_store_pages
@@ -4447,11 +4439,11 @@ mod tests {
             let expected = reference.generate(&ids, 16, true).unwrap();
             let sha = reference.logical_kv_sha256().unwrap();
             drop(reference);
-            let mut optimized = OpenClLlm::load_with_canonical_lod(
+            let mut optimized = OpenClLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
-                CanonicalGpuLodConfig {
+                GpuRegionConfig {
                     epsilon: 0.0,
                     stage_tokens: 64,
                     cold_directory: None,
@@ -4474,7 +4466,7 @@ mod tests {
                 );
             }
             assert!(sha.len() == 64);
-            let stats = actual.canonical_cpu_lod_stats.as_ref().unwrap();
+            let stats = actual.gpu_region_stats.as_ref().unwrap();
             assert_eq!(stats.exact_v_tokens_skipped, 0);
             assert_eq!(
                 stats.exact_v_tokens_read_from_cold, 0,
@@ -4507,11 +4499,11 @@ mod tests {
             let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
             let make = || {
-                let mut gpu = OpenClLlm::load_with_canonical_lod(
+                let mut gpu = OpenClLlm::load_with_gpu_region(
                     &model,
                     512,
                     WeightMode::Resident,
-                    CanonicalGpuLodConfig {
+                    GpuRegionConfig {
                         epsilon: 0.0,
                         stage_tokens: 64,
                         cold_directory: None,
@@ -4563,7 +4555,7 @@ mod tests {
                     "GPU exact BF16 logits diverged step {index}"
                 );
             }
-            let stats = result.canonical_cpu_lod_stats.as_ref().unwrap();
+            let stats = result.gpu_region_stats.as_ref().unwrap();
             assert_eq!(stats.exact_v_tokens_skipped, 0);
             assert_eq!(stats.exact_v_tokens_read_from_cold, 0);
             assert!(stats.physical_cold_store_pages > 0);
@@ -4588,11 +4580,11 @@ mod tests {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-            let mut gpu = OpenClLlm::load_with_canonical_lod(
+            let mut gpu = OpenClLlm::load_with_gpu_region(
                 &model,
                 64,
                 WeightMode::Resident,
-                CanonicalGpuLodConfig::default(),
+                GpuRegionConfig::default(),
             )
             .unwrap();
             gpu.set_batch_prefill_tokens(Some(32)).unwrap();
@@ -4632,11 +4624,11 @@ mod tests {
             let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
             let create = |fused: bool| {
-                let mut gpu = OpenClLlm::load_with_canonical_lod(
+                let mut gpu = OpenClLlm::load_with_gpu_region(
                     &model,
                     512,
                     WeightMode::Resident,
-                    CanonicalGpuLodConfig {
+                    GpuRegionConfig {
                         epsilon: 0.0,
                         stage_tokens: 64,
                         cold_directory: None,
@@ -4688,7 +4680,7 @@ mod tests {
             );
             assert_eq!(
                 actual
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .exact_v_tokens_skipped,
@@ -4701,12 +4693,12 @@ mod tests {
         fn gpu_actual_micro_regions_skip_real_qk_and_cold_v_with_error_bound() {
             use super::*;
             let geom = AttentionGeometry::new(2, 1, 4).unwrap();
-            let cfg = CanonicalGpuLodConfig {
+            let cfg = GpuRegionConfig {
                 epsilon: 0.001,
                 stage_tokens: 16,
                 cold_directory: None,
             };
-            let mut lod = CanonicalGpuLod::new(geom, 1, cfg).unwrap();
+            let mut lod = GpuRegionStore::new(geom, 1, cfg).unwrap();
             let as_bf16 = |v: &[f32]| {
                 v.iter()
                     .flat_map(|&x| half::bf16::from_f32(x).to_bits().to_le_bytes())
@@ -5113,11 +5105,11 @@ mod tests {
             use super::*;
             let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
-            let mut gpu = OpenClLlm::load_with_canonical_lod(
+            let mut gpu = OpenClLlm::load_with_gpu_region(
                 &model,
                 64,
                 WeightMode::Resident,
-                CanonicalGpuLodConfig {
+                GpuRegionConfig {
                     epsilon: 0.001,
                     stage_tokens: 16,
                     cold_directory: None,
@@ -5129,7 +5121,7 @@ mod tests {
             let result = gpu.generate(&ids, 2, true).unwrap();
             assert_eq!(result.prompt_tokens, 8);
             assert!(!result.tokens.is_empty());
-            let stats = result.canonical_cpu_lod_stats.unwrap();
+            let stats = result.gpu_region_stats.unwrap();
             assert!(stats.shared_original_cpu_algorithms);
             // The batched prefill uses dense causal GPU attention with K/V
             // sealed once; only subsequent autoregressive decode invokes
@@ -5175,14 +5167,13 @@ mod tests {
 
             // NEW POSITIVE epsilon GPU BF16 HOT V; original canonical CPU
             // ColdStore and four-bit/LSH remain the authoritative BF16 backing.
-            let config = CanonicalGpuLodConfig {
+            let config = GpuRegionConfig {
                 epsilon: 0.001,
                 stage_tokens: 64,
                 cold_directory: None,
             };
             let mut runtime =
-                OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, config)
-                    .unwrap();
+                OpenClLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, config).unwrap();
             runtime.set_batch_prefill_tokens(Some(128)).unwrap();
             runtime.set_prefill_weight_reuse_tokens(8).unwrap();
             runtime.set_decode_unroll4(true).unwrap();
@@ -5207,7 +5198,7 @@ mod tests {
                 actual.gpu_hot_v_cold_fallback_calls, 0,
                 "hot BF16 V must avoid cold value staging"
             );
-            let stats = actual.canonical_cpu_lod_stats.as_ref().unwrap();
+            let stats = actual.gpu_region_stats.as_ref().unwrap();
             assert_eq!(stats.micro_sparse_queries, 0);
             assert_eq!(stats.exact_v_tokens_read_from_cold, 0);
             assert_eq!(stats.exact_v_tokens_skipped, 0);
@@ -5277,7 +5268,7 @@ mod tests {
             }
             assert_eq!(
                 again
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .exact_v_tokens_skipped,
@@ -5288,7 +5279,7 @@ mod tests {
                 ids.len(),
                 again.tokens.len(),
                 again
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .physical_cold_store_bytes
@@ -5424,11 +5415,11 @@ mod tests {
             let prompt = tokenizer.encode(input, false).unwrap().get_ids().to_vec();
             assert_eq!(prompt.len(), 375);
             let build = |enabled: bool| {
-                let mut runtime = OpenClLlm::load_with_canonical_lod(
+                let mut runtime = OpenClLlm::load_with_gpu_region(
                     &model,
                     512,
                     WeightMode::Resident,
-                    CanonicalGpuLodConfig {
+                    GpuRegionConfig {
                         epsilon: 0.0,
                         stage_tokens: 64,
                         cold_directory: None,
@@ -5488,7 +5479,7 @@ mod tests {
             );
             assert_eq!(
                 after
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .exact_v_tokens_skipped,
@@ -5496,7 +5487,7 @@ mod tests {
             );
             assert_eq!(
                 after
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .exact_v_tokens_read_from_cold,
@@ -5504,12 +5495,12 @@ mod tests {
             );
             assert_eq!(
                 before
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .physical_cold_store_pages,
                 after
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .physical_cold_store_pages
@@ -5741,13 +5732,13 @@ mod tests {
             );
             let ids = tok.encode(prompt, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let cfg = CanonicalGpuLodConfig {
+            let cfg = GpuRegionConfig {
                 epsilon: 0.0,
                 stage_tokens: 64,
                 cold_directory: None,
             };
             let mut gpu =
-                OpenClLlm::load_with_canonical_lod(&model, 512, WeightMode::Resident, cfg).unwrap();
+                OpenClLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, cfg).unwrap();
             gpu.set_batch_prefill_tokens(Some(128)).unwrap();
             gpu.set_prefill_weight_reuse_tokens(8).unwrap();
             gpu.set_exact_hot_v_tokens(512).unwrap();
@@ -5786,7 +5777,7 @@ mod tests {
             assert!(first.gpu_verified_prompt_replay_cached_bytes > 9_000_000);
             assert_eq!(
                 first
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .exact_v_tokens_skipped,
@@ -5819,12 +5810,12 @@ mod tests {
             );
             assert_eq!(
                 first
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .physical_cold_store_pages,
                 replay
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .physical_cold_store_pages
@@ -5896,11 +5887,11 @@ mod tests {
             );
             assert!(ids_b.len() + 16 <= 512);
 
-            let mut gpu = OpenClLlm::load_with_canonical_lod(
+            let mut gpu = OpenClLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
-                CanonicalGpuLodConfig {
+                GpuRegionConfig {
                     epsilon: 0.0,
                     stage_tokens: 64,
                     cold_directory: None,
@@ -5953,7 +5944,7 @@ mod tests {
             );
             assert_eq!(
                 suffix_b
-                    .canonical_cpu_lod_stats
+                    .gpu_region_stats
                     .as_ref()
                     .unwrap()
                     .exact_v_tokens_skipped,
@@ -6192,11 +6183,11 @@ mod tests {
             );
             let ids = tok.encode(chat, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut gpu = OpenClLlm::load_with_canonical_lod(
+            let mut gpu = OpenClLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
-                CanonicalGpuLodConfig {
+                GpuRegionConfig {
                     epsilon: 0.0,
                     stage_tokens: 64,
                     cold_directory: None,
@@ -6255,8 +6246,8 @@ mod tests {
                 ref_sha, new_sha,
                 "fused BF16 QKV / SwiGLU changed original ColdStore BF16 logical K/V"
             );
-            let s1 = reference.canonical_cpu_lod_stats.as_ref().unwrap();
-            let s2 = new.canonical_cpu_lod_stats.as_ref().unwrap();
+            let s1 = reference.gpu_region_stats.as_ref().unwrap();
+            let s2 = new.gpu_region_stats.as_ref().unwrap();
             assert_eq!(s1.physical_cold_store_pages, s2.physical_cold_store_pages);
             assert_eq!(s1.physical_cold_store_bytes, s2.physical_cold_store_bytes);
             assert_eq!(s1.exact_v_tokens_skipped, 0);
@@ -6369,11 +6360,11 @@ mod tests {
             );
             let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 375);
-            let mut model = OpenClLlm::load_with_canonical_lod(
+            let mut model = OpenClLlm::load_with_gpu_region(
                 &model,
                 512,
                 WeightMode::Resident,
-                CanonicalGpuLodConfig {
+                GpuRegionConfig {
                     epsilon: 0.0,
                     stage_tokens: 64,
                     cold_directory: None,
@@ -6427,14 +6418,14 @@ mod tests {
                     "BF16 ColdStore K/V SHA different for GPU batch {batch}"
                 );
                 assert_eq!(
-                    run.canonical_cpu_lod_stats
+                    run.gpu_region_stats
                         .as_ref()
                         .unwrap()
                         .exact_v_tokens_skipped,
                     0
                 );
                 assert_eq!(
-                    run.canonical_cpu_lod_stats
+                    run.gpu_region_stats
                         .as_ref()
                         .unwrap()
                         .physical_cold_store_pages,
@@ -6463,7 +6454,7 @@ mod tests {
                 }
                 assert_eq!(
                     result
-                        .canonical_cpu_lod_stats
+                        .gpu_region_stats
                         .as_ref()
                         .unwrap()
                         .exact_v_tokens_skipped,
@@ -6501,14 +6492,14 @@ mod tests {
             let model = std::env::var("MSLIM_TEST_MODEL")
                 .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
             let directory = tempfile::tempdir().unwrap();
-            let config = CanonicalGpuLodConfig {
+            let config = GpuRegionConfig {
                 epsilon: 0.0,
                 stage_tokens: 64,
                 cold_directory: Some(directory.path().to_owned()),
             };
             let ids = [128000_u32, 9906, 11, 1917, 0, 128001, 128006, 882];
             {
-                let mut source = OpenClLlm::load_with_canonical_lod(
+                let mut source = OpenClLlm::load_with_gpu_region(
                     &model,
                     32,
                     WeightMode::Resident,
@@ -6522,10 +6513,9 @@ mod tests {
             }
 
             let mut restored =
-                OpenClLlm::load_with_canonical_lod(&model, 32, WeightMode::Resident, config)
-                    .unwrap();
+                OpenClLlm::load_with_gpu_region(&model, 32, WeightMode::Resident, config).unwrap();
             restored.set_exact_hot_v_tokens(32).unwrap();
-            let receipt = restored.restore_canonical_session(&ids).unwrap();
+            let receipt = restored.restore_session(&ids).unwrap();
             assert_eq!(receipt.tokens, ids.len());
             assert_eq!(receipt.layers, restored.spec().num_hidden_layers);
             assert!(receipt.hot_values_restored);

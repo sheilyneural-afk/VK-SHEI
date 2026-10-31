@@ -1,4 +1,4 @@
-# M-SLIM: núcleo universal y adaptadores de ejecución
+# M-SLIM: núcleo backend-neutral y adaptadores de ejecución
 
 M-SLIM es el nombre único del producto y de su API local. El núcleo trabaja con
 metadatos de checkpoint, geometría K/V, serialización, integridad y almacenamiento
@@ -11,7 +11,7 @@ ninguna API, fabricante, proveedor ni runtime concreto. Un backend que dependa
 de hardware o bibliotecas externas debe quedar en modo explícito hasta
 que exista una detección real de disponibilidad y capacidades en ese equipo.
 Si no existe una coincidencia probada, la selección falla; no hay fallback
-silencioso ni se presenta un backend opcional como universal.
+silencioso ni se presenta un backend opcional como compatible sin pruebas.
 
 El catálogo distingue entre backend compilado y runtime disponible en el equipo:
 `Compiled`, `RuntimeAvailable`, `RuntimeUnavailable` y `RequiresProbe`. Que una
@@ -50,7 +50,7 @@ de pesos admite. Si el adaptador no puede demostrar compatibilidad completa,
 M-SLIM debe rechazar la ejecución y permitir únicamente inspección; no debe
 simular compatibilidad ni seleccionar una arquitectura por nombre.
 
-Los perfiles concretos que aparecen en las pruebas históricas son datos de
+Los perfiles concretos que aparecen en las pruebas de referencia son datos de
 validación, no contratos públicos ni nombres de M-SLIM. Los checkpoints y sus
 tokenizers deben residir exclusivamente bajo
 `deploy/local-production/runtime/models/<digest>` y se seleccionan mediante

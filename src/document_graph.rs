@@ -1,4 +1,4 @@
-//! Lossless document-page authority plus compact deterministic routing data.
+//! Original document pages plus compact deterministic routing data.
 //!
 //! This is deliberately not an LLM summary store. Micro-metadata and graph
 //! edges select candidate pages; every returned item carries the original
@@ -128,7 +128,7 @@ pub struct RetrievalPhase {
     pub selected_characters: usize,
     pub complete_for_candidate_set: bool,
     pub original_text_authority: bool,
-    pub semantic_exhaustiveness_certified: bool,
+    pub full_scope_coverage_verified: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -341,7 +341,7 @@ impl DocumentGraph {
             selected_characters,
             complete_for_candidate_set: true,
             original_text_authority: true,
-            semantic_exhaustiveness_certified: false,
+            full_scope_coverage_verified: false,
         })
     }
 
@@ -672,7 +672,7 @@ impl DocumentGraph {
                 selected_characters,
                 complete_for_candidate_set: deferred.is_empty(),
                 original_text_authority: true,
-                semantic_exhaustiveness_certified: false,
+                full_scope_coverage_verified: false,
             },
             next_offset,
         ))
@@ -1156,7 +1156,7 @@ mod tests {
         assert_eq!(phase.candidate_pages, 1);
         assert_eq!(phase.evidence[0].page_number, 1);
         assert!(phase.complete_for_candidate_set);
-        assert!(!phase.semantic_exhaustiveness_certified);
+        assert!(!phase.full_scope_coverage_verified);
     }
 
     #[test]
@@ -1190,7 +1190,7 @@ mod tests {
         assert_eq!(phase.broad_match_pages, 3);
         assert_eq!(phase.candidate_pages, 3);
         assert!(phase.complete_for_candidate_set);
-        assert!(!phase.semantic_exhaustiveness_certified);
+        assert!(!phase.full_scope_coverage_verified);
     }
 
     #[test]

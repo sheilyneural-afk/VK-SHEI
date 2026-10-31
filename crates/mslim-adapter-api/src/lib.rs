@@ -124,7 +124,7 @@ pub fn select_available_adapter(
         })
 }
 
-/// Universal execution boundary between M-SLIM and an inference runtime.
+/// Backend-neutral execution boundary between M-SLIM and an inference runtime.
 pub trait ModelAdapter: Send {
     fn capabilities(&self) -> &AdapterCapabilities;
     fn inspect(&self, model_dir: &Path, config: &Value) -> Result<()>;

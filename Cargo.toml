@@ -14,11 +14,6 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [[bin]]
-name = "mslim-cpu-worker"
-required-features = ["torch-backend"]
-path = "src/bin/mslim-server.rs"
-
-[[bin]]
 name = "mslim-long-context"
 required-features = ["torch-backend"]
 path = "src/bin/mslim-long-context.rs"

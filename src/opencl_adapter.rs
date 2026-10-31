@@ -1,4 +1,4 @@
-//! Concrete accelerator implementation behind the universal adapter boundary.
+//! Concrete accelerator implementation behind the backend-neutral adapter contract.
 
 use std::{
     fs,
@@ -10,7 +10,7 @@ use anyhow::{Context, Result, ensure};
 use mslim_adapter_api::{AdapterCapabilities, ModelAdapter};
 use serde_json::{Value, json};
 
-use crate::gpu_canonical_lod::CanonicalGpuLodConfig;
+use crate::gpu_region_store::GpuRegionConfig;
 use crate::model_bundle::ModelBundle;
 use crate::opencl_llm::{OpenClLlm, WeightMode};
 
@@ -103,7 +103,7 @@ impl ModelAdapter for OpenClModelAdapter {
             None
         };
         let physical_restore = cold_directory.is_some();
-        let lod = CanonicalGpuLodConfig {
+        let lod = GpuRegionConfig {
             epsilon,
             stage_tokens,
             cold_directory,
@@ -117,7 +117,7 @@ impl ModelAdapter for OpenClModelAdapter {
             "stream" => WeightMode::Stream,
             other => anyhow::bail!("unsupported mslim_weight_mode: {other}"),
         };
-        let mut runtime = OpenClLlm::load_with_canonical_lod(model_dir, max_tokens, mode, lod)
+        let mut runtime = OpenClLlm::load_with_gpu_region(model_dir, max_tokens, mode, lod)
             .context("load exact canonical accelerator model adapter")?;
         let prefill_batch = config
             .get("mslim_prefill_batch_tokens")
@@ -347,7 +347,7 @@ impl ModelAdapter for OpenClModelAdapter {
             .context("OpenCL adapter is not loaded")?;
         runtime.reset_session_at(Some(cold_directory))?;
         if !tokens.is_empty() {
-            let receipt = runtime.restore_canonical_session(&tokens)?;
+            let receipt = runtime.restore_session(&tokens)?;
             ensure!(
                 receipt.tokens == tokens.len(),
                 "physical OpenCL restore returned an incomplete prefix"

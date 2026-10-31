@@ -1,4 +1,4 @@
-//! LibTorch implementation of the universal adapter boundary.
+//! LibTorch implementation of the backend-neutral adapter contract.
 //!
 //! The current dense runtime exposes stateless generation. This adapter keeps
 //! the session token history and reconstructs its K/V state by deterministic

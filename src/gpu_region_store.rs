@@ -31,13 +31,13 @@ use std::{collections::BTreeSet, path::PathBuf};
 use tempfile::{Builder, TempDir};
 
 #[derive(Clone, Debug)]
-pub struct CanonicalGpuLodConfig {
+pub struct GpuRegionConfig {
     pub epsilon: f64,
     pub stage_tokens: usize,
     pub cold_directory: Option<PathBuf>,
 }
 
-impl Default for CanonicalGpuLodConfig {
+impl Default for GpuRegionConfig {
     fn default() -> Self {
         Self {
             epsilon: 0.0,
@@ -47,7 +47,7 @@ impl Default for CanonicalGpuLodConfig {
     }
 }
 
-impl CanonicalGpuLodConfig {
+impl GpuRegionConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.epsilon.is_finite() && (0.0..=0.1).contains(&self.epsilon),
@@ -69,7 +69,7 @@ impl CanonicalGpuLodConfig {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct CanonicalGpuLodStats {
+pub struct GpuRegionStats {
     pub queries: usize,
     pub exact_k_scores_computed_on_gpu: usize,
     pub exact_v_tokens_read_from_cold: usize,
@@ -99,7 +99,7 @@ pub struct CanonicalGpuLodStats {
 }
 
 #[derive(Clone, Debug)]
-pub struct CanonicalSelection {
+pub struct SelectionResult {
     pub positions: Vec<usize>,
     pub selected_mass_per_head: Vec<f32>,
     pub bounds: Vec<f64>,
@@ -114,8 +114,8 @@ struct PageAddress {
     offset: usize,
 }
 
-pub struct CanonicalGpuLod {
-    config: CanonicalGpuLodConfig,
+pub struct GpuRegionStore {
+    config: GpuRegionConfig,
     geometry: AttentionGeometry,
     axis: ParallelContextAxis,
     axis_policy: AxisPolicy,
@@ -129,14 +129,14 @@ pub struct CanonicalGpuLod {
     last_route_token: Option<usize>,
     last_seed_positions: BTreeSet<usize>,
     micro_regions: Option<MicroKeyRegions>,
-    pub stats: CanonicalGpuLodStats,
+    pub stats: GpuRegionStats,
 }
 
-impl CanonicalGpuLod {
+impl GpuRegionStore {
     pub fn new(
         geometry: AttentionGeometry,
         layer_count: usize,
-        config: CanonicalGpuLodConfig,
+        config: GpuRegionConfig,
     ) -> Result<Self> {
         Self::new_with_axis_policy(geometry, layer_count, config, AxisPolicy::default())
     }
@@ -147,7 +147,7 @@ impl CanonicalGpuLod {
     pub fn new_with_axis_policy(
         geometry: AttentionGeometry,
         layer_count: usize,
-        config: CanonicalGpuLodConfig,
+        config: GpuRegionConfig,
         axis_policy: AxisPolicy,
     ) -> Result<Self> {
         config.validate()?;
@@ -168,7 +168,7 @@ impl CanonicalGpuLod {
                 (None, store)
             }
             None => {
-                let directory = Builder::new().prefix("mslim-gpu-canonical-").tempdir()?;
+                let directory = Builder::new().prefix("mslim-gpu-region-").tempdir()?;
                 let store = ColdStore::create(directory.path().join("pages-exact.kv"), 0)?;
                 (Some(directory), store)
             }
@@ -195,10 +195,10 @@ impl CanonicalGpuLod {
             last_route_token: None,
             last_seed_positions: BTreeSet::new(),
             micro_regions,
-            stats: CanonicalGpuLodStats {
+            stats: GpuRegionStats {
                 gpu_stage_tokens: stage_tokens,
                 shared_original_cpu_algorithms: true,
-                ..CanonicalGpuLodStats::default()
+                ..GpuRegionStats::default()
             },
         };
         runtime.restore_catalogue()?;
@@ -290,7 +290,7 @@ impl CanonicalGpuLod {
         Ok(())
     }
 
-    pub fn config(&self) -> &CanonicalGpuLodConfig {
+    pub fn config(&self) -> &GpuRegionConfig {
         &self.config
     }
     pub fn geometry(&self) -> AttentionGeometry {
@@ -541,7 +541,7 @@ impl CanonicalGpuLod {
         &mut self,
         layer: usize,
         query: &[u8],
-    ) -> Result<Option<CanonicalSelection>> {
+    ) -> Result<Option<SelectionResult>> {
         if self.config.epsilon == 0.0 {
             return Ok(None);
         }
@@ -584,7 +584,7 @@ impl CanonicalGpuLod {
             .stats
             .maximum_certified_error_bound
             .max(plan.error_bounds.iter().copied().fold(0.0, f64::max));
-        Ok(Some(CanonicalSelection {
+        Ok(Some(SelectionResult {
             positions: plan.positions,
             selected_mass_per_head: vec![1.0; self.geometry.query_heads],
             bounds: plan.error_bounds,
@@ -598,7 +598,7 @@ impl CanonicalGpuLod {
     /// every V token is required. The original 4-bit axis is still populated
     /// via append, but LSH searches and GPU QK readback cannot narrow the
     /// selection, so they are skipped to avoid pointless overhead.
-    pub fn select_dense_exact(&mut self, layer: usize) -> Result<CanonicalSelection> {
+    pub fn select_dense_exact(&mut self, layer: usize) -> Result<SelectionResult> {
         let tokens = self.layer_tokens(layer);
         ensure!(tokens > 0, "no BF16 K/V tokens for exact LOD");
         ensure!(
@@ -609,7 +609,7 @@ impl CanonicalGpuLod {
         self.stats.queries += 1;
         self.stats.exact_k_scores_computed_on_gpu += tokens * heads;
         self.stats.exact_fallbacks += 1;
-        Ok(CanonicalSelection {
+        Ok(SelectionResult {
             positions: (0..tokens).collect(),
             selected_mass_per_head: vec![1.0; heads],
             bounds: vec![0.0; heads],
@@ -688,7 +688,7 @@ impl CanonicalGpuLod {
         layer: usize,
         query: &[u8],
         scores: &[f32],
-    ) -> Result<CanonicalSelection> {
+    ) -> Result<SelectionResult> {
         let tokens = self.layer_tokens(layer);
         ensure!(tokens > 0, "GPU LOD no BF16 KV recorded");
         ensure!(
@@ -769,7 +769,7 @@ impl CanonicalGpuLod {
         self.stats.exact_v_tokens_skipped += omitted;
         self.stats.maximum_certified_error_bound =
             self.stats.maximum_certified_error_bound.max(bound);
-        Ok(CanonicalSelection {
+        Ok(SelectionResult {
             positions,
             selected_mass_per_head: normalizers,
             bounds,
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn canonical_cpu_index_and_cold_store_reused_exactly() {
-        let mut store = CanonicalGpuLod::new(geom(), 1, CanonicalGpuLodConfig::default()).unwrap();
+        let mut store = GpuRegionStore::new(geom(), 1, GpuRegionConfig::default()).unwrap();
         let k = bits(&[0., 1., 2., 3., 4., 5., 6., 7.]);
         let v = bits(&[1., 0., -2., 3., 4., -5., 6., 7.]);
         for t in 0..5 {
@@ -925,11 +925,11 @@ mod tests {
 
     #[test]
     fn approximate_mass_oracle_is_same_cpu_function() {
-        let config = CanonicalGpuLodConfig {
+        let config = GpuRegionConfig {
             epsilon: 0.01,
             ..Default::default()
         };
-        let mut cache = CanonicalGpuLod::new(geom(), 1, config).unwrap();
+        let mut cache = GpuRegionStore::new(geom(), 1, config).unwrap();
         let k = bits(&[1., 0., 0., 0., 1., 0., 0., 0.]);
         let v = bits(&[2.; 8]);
         for t in 0..24 {
@@ -958,8 +958,7 @@ mod tests {
             .collect();
         let keys = bits(&key_items);
         let values = bits(&value_items);
-        let mut grouped =
-            CanonicalGpuLod::new(geom(), 1, CanonicalGpuLodConfig::default()).unwrap();
+        let mut grouped = GpuRegionStore::new(geom(), 1, GpuRegionConfig::default()).unwrap();
         grouped.append_batch(0, 0, &keys, &values, 8).unwrap();
         assert_eq!(grouped.layer_tokens(0), count);
         assert_eq!(grouped.axis().token_len(), count);
@@ -978,8 +977,7 @@ mod tests {
             .flat_map(|&i| values[i * 16..(i + 1) * 16].iter().copied())
             .collect::<Vec<_>>();
         assert_eq!(selected, original_selected);
-        let mut token_pages =
-            CanonicalGpuLod::new(geom(), 1, CanonicalGpuLodConfig::default()).unwrap();
+        let mut token_pages = GpuRegionStore::new(geom(), 1, GpuRegionConfig::default()).unwrap();
         for t in 0..count {
             token_pages
                 .append(
@@ -1003,7 +1001,7 @@ mod tests {
     #[test]
     fn configured_cold_directory_reopens_exact_prefix_and_axis() {
         let directory = tempfile::tempdir().unwrap();
-        let config = CanonicalGpuLodConfig {
+        let config = GpuRegionConfig {
             cold_directory: Some(directory.path().to_path_buf()),
             ..Default::default()
         };
@@ -1019,11 +1017,11 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         {
-            let mut first = CanonicalGpuLod::new(geom(), 1, config.clone()).unwrap();
+            let mut first = GpuRegionStore::new(geom(), 1, config.clone()).unwrap();
             first.append_batch(0, 0, &keys, &values, 4).unwrap();
             assert!(!first.axis().extents().is_empty());
         }
-        let mut reopened = CanonicalGpuLod::new(geom(), 1, config).unwrap();
+        let mut reopened = GpuRegionStore::new(geom(), 1, config).unwrap();
         assert_eq!(reopened.layer_tokens(0), count);
         assert_eq!(reopened.axis().token_len(), count);
         assert!(!reopened.axis().extents().is_empty());
@@ -1037,7 +1035,7 @@ mod tests {
 
     #[test]
     fn canonical_exact_storage_rejects_nan() {
-        let mut store = CanonicalGpuLod::new(geom(), 1, CanonicalGpuLodConfig::default()).unwrap();
+        let mut store = GpuRegionStore::new(geom(), 1, GpuRegionConfig::default()).unwrap();
         let key = bits(&[f32::NAN; 8]);
         let value = bits(&[1.0; 8]);
         assert!(store.append(0, 0, &key, &value).is_err());

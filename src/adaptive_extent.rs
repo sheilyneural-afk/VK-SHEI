@@ -35,7 +35,7 @@ impl Default for AxisPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct SemanticExtent {
+pub struct ObservedExtent {
     pub id: usize,
     pub token_start: usize,
     pub token_end: usize,
@@ -116,7 +116,7 @@ pub struct AxisRegion {
     pub open: bool,
 }
 
-impl SemanticExtent {
+impl ObservedExtent {
     pub fn tokens(&self) -> usize {
         self.token_end - self.token_start
     }
@@ -395,7 +395,7 @@ pub struct ParallelContextAxis {
     temporal_surprise: RunningNovelty,
     previous_signal: Option<Vec<f32>>,
     open: Option<OpenExtent>,
-    extents: Vec<SemanticExtent>,
+    extents: Vec<ObservedExtent>,
     dimension_fingerprints: Vec<Vec<FourBitFingerprint>>,
     quadratic_levels: Vec<Vec<QuadraticDimension>>,
     lsh: Vec<LshIndex>,
@@ -463,7 +463,7 @@ impl ParallelContextAxis {
 
     /// Observe one token-aligned signal already available in the model.
     /// Returns the extent closed immediately before this token, if any.
-    pub fn observe(&mut self, signal: &[f32]) -> Result<Option<SemanticExtent>> {
+    pub fn observe(&mut self, signal: &[f32]) -> Result<Option<ObservedExtent>> {
         self.validate_signal(signal)?;
         let Some(open) = self.open.as_ref() else {
             self.open = Some(OpenExtent::new(self.next_token, signal));
@@ -527,11 +527,11 @@ impl ParallelContextAxis {
 
     /// Close the current semantic extent at a lifecycle boundary such as the
     /// end of prefill. This does not pad or retokenize it.
-    pub fn flush(&mut self) -> Option<SemanticExtent> {
+    pub fn flush(&mut self) -> Option<ObservedExtent> {
         self.close_open(0.0)
     }
 
-    pub fn extents(&self) -> &[SemanticExtent] {
+    pub fn extents(&self) -> &[ObservedExtent] {
         &self.extents
     }
 
@@ -962,7 +962,7 @@ impl ParallelContextAxis {
             .sum()
     }
 
-    fn close_open(&mut self, boundary_novelty: f32) -> Option<SemanticExtent> {
+    fn close_open(&mut self, boundary_novelty: f32) -> Option<ObservedExtent> {
         let open = self.open.take()?;
         let centroid = open.centroid();
         let head_fingerprints = self.encode_heads(&centroid);
@@ -973,7 +973,7 @@ impl ParallelContextAxis {
             .fold(0_u8, |seal, byte| seal ^ byte)
             & 0x0f;
         let coherence = extent_coherence(&centroid, &open.minimum, &open.maximum);
-        let extent = SemanticExtent {
+        let extent = ObservedExtent {
             id: self.extents.len(),
             token_start: open.token_start,
             token_end: open.token_start + open.count,
@@ -994,7 +994,7 @@ impl ParallelContextAxis {
         Some(extent)
     }
 
-    fn push_quadratic_microdimension(&mut self, extent: &SemanticExtent) {
+    fn push_quadratic_microdimension(&mut self, extent: &ObservedExtent) {
         if self.quadratic_levels.is_empty() {
             self.quadratic_levels.push(Vec::new());
         }
@@ -1341,7 +1341,7 @@ mod tests {
         let lengths = axis
             .extents()
             .iter()
-            .map(SemanticExtent::tokens)
+            .map(ObservedExtent::tokens)
             .collect::<Vec<_>>();
         assert_eq!(lengths.iter().sum::<usize>(), 14);
         assert!(lengths.len() >= 2);
@@ -1376,7 +1376,7 @@ mod tests {
         assert_eq!(
             axis.extents()
                 .iter()
-                .map(SemanticExtent::tokens)
+                .map(ObservedExtent::tokens)
                 .collect::<Vec<_>>(),
             vec![10, 10, 10]
         );

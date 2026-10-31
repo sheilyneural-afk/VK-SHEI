@@ -1,8 +1,8 @@
-# Tarea: KV-SHEI runtime universal de extremo a extremo
+# Tarea: runtime backend-neutral de KV-SHEI de extremo a extremo
 
 ## Objetivo
 
-Completar la ruta universal real:
+Completar y medir la ruta backend-neutral:
 
 manifest -> descubrimiento -> host IPC -> sesión -> Prefill/Decode -> snapshot/restore KV -> worker HTTP.
 

@@ -1,7 +1,7 @@
 //! Portable native CPU inference for decoder bundles with the resolved tensor layout.
 //!
 //! This backend deliberately uses only Rust, mmap, rayon and safetensors. It is
-//! the universal correctness path; architecture-specific SIMD can replace the
+//! the portable correctness path; architecture-specific SIMD can replace the
 //! matvec kernel without changing the adapter contract.
 
 use std::{
@@ -19,7 +19,7 @@ use safetensors::{Dtype, SafeTensors};
 use serde_json::{Value, json};
 
 use crate::{
-    gpu_canonical_lod::{CanonicalGpuLod, CanonicalGpuLodConfig},
+    gpu_region_store::{GpuRegionConfig, GpuRegionStore},
     model_bundle::ModelBundle,
     model_config::ModelSpec,
     portable::AttentionGeometry,
@@ -151,8 +151,8 @@ trait NativeCausalRuntime: Send {
 struct NativeCpuDecoder {
     spec: ModelSpec,
     weights: NativeWeightArchive,
-    kv: CanonicalGpuLod,
-    kv_config: CanonicalGpuLodConfig,
+    kv: GpuRegionStore,
+    kv_config: GpuRegionConfig,
     hot_keys: Vec<Vec<u8>>,
     hot_values: Vec<Vec<u8>>,
     hot_budget_bytes: usize,
@@ -310,12 +310,12 @@ impl NativeCpuDecoder {
             spec.attention.kv_heads,
             spec.attention.head_dim,
         )?;
-        let kv_config = CanonicalGpuLodConfig {
+        let kv_config = GpuRegionConfig {
             epsilon,
             stage_tokens,
             cold_directory: None,
         };
-        let kv = CanonicalGpuLod::new(geometry, spec.num_hidden_layers, kv_config.clone())?;
+        let kv = GpuRegionStore::new(geometry, spec.num_hidden_layers, kv_config.clone())?;
         let hot_budget_bytes = config
             .get("native_hot_kv_bytes")
             .and_then(Value::as_u64)
@@ -619,7 +619,7 @@ impl NativeCausalRuntime for NativeCpuDecoder {
 
     fn reset(&mut self) -> Result<()> {
         let g = self.spec.attention;
-        self.kv = CanonicalGpuLod::new(
+        self.kv = GpuRegionStore::new(
             AttentionGeometry::new(g.query_heads, g.kv_heads, g.head_dim)?,
             self.spec.num_hidden_layers,
             self.kv_config.clone(),

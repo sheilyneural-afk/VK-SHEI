@@ -131,7 +131,7 @@ impl MicroKeyRegions {
         layer: usize,
         start: usize,
         original_k_bf16: &[u8],
-        canonical_axis: &ParallelContextAxis,
+        region_axis: &ParallelContextAxis,
     ) -> Result<()> {
         let token_bytes = self
             .geometry
@@ -149,7 +149,7 @@ impl MicroKeyRegions {
         ensure!(
             start
                 .checked_add(count)
-                .is_some_and(|end| end <= canonical_axis.token_len()),
+                .is_some_and(|end| end <= region_axis.token_len()),
             "micro K region would exceed canonical ParallelContextAxis"
         );
         let layers = self
@@ -171,7 +171,7 @@ impl MicroKeyRegions {
         }
         // The original CPU region ranges are sorted. Walk once rather
         // than linearly searching every extent for each BF16 token.
-        let regions = canonical_axis.regions();
+        let regions = region_axis.regions();
         let mut range_idx = regions.partition_point(|r| r.token_end <= start);
         for (index, values) in parsed.iter().enumerate() {
             let position = start + index;

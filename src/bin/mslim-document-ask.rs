@@ -188,7 +188,7 @@ fn main() -> Result<()> {
                 "whole_document_transformer_prefill":false,
                 "selected_original_evidence_prefill":true,
                 "candidate_set_exhausted":candidate_set_exhausted,
-                "semantic_exhaustiveness_certified":phases[0].semantic_exhaustiveness_certified
+                "full_scope_coverage_verified":phases[0].full_scope_coverage_verified
             }
         }))?
     );

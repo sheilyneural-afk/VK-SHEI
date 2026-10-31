@@ -74,7 +74,7 @@ La instalación de una release debe seguir este orden:
 El usuario no debe instalar manualmente dependencias del proyecto. Cargo las
 mantiene en `runtime/cargo-home` y el build en `runtime/build-target`. Los
 drivers del sistema son la única excepción: no se pueden empaquetar de forma
-universal dentro de M-SLIM y deben existir ya en el sistema operativo. Si un
+portable dentro de M-SLIM y deben existir ya en el sistema operativo. Si un
 driver o runtime no está disponible, M-SLIM lo informa y deja el núcleo de
 contexto/KV utilizable, sin fingir que el modelo puede ejecutarse.
 
@@ -212,10 +212,10 @@ deploy/local-production/scripts/cargo-local.sh check --locked --no-default-featu
 deploy/local-production/scripts/cargo-local.sh test --locked --lib --no-default-features
 ```
 
-El `Cargo.lock` fija las versiones. Las correcciones normales reutilizan el
+El `Cargo.lock` fija las versiones. El mantenimiento normal reutiliza el
 registro y el target incremental; Cargo recompila únicamente las cajas
 afectadas y sus dependientes. No se debe borrar `runtime/cargo-home` ni
-`runtime/build-target` para corregir código. La limpieza, si fuese necesaria,
+`runtime/build-target` para conservar el entorno de compilación. La limpieza, si fuese necesaria,
 debe hacerse por perfil y conservar el registro de crates y el target de
 desarrollo.
 

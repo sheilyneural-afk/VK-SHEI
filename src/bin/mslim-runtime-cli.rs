@@ -3,7 +3,7 @@
 //! Local runtime command line entry point for a verified model bundle.
 
 use anyhow::{Context, Result, bail, ensure};
-use mslim::gpu_canonical_lod::CanonicalGpuLodConfig;
+use mslim::gpu_region_store::GpuRegionConfig;
 use mslim::opencl_llm::{OpenClLlm, WeightMode};
 use serde_json::json;
 use std::{path::PathBuf, time::Instant};
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
     let mut verify_weights = false;
     let mut capture_logits = false;
     let mut thinking = false;
-    let mut lod = None::<CanonicalGpuLodConfig>;
+    let mut lod = None::<GpuRegionConfig>;
     let mut gpu_micro_sigma: Option<f32> = None;
     let mut gpu_micro_warmup: Option<usize> = None;
     let mut gpu_micro_open_fuse: Option<usize> = None;
@@ -157,7 +157,7 @@ fn main() -> Result<()> {
                     .parse()?;
             }
             "--gpu-lod" => {
-                lod.get_or_insert_with(CanonicalGpuLodConfig::default);
+                lod.get_or_insert_with(GpuRegionConfig::default);
             }
             "--gpu-dense-kv" => {
                 lod = None;
@@ -185,17 +185,16 @@ fn main() -> Result<()> {
                     .next()
                     .context("missing --lod-epsilon value")?
                     .parse()?;
-                lod.get_or_insert_with(CanonicalGpuLodConfig::default)
-                    .epsilon = value;
+                lod.get_or_insert_with(GpuRegionConfig::default).epsilon = value;
             }
             "--lod-stage" => {
                 let value = args.next().context("missing --lod-stage value")?.parse()?;
-                lod.get_or_insert_with(CanonicalGpuLodConfig::default)
+                lod.get_or_insert_with(GpuRegionConfig::default)
                     .stage_tokens = value;
             }
             "--lod-cold-dir" => {
                 let value = args.next().context("missing --lod-cold-dir path")?.into();
-                lod.get_or_insert_with(CanonicalGpuLodConfig::default)
+                lod.get_or_insert_with(GpuRegionConfig::default)
                     .cold_directory = Some(value);
             }
             "--help" | "-h" => {
@@ -237,7 +236,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "hip-backend")]
         {
             if let Some(config) = lod {
-                OpenClLlm::load_with_canonical_lod_native_hip(
+                OpenClLlm::load_with_gpu_region_native_hip(
                     &model,
                     max_context_tokens,
                     mode,
@@ -250,7 +249,7 @@ fn main() -> Result<()> {
         #[cfg(not(feature = "hip-backend"))]
         anyhow::bail!("Native gfx1103 hipBLASLt was not compiled; enable --features hip-backend")
     } else if let Some(config) = lod {
-        OpenClLlm::load_with_canonical_lod(&model, max_context_tokens, mode, config)?
+        OpenClLlm::load_with_gpu_region(&model, max_context_tokens, mode, config)?
     } else {
         OpenClLlm::load(&model, max_context_tokens, mode)?
     };
@@ -339,7 +338,7 @@ fn main() -> Result<()> {
         serde_json::to_string_pretty(&json!({
             "engine": generation.runtime, "device": generation.device_name,
             "full_llm_layers_computed_on_gpu": true,
-            "cpu_for_neural_arithmetic": false,
+            "cpu_for_device_matrix_arithmetic": false,
             "torch_backend_used": false,
             "mslim_lod_active": false,
             "input_prompt": user,
@@ -347,8 +346,8 @@ fn main() -> Result<()> {
             "completion_ids": generation.tokens,
             "completion_text": content,
             "weight_mode":format!("{mode:?}"),
-            "canonical_cpu_lod_components_active":generation.canonical_cpu_lod_components_active,
-            "canonical_cpu_lod_stats":generation.canonical_cpu_lod_stats,
+            "gpu_region_components_active":generation.gpu_region_components_active,
+            "gpu_region_stats":generation.gpu_region_stats,
             "gpu_kv_capacity_bytes":generation.gpu_kv_capacity_bytes,
             "gpu_micro_axis_novelty_sigma":runtime.gpu_micro_axis_policy().map(|p|p.novelty_sigma),
             "gpu_micro_axis_warmup":runtime.gpu_micro_axis_policy().map(|p|p.warmup_observations),

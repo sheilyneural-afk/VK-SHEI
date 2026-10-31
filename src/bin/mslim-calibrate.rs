@@ -124,7 +124,7 @@ fn main() -> Result<()> {
     }
 
     let adapter = mslim::adapter_catalog::create_adapter(&selection.adapter_id)?;
-    let mut engine = mslim::engine::MSlimEngine::new(adapter);
+    let mut engine = mslim::engine::MslimEngine::new(adapter);
     engine.inspect(&bundle, &config)?;
     let started = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let load_start = Instant::now();
@@ -228,7 +228,7 @@ fn main() -> Result<()> {
 }
 
 fn run_once(
-    engine: &mut mslim::engine::MSlimEngine,
+    engine: &mut mslim::engine::MslimEngine,
     empty_snapshot: &[u8],
     prompt_tokens: usize,
     decode_tokens: usize,

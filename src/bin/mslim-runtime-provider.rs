@@ -1,5 +1,5 @@
 //! Optional external model runtime process.
-//! Concrete device/model code lives here, outside the universal host.
+//! Concrete device/model code lives here, outside the generic host.
 use anyhow::{Context, Result};
 use mslim::{
     ipc_transport::{read_request, write_response},
