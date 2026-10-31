@@ -10,7 +10,7 @@ use mslim_adapter_api::ModelAdapter;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::engine::{EngineState, KvslimEngine};
+use crate::engine::{EngineState, MSlimEngine};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AdapterConformanceReport {
@@ -84,7 +84,7 @@ pub fn run_adapter_conformance(
         !probe_tokens.is_empty(),
         "conformance probe cannot be empty"
     );
-    let mut engine = KvslimEngine::new(adapter);
+    let mut engine = MSlimEngine::new(adapter);
     let capabilities = engine.capabilities().clone();
     ensure!(
         capabilities.supports_prefill,

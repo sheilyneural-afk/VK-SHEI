@@ -19,12 +19,12 @@ pub enum EngineState {
 }
 
 /// The M-SLIM execution engine for one loaded model session.
-pub struct KvslimEngine {
+pub struct MSlimEngine {
     adapter: Box<dyn ModelAdapter>,
     state: EngineState,
 }
 
-impl KvslimEngine {
+impl MSlimEngine {
     pub fn new(adapter: Box<dyn ModelAdapter>) -> Self {
         Self {
             adapter,
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn universal_engine_enforces_lifecycle_and_roundtrips_kv() {
-        let mut engine = KvslimEngine::new(Box::new(ContractAdapter::new()));
+        let mut engine = MSlimEngine::new(Box::new(ContractAdapter::new()));
         assert_eq!(engine.state(), EngineState::Created);
         assert!(engine.prefill(&[1]).is_err());
 
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn universal_engine_exposes_adapter_capabilities_without_backend_policy() {
-        let engine = KvslimEngine::new(Box::new(ContractAdapter::new()));
+        let engine = MSlimEngine::new(Box::new(ContractAdapter::new()));
         assert_eq!(engine.capabilities().adapter_id, "contract-test");
         assert_eq!(engine.capabilities().backend, "test-runtime");
     }

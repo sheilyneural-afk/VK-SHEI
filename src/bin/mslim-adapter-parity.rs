@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use half::bf16;
 use mslim::{
-    adapter_catalog::create_adapter, conformance::compare_logits, engine::KvslimEngine,
+    adapter_catalog::create_adapter, conformance::compare_logits, engine::MSlimEngine,
     model_bundle::ModelBundle,
 };
 use serde_json::json;
@@ -83,8 +83,8 @@ fn main() -> Result<()> {
         .context("model config must be a JSON object")?
         .insert("mslim_cold_directory".into(), json!(parity_cold.path()));
 
-    let mut cpu = KvslimEngine::new(create_adapter("native-cpu-runtime")?);
-    let mut accelerator = KvslimEngine::new(create_adapter("accelerator-runtime")?);
+    let mut cpu = MSlimEngine::new(create_adapter("native-cpu-runtime")?);
+    let mut accelerator = MSlimEngine::new(create_adapter("accelerator-runtime")?);
     cpu.inspect(&model, &config).context("CPU inspect")?;
     accelerator
         .inspect(&model, &config)

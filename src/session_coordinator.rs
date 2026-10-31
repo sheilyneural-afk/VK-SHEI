@@ -1,28 +1,28 @@
 //! Session coordinator joining semantic generations with the backend-neutral engine.
 //!
-//! SessionStore owns semantic durability; KvslimEngine owns adapter-specific KV.
+//! SessionStore owns semantic durability; MSlimEngine owns adapter-specific KV.
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
 use crate::{
-    engine::{EngineState, KvslimEngine},
+    engine::{EngineState, MSlimEngine},
     session_store::{SessionGeneration, SessionStore},
 };
 
 pub struct SessionCoordinator {
-    engine: KvslimEngine,
+    engine: MSlimEngine,
     store: SessionStore,
 }
 
 impl SessionCoordinator {
-    pub fn new(engine: KvslimEngine, store: SessionStore) -> Self {
+    pub fn new(engine: MSlimEngine, store: SessionStore) -> Self {
         Self { engine, store }
     }
 
-    pub fn engine(&self) -> &KvslimEngine {
+    pub fn engine(&self) -> &MSlimEngine {
         &self.engine
     }
-    pub fn engine_mut(&mut self) -> &mut KvslimEngine {
+    pub fn engine_mut(&mut self) -> &mut MSlimEngine {
         &mut self.engine
     }
 
