@@ -147,6 +147,11 @@ path = "src/bin/kvslim-runtime-proxy.rs"
 required-features = ["http-server"]
 
 [[bin]]
+name = "kvslim-runtime-provider"
+path = "src/bin/kvslim-runtime-provider.rs"
+required-features = ["accelerator-backend"]
+
+[[bin]]
 name = "kvslim-server"
 path = "src/bin/kvslim-gateway.rs"
 required-features = ["unified-router"]
