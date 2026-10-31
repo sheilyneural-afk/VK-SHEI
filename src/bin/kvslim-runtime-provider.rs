@@ -18,7 +18,7 @@ use std::{
 fn digest(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(Sha256::digest(fs::read(path)?)))
 }
-fn load(model: &std::path::Path) -> Result<Box<dyn RuntimeSession>> {
+fn load(model: &std::path::Path, weight_mode: &str) -> Result<Box<dyn RuntimeSession>> {
     let mut config: Value = serde_json::from_slice(&fs::read(model.join("config.json"))?)?;
     if config.get("max_context_tokens").is_none() {
         let max = config
@@ -27,8 +27,8 @@ fn load(model: &std::path::Path) -> Result<Box<dyn RuntimeSession>> {
             .context("model context missing")?;
         config["max_context_tokens"] = max.into();
     }
-    // Stream weights by default: do not upload the complete 15 GB bundle at startup.
-    config["kvslim_weight_mode"] = Value::String("stream".into());
+    // Stream is the safe default; resident can be selected for high-memory hosts.
+    config["kvslim_weight_mode"] = Value::String(weight_mode.into());
     let mut adapter = OpenClModelAdapter::default();
     adapter.load(model, &config)?;
     let identity = ModelIdentity {
@@ -68,6 +68,15 @@ fn main() -> Result<()> {
         .find(|w| w[0] == "--socket")
         .map(|w| PathBuf::from(&w[1]))
         .unwrap_or_else(|| PathBuf::from("/tmp/kvslim-provider.sock"));
+    let weight_mode = args
+        .windows(2)
+        .find(|w| w[0] == "--weight-mode")
+        .map(|w| w[1].as_str())
+        .unwrap_or("stream");
+    anyhow::ensure!(
+        matches!(weight_mode, "stream" | "resident"),
+        "--weight-mode must be stream or resident"
+    );
     let session_id = args
         .windows(2)
         .find(|w| w[0] == "--session-id")
@@ -76,7 +85,7 @@ fn main() -> Result<()> {
     if socket.exists() {
         fs::remove_file(&socket)?;
     }
-    let session = load(&model)?;
+    let session = load(&model, weight_mode)?;
     let listener = UnixListener::bind(&socket)?;
     println!(
         "external runtime provider listening on {}",
