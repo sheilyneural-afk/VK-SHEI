@@ -18,7 +18,11 @@ use std::{
 fn digest(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(Sha256::digest(fs::read(path)?)))
 }
-fn load(model: &std::path::Path, weight_mode: &str) -> Result<Box<dyn RuntimeSession>> {
+fn load(
+    model: &std::path::Path,
+    weight_mode: &str,
+    cold_dir: &std::path::Path,
+) -> Result<Box<dyn RuntimeSession>> {
     let mut config: Value = serde_json::from_slice(&fs::read(model.join("config.json"))?)?;
     if config.get("max_context_tokens").is_none() {
         let max = config
@@ -29,6 +33,9 @@ fn load(model: &std::path::Path, weight_mode: &str) -> Result<Box<dyn RuntimeSes
     }
     // Stream is the safe default; resident can be selected for high-memory hosts.
     config["kvslim_weight_mode"] = Value::String(weight_mode.into());
+    fs::create_dir_all(cold_dir)?;
+    config["kvslim_cold_directory"] = Value::String(cold_dir.display().to_string());
+    config["kvslim_hot_v_tokens"] = 512u64.into();
     let mut adapter = OpenClModelAdapter::default();
     adapter.load(model, &config)?;
     let identity = ModelIdentity {
@@ -77,6 +84,13 @@ fn main() -> Result<()> {
         matches!(weight_mode, "stream" | "resident"),
         "--weight-mode must be stream or resident"
     );
+    let cold_dir = args
+        .windows(2)
+        .find(|w| w[0] == "--cold-dir")
+        .map(|w| PathBuf::from(&w[1]))
+        .unwrap_or_else(|| {
+            PathBuf::from("deploy/local-production/runtime/coldstore/external-provider")
+        });
     let session_id = args
         .windows(2)
         .find(|w| w[0] == "--session-id")
@@ -85,7 +99,7 @@ fn main() -> Result<()> {
     if socket.exists() {
         fs::remove_file(&socket)?;
     }
-    let session = load(&model, weight_mode)?;
+    let session = load(&model, weight_mode, &cold_dir)?;
     let listener = UnixListener::bind(&socket)?;
     println!(
         "external runtime provider listening on {}",

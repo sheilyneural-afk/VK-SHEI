@@ -17,7 +17,7 @@
 //! for arbitrary checkpoint architectures or devices. No GPU CPU fallback.
 
 use anyhow::{Context, Result, ensure};
-use memmap2::MmapOptions;
+use memmap2::{Advice, MmapOptions};
 use opencl3::{
     command_queue::{CL_QUEUE_PROFILING_ENABLE, CommandQueue},
     context::Context as ClContext,
@@ -246,6 +246,9 @@ impl CheckpointShards {
                 .with_context(|| format!("open checkpoint shard {}", path.display()))?;
             // SAFETY: Immutable, read-only mapping retained by this owner.
             let mapping = unsafe { MmapOptions::new().map(&file)? };
+            // Sequential read-ahead improves streamed layer loading without
+            // allocating a second copy of the shard in process memory.
+            mapping.advise(Advice::Sequential)?;
             let archive = SafeTensors::deserialize(&mapping)
                 .with_context(|| format!("parse checkpoint shard {}", path.display()))?;
             for name in archive.names() {
