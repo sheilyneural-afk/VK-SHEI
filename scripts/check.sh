@@ -24,6 +24,11 @@ mkdir -p deploy/local-production/runtime/tmp
 
 step() { printf '\n==> %s\n' "$*"; }
 
+step "toolchain"
+rustc --version
+cargo --version
+cargo clippy --version
+
 step "rustfmt"
 cargo fmt --all -- --check
 

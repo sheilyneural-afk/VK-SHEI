@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.99.1"
           components: rustfmt, clippy
       # The same gate that the local pre-push hook runs: rustfmt, clippy with
       # -D warnings and the test suites for no-default, default and
@@ -32,6 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
       - name: Create temp dir required by .cargo/config.toml
         run: mkdir -p deploy/local-production/runtime/tmp
       - name: Compile selected adapter surface
@@ -48,6 +50,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
       - name: Create temp dir required by .cargo/config.toml
         run: mkdir -p deploy/local-production/runtime/tmp
       - run: cargo build --locked --release --no-default-features --lib
@@ -62,6 +66,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
       - name: Create temp dir required by .cargo/config.toml
         run: mkdir -p deploy/local-production/runtime/tmp
       - name: Require a physical model bundle
@@ -85,6 +91,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
       - name: Create temp dir required by .cargo/config.toml
         run: mkdir -p deploy/local-production/runtime/tmp
       - run: cargo test --locked --lib inference_worker -- --nocapture
