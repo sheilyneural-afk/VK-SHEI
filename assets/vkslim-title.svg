@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="420" viewBox="0 0 1600 420" role="img" aria-labelledby="title desc">
+  <title id="title">VKSLIM</title>
+  <desc id="desc">VKSLIM in a blue and violet three-dimensional extruded style</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#050816"/>
+      <stop offset="0.48" stop-color="#111a3d"/>
+      <stop offset="1" stop-color="#24104d"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.24" stop-color="#b8f4ff"/>
+      <stop offset="0.58" stop-color="#4ecbff"/>
+      <stop offset="1" stop-color="#8c63ff"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f72d6"/>
+      <stop offset="1" stop-color="#32126e"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="45%" r="60%">
+      <stop offset="0" stop-color="#4f7dff" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#080b1d" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-50%" width="160%" height="220%">
+      <feGaussianBlur stdDeviation="11" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.17 0 0 0 0 0.55 0 0 0 0 1 0 0 0 0.8 0" result="blueGlow"/>
+      <feMerge>
+        <feMergeNode in="blueGlow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="shadow" x="-20%" y="-30%" width="140%" height="180%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14" result="blur"/>
+      <feOffset dy="18" dx="5" result="offset"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.65"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="420" rx="38" fill="url(#background)"/>
+  <ellipse cx="800" cy="205" rx="690" ry="190" fill="url(#halo)"/>
+  <path d="M90 318 C350 255 475 360 720 292 S1110 214 1510 292" fill="none" stroke="#62d9ff" stroke-opacity="0.18" stroke-width="2"/>
+  <path d="M120 344 C380 280 520 382 770 314 S1150 235 1480 313" fill="none" stroke="#a477ff" stroke-opacity="0.15" stroke-width="2"/>
+
+  <g text-anchor="middle" font-family="Arial Black, Inter, DejaVu Sans, sans-serif" font-size="184" font-weight="900" letter-spacing="14" transform="skewX(-6)">
+    <text x="785" y="263" fill="#030616" opacity="0.75" filter="url(#shadow)">VKSLIM</text>
+    <text x="777" y="255" fill="#160a43">VKSLIM</text>
+    <text x="773" y="251" fill="#1d0d56">VKSLIM</text>
+    <text x="769" y="247" fill="#25116d">VKSLIM</text>
+    <text x="765" y="243" fill="#2d187f">VKSLIM</text>
+    <text x="761" y="239" fill="#352192">VKSLIM</text>
+    <text x="757" y="235" fill="url(#edge)">VKSLIM</text>
+    <text x="751" y="225" fill="url(#face)" stroke="#c5f8ff" stroke-width="3" paint-order="stroke" filter="url(#glow)">VKSLIM</text>
+    <text x="751" y="225" fill="none" stroke="#ffffff" stroke-opacity="0.6" stroke-width="2">VKSLIM</text>
+  </g>
+
+  <g fill="#9aeaff">
+    <circle cx="196" cy="102" r="3"/>
+    <circle cx="1372" cy="115" r="3"/>
+    <circle cx="1452" cy="292" r="2"/>
+  </g>
+</svg>

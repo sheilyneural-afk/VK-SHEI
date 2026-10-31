@@ -1,4 +1,6 @@
-<h1 align="center">VKSLIM</h1>
+<h1 align="center">
+  <img src="assets/vkslim-title.svg" alt="VKSLIM" width="900">
+</h1>
 
 <p align="center">
   <strong>Contexto verificable, continuidad persistente y ejecución local para LLMs.</strong><br>
