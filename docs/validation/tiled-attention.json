@@ -1,0 +1,850 @@
+{
+  "schema": "mslim.tiled-attention.validation/v1",
+  "base_commit": "de633976b10b5e5f2e2c0c6253ec99be9d9447f7",
+  "recorded_utc": "2026-10-31T23:35:26.649075+00:00",
+  "source_sha256": {
+    "Cargo.lock": "314d3adfdfbb12a5a190a8ee8af012007f7b757ccd32cac35bb655e145f68719",
+    "Cargo.toml": "a6e26f00b4873d4d2724c31a7e4e0e8228d3f535ccc5b82ccd8467163c1b43b7",
+    "assets/gpu_llm.cl": "893c68d2d3fc226b26b597af3337b1c8fabfa54a501fbf8b26f2dfa9dfa5f2f5",
+    "assets/tiled_attention.cl": "6ac1bb35632e8e33fd2c2972a257a9b8ab7f68b2f4f15d69f11f5fec40b68158",
+    "build.rs": "f443c1deb53db892304f69e91672fe5c5c3756ab0685f26327d064636504651e",
+    "crates/mslim-adapter-api/src/lib.rs": "f487664d170001f55bc1fbc3ff09dbf5645687239711185855ebb6c90ec5f18a",
+    "crates/mslim-adapter-api/tests/selection.rs": "8751f4b5ea975cb45b4b8f8a5af6dc5e798190400c61c2d9edeaaf89fdef705c",
+    "src/adapter_catalog.rs": "78d5d8ce93eb744ab877bf44933d1268b58abe794778b7878b00813d763f3fde",
+    "src/adaptive_extent.rs": "4d755f8ba1c025ec032ebecfcf03277449c50bd6b73f59a88259a34bc377990d",
+    "src/attention_certificate.rs": "1cf6f22a3906edf70f07824543806c1dbb7a6e3e0620adc01033f20312c6316c",
+    "src/attention_kernel.rs": "e0bddcc40a433e38d111ee2bf7c45800c678e9abff81fb82830d6f1dc98acd78",
+    "src/bin/mslim-adapter-parity.rs": "2f074e94f5565befe03a3f738fe5e8d58a8dfc03c73701680c4f67d4d4c3d4c4",
+    "src/bin/mslim-adapters.rs": "981aad71f16f29a7a7203fdf7b158148a3af3cc30090220166880df823a63c97",
+    "src/bin/mslim-attention-bench.rs": "6c904d2f2ed5153b86e66c87e2dbc3a58cad02c7b7cc7b09e1bb0cbeb57aabee",
+    "src/bin/mslim-auth.rs": "cf51eeba2c1c78cf41c93121b47921a5315e28ce7282d2af0158ddbed03488f6",
+    "src/bin/mslim-autoconfigure.rs": "c7daa0b80df8f9c0dd15876a3a7c5d0aa494616ed0c03b5003777afb0a0cb3b7",
+    "src/bin/mslim-calibrate.rs": "b3b59d40e73b85784296aec7777f3371ca77840b0f3f6ec9290488c920f50623",
+    "src/bin/mslim-catalog.rs": "a4e723308874421387ad3e5205140ccb5ffe18b02be08421566e2ce0884a3ef7",
+    "src/bin/mslim-certify.rs": "42c1e2e436c181114ee1c253e5432491c2224e4e7f9b4e1856669c302c59a602",
+    "src/bin/mslim-chat.rs": "b9784715af4836ffa162d86f4944716117b388dee14f7fad936c9e0bca81ff28",
+    "src/bin/mslim-document-ask.rs": "0c4e23cd327255e5ca4eaaa55a8f4609833886432c522a893cc2c59422c80f1a",
+    "src/bin/mslim-document.rs": "7cf5b70707221233806aafa3e3de68086ab9946c51cbba8e374d17a21ede8961",
+    "src/bin/mslim-download-model.rs": "637faaae03114ce1026dc01bbd89483fe3208660c17e14c7a1c235fcd8f3c840",
+    "src/bin/mslim-gateway.rs": "04fd63552f16a9e3d6532f2eee6c30b99e4bedbdfbe81ff3e598d75f32542d0e",
+    "src/bin/mslim-import-model.rs": "132f7e763059a7e2a9f9c1ad2fb023f7213c80eebb057b73ae1da97780dc944d",
+    "src/bin/mslim-inspect.rs": "95300cf9a757d02cdb10e870d672f0f5d21acb2218aa85b3d374b410bf310421",
+    "src/bin/mslim-install-release.rs": "8697db24d3304a0f7d102766bde19ac9bede41c3b38e0e8e7dac68c8112b4892",
+    "src/bin/mslim-long-context.rs": "93dfa2955fc302ca680d0820691bf14087a26cc265489f7799ae3fd2513bb4c2",
+    "src/bin/mslim-models.rs": "5c613bfd3b8d190b3372c7a50a6eff1617ce7a1d5c6c4fda1b45a9ae03d1d847",
+    "src/bin/mslim-native-parity.rs": "6fa0b033b67162868b2b0110bf0fb22128696dcf624b256dea00d24e23f50f07",
+    "src/bin/mslim-recommend.rs": "baaea394ed9cafd24b015c4c11000b59bd13777f3a12d12ef25a9be0aca35b44",
+    "src/bin/mslim-runtime-cli.rs": "f8605d80d51a773d6610d1975914e21d5920b32da2b1094183204a27e12d69f1",
+    "src/bin/mslim-runtime-compare.rs": "1e85949af9ab8dd83c7bddfb6e866c384de3a43ee4fccd21f3b6c26fc9c02a76",
+    "src/bin/mslim-runtime-host.rs": "75e32cfeb8be81b86ee56b76d3f240bc9d55a87ef8790bc39f325b88a38b4563",
+    "src/bin/mslim-runtime-provider.rs": "baeb048d64dfa6c43005be86385b26e77a249e77fde6f64ce7ced06153bef9e7",
+    "src/bin/mslim-runtime-proxy.rs": "caa55e74d377e34f27c7b3db9a926e5df3e356bdb11362d251034a4217de79d1",
+    "src/bin/mslim-runtime-worker.rs": "baae81a5a086ed22171ca5aa1564ba28494599035ba76c4c9b9a04fb0b122b60",
+    "src/bin/mslim-validate-model.rs": "46e1683937812c45c4a07836905f88624aa1f5bf4036ea52d2ebff29e9e6377f",
+    "src/build_info.rs": "412877ea5af3110832d9494f81f15ba2333cace3645b28956d51395d9ddddc1d",
+    "src/calibration_contract.rs": "f10e0f2aae34c7c6368d164cfbb48a4cf2e31df45f2efa7429a737600bd2b3a6",
+    "src/calibration_predictor.rs": "858f9bd66dc92c29f4bf23b8bf338bc8b405cc1cf786cf3a768a5617628f4136",
+    "src/calibration_profile.rs": "71d8775fc6fd1b364bc74b93d4d5006136803ad4ae568056531fed6e247a914d",
+    "src/calibration_transaction.rs": "c12d7f068e2f8d9b7aec12b35a7d49fd16e2086a26622d34b7de2c325c36d1fe",
+    "src/cold_store.rs": "8925bda12fddb33aeb1bc0db7f7ab3e52a222d724e910a4285cc6ac8e544fa90",
+    "src/conformance.rs": "f7ec0005409ccc1f2351e0009a3d4193e4165b09712c5e5da84f404a97c72bee",
+    "src/continuity_contract.rs": "ecc43d3b5f6a5c9103291bf9af27e071498e5710d26fa87d8aedd269fceedfda",
+    "src/conversion_worker.rs": "dfed8c2300d9826453a13e8c1ba1b240bc46c7828756ed18aac7c2cae3fe99e3",
+    "src/decoder_layout.rs": "11674c81379e37ac80b4f90020a4c6aae97924e1fd335919e61619852668a778",
+    "src/document_graph.rs": "605b1b9e5ad31200f7095b158fb5b00ca86f6c119612c381d86629c7f067def7",
+    "src/engine.rs": "ad23853247c28d10c5796a5b869649085b538e42ea9923800ca101cabd5d88e2",
+    "src/evidence_stats.rs": "049c1e4d0972b975629b39919f84f6e3c806226e1c465d99fc3326674586880d",
+    "src/fused_retrieval.rs": "3df79453455e9d81aef79cad985166c356cb83e4eba116c377777644f4c7058e",
+    "src/generic_runtime.rs": "7b6a5c38fb9f3b6612c8f5b36d6384acfae9799c14e5258ee5d7caf49e09bb46",
+    "src/gpu_adapter.rs": "d767cdb9a0901d83fa98581e2dbfa0b21efed9360e54c93eb53ea3b01417e651",
+    "src/gpu_backend.rs": "9cd812658e0572d6fc68976b942f6bc25881cbc4241a105213925f61dde1a8db",
+    "src/gpu_llm/gpu_resources.rs": "fa197d770def69c7295ccff871bcfe2c40b67c2e85da45a905117d7be84eb50d",
+    "src/gpu_llm/kernels.rs": "73827617b2ddee896c2fcbe2d7ae7fb4e802fc3c8cb5f61402d5634b866c4dc0",
+    "src/gpu_llm/mod.rs": "ca97129de2adf3b48bf51e31eaf43260e352306a3c267e2f9e955cf1c7018817",
+    "src/gpu_llm/prefill.rs": "7a120be2bf4b3e35087999596820ab36c910aa142c9a4b52b20dc8c8cc4d9599",
+    "src/gpu_llm/tiled_attention.rs": "0a4dd4192092b4ff0dd52782e75cbf925e3007f7613d47a7e2be627cd6c37e74",
+    "src/gpu_micro_regions.rs": "b8740c00f14d8799ba2c9a8939f45d5586d6e482b973ace088edf9626817a9bf",
+    "src/gpu_region_store.rs": "7c6f57de642ab033f2d214f269cee72982da07479868d3dc9078eda4a0adec05",
+    "src/inference_worker.rs": "acf1e0abd970479d7145975b0c8b67ab1fa2390f552cfc9992d7de885ff96a09",
+    "src/ipc_transport.rs": "e88a2985f8d233e41aaa593ee3463cc9c5c06000a44f04bf992a2014e107fb1b",
+    "src/lib.rs": "cdc6eed72caab9051f41eccd4f134b96206d020a7f6cacc40fcfcffde964d211",
+    "src/model_bundle.rs": "cb61143889076579af28c089664a1d27a94c3679eff2625ae674b6d423272dea",
+    "src/model_catalog.rs": "8132f6baba14503fd69fbffff5d57e2067043d9b3612d196bbd345c12a79c2b5",
+    "src/model_config.rs": "8ae6048925666ca2ff73835c9c2ddcc43a2ae8d8af40fb16056f70ef9f6b3970",
+    "src/model_resolver.rs": "2b819e7219ca4dc89702cf9ef80cd9b9072b980847382823430fbc424775b2e0",
+    "src/native_cpu_adapter.rs": "006b33ffbbd6c39205342026941486cca47447796d6df7a26a1f4490df67ab6d",
+    "src/native_hip.rs": "7b052132f136651673ac3361d310b47ceba0a2d6096d2424aa4c514b22a1f707",
+    "src/page_fusion.rs": "2ca6432ce2a5fd1c20d03ea3945361190be7783384e0afab88395f66162f81f0",
+    "src/portable.rs": "1456e9c48072f2a0267bd27076d43a8d194e9f1df064f6735319b87973c99cfa",
+    "src/portable_store.rs": "7b85c562e9344b30d7123ead3d3efdd9ca8ab643192ba129fbc17add08984e59",
+    "src/prefill_calibration.rs": "565531590a4b14bf20c85e2ffcd9216c37cc71c8e56072bf9ab06593dfdcf881",
+    "src/prefill_tch.rs": "38276e3448024122c3dcc9e105de08ee55673d3cd333b48d68628376b11d5a02",
+    "src/runtime_host.rs": "15a390ab3398d039736e9d8e2c910fbc18281bd7fa2e974cbabac95796d93455",
+    "src/runtime_registry.rs": "df1e64c2444427ad0f6c833a0d238f02267627271adffa02808884237ff380b5",
+    "src/session_coordinator.rs": "438a8aaf84f44dd812c9d6c247c207fc619b1deba5d8c84b7eff7952aa2bf93c",
+    "src/session_store.rs": "d53d3a58fc1c99a887cb37a3a428e835f2e40200a6608ba4727929ffe7532540",
+    "src/shadow_metrics.rs": "c948452a4b65bf12f3f100007b6d99359bcbbd42773532b9e84d8630ec16a39c",
+    "src/stem_index.rs": "d8d860089fb88669e28ae07ccf7baffd262371705bf6f2b3166f622c8c09289a",
+    "src/torch_adapter.rs": "91c05623a971349c3281540211d36db62934122ea8a463fc1e87b606d464b039",
+    "src/torch_runtime/kv_cache.rs": "e6835bd0d26e7f6c7b94756c712ac4e818deb874b86baa0b48284b2bb15784a0",
+    "src/torch_runtime/mod.rs": "6b562280b19b7c5d9d39eef45fa3e6a0261bcc025c668fa0477a818210d7242f",
+    "src/torch_runtime/runtime.rs": "d5a249df1f48a773ddbec6ca886d6ca800da589fb183e1f7ff5f4cb945ca049a",
+    "src/torch_runtime/weight_io.rs": "68aede7b276d628ef2f535b132f2fea84031438e70e98a13d5142cf0b5268e09",
+    "src/worker_registry.rs": "e219d9d317fb00a5f27eefae9b153e91904bde5d768d39585f3e3b70a426316b",
+    "tests/fixed_width_decode.rs": "3b666acf6085bc81e6753eb08deca548bc03f7abda8749cd71501298be778e13",
+    "tests/prefill_profile_lifecycle.rs": "43667b3760d736fed237b25cdf67c911924c04b0d4d6ea4f9cae43ef9ab3f9b4",
+    "tests/tiled_attention_policy.rs": "01e4d12acf4c11d7d02059599fb34027e9b7bf237e6d52d8f5a59afdbd66c3f8"
+  },
+  "default_changed": false,
+  "activation": "explicit CLI/config; exact calibrator can propose strict only; no profile promoted",
+  "device": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+  "opencl_c": "1.2",
+  "rust": "1.99.1",
+  "shared_gate": {
+    "exit_code": 0,
+    "stages": [
+      {
+        "stage": "tests --no-default-features",
+        "passed": 212,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "stage": "tests default features",
+        "passed": 221,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "stage": "tests --features accelerator-backend",
+        "passed": 239,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "stage": "adapter api crate",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      }
+    ]
+  },
+  "physical_tests": {
+    "passed": 6,
+    "failed": 0,
+    "strict_comparisons": 120,
+    "strict_max_history_tokens": 4097,
+    "strict_bit_equal": true,
+    "experimental_comparisons": 48,
+    "experimental_max_abs_error": 0.001953125,
+    "experimental_test_tolerance": 0.0078125,
+    "full_model": {
+      "architecture": "Llama",
+      "parameters_description": "8B BF16",
+      "head_dim": 128,
+      "q_heads": 32,
+      "kv_heads": 8,
+      "contexts": [
+        8,
+        17,
+        65
+      ],
+      "max_new_tokens": 3,
+      "logit_bits_and_kv_equal": true
+    }
+  },
+  "attention_only_timings": {
+    "cases": [
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 1,
+          "mode": "reference",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 1024,
+        "median_ms": 2.973317,
+        "queries": 1,
+        "reference_score_bytes": 131072,
+        "samples_ms": [
+          2.3202499999999997,
+          2.714631,
+          2.780865,
+          2.973317,
+          4.673482,
+          5.58218,
+          5.944831000000001
+        ],
+        "tiled_resources": null
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 2,
+          "mode": "strict_tiled",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 1024,
+        "median_ms": 6.089752000000001,
+        "queries": 1,
+        "reference_score_bytes": 131072,
+        "samples_ms": [
+          4.4804390000000005,
+          4.493775,
+          5.214108,
+          6.089752000000001,
+          6.59949,
+          7.2173419999999995,
+          8.765902
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 17440,
+          "local_memory_type": 2,
+          "numeric_contract": "reference_order_three_pass",
+          "preferred_work_group_multiple": 32,
+          "program_key": "653a59007a6717ab2ac34208f2bce49aa5a5b068f12edde745ae4458061b82fc",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 2,
+            "mode": "strict_tiled",
+            "splits": 1,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 0,
+          "unused_memory_argument_bytes": 4
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 2,
+          "mode": "online_experimental",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 1024,
+        "median_ms": 3.694191,
+        "queries": 1,
+        "reference_score_bytes": 131072,
+        "samples_ms": [
+          2.318356,
+          2.415438,
+          2.737163,
+          3.694191,
+          3.945243,
+          4.61404,
+          5.8935949999999995
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 17440,
+          "local_memory_type": 2,
+          "numeric_contract": "experimental_online_not_bitwise",
+          "preferred_work_group_multiple": 32,
+          "program_key": "653a59007a6717ab2ac34208f2bce49aa5a5b068f12edde745ae4458061b82fc",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 2,
+            "mode": "online_experimental",
+            "splits": 1,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 0,
+          "unused_memory_argument_bytes": 4
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 1,
+          "mode": "split_kv_experimental",
+          "splits": 8,
+          "work_group": 64
+        },
+        "history": 1024,
+        "median_ms": 3.2239679999999997,
+        "queries": 1,
+        "reference_score_bytes": 131072,
+        "samples_ms": [
+          2.275576,
+          2.746201,
+          2.915889,
+          3.2239679999999997,
+          3.884229,
+          4.680306000000001,
+          4.95955
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 16912,
+          "local_memory_type": 2,
+          "numeric_contract": "experimental_online_not_bitwise",
+          "preferred_work_group_multiple": 32,
+          "program_key": "354c0461cf7cac016fdb28c565daee0a043fa67bbfdbc85a7ced57249de98c3e",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 1,
+            "mode": "split_kv_experimental",
+            "splits": 8,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 9,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 133120,
+          "unused_memory_argument_bytes": 0
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 1,
+          "mode": "reference",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 1024,
+        "median_ms": 9.745443,
+        "queries": 16,
+        "reference_score_bytes": 2097152,
+        "samples_ms": [
+          9.419651,
+          9.649582,
+          9.710146,
+          9.745443,
+          9.772173,
+          9.826253999999999,
+          11.149931
+        ],
+        "tiled_resources": null
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 2,
+          "mode": "strict_tiled",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 1024,
+        "median_ms": 40.322218,
+        "queries": 16,
+        "reference_score_bytes": 2097152,
+        "samples_ms": [
+          39.649234,
+          39.701862999999996,
+          40.088640000000005,
+          40.322218,
+          40.783004999999996,
+          40.871541,
+          41.978501
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 17440,
+          "local_memory_type": 2,
+          "numeric_contract": "reference_order_three_pass",
+          "preferred_work_group_multiple": 32,
+          "program_key": "653a59007a6717ab2ac34208f2bce49aa5a5b068f12edde745ae4458061b82fc",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 2,
+            "mode": "strict_tiled",
+            "splits": 1,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 0,
+          "unused_memory_argument_bytes": 4
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 2,
+          "mode": "online_experimental",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 1024,
+        "median_ms": 14.548488,
+        "queries": 16,
+        "reference_score_bytes": 2097152,
+        "samples_ms": [
+          14.223517,
+          14.274784,
+          14.300521,
+          14.548488,
+          14.660759,
+          15.207455999999999,
+          16.370511
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 17440,
+          "local_memory_type": 2,
+          "numeric_contract": "experimental_online_not_bitwise",
+          "preferred_work_group_multiple": 32,
+          "program_key": "653a59007a6717ab2ac34208f2bce49aa5a5b068f12edde745ae4458061b82fc",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 2,
+            "mode": "online_experimental",
+            "splits": 1,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 0,
+          "unused_memory_argument_bytes": 4
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 1,
+          "mode": "split_kv_experimental",
+          "splits": 8,
+          "work_group": 64
+        },
+        "history": 1024,
+        "median_ms": 23.294512,
+        "queries": 16,
+        "reference_score_bytes": 2097152,
+        "samples_ms": [
+          23.175758000000002,
+          23.209924,
+          23.229570000000002,
+          23.294512,
+          23.656993,
+          23.745639999999998,
+          23.783561000000002
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 16912,
+          "local_memory_type": 2,
+          "numeric_contract": "experimental_online_not_bitwise",
+          "preferred_work_group_multiple": 32,
+          "program_key": "354c0461cf7cac016fdb28c565daee0a043fa67bbfdbc85a7ced57249de98c3e",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 1,
+            "mode": "split_kv_experimental",
+            "splits": 8,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 133120,
+          "unused_memory_argument_bytes": 0
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 1,
+          "mode": "reference",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 4096,
+        "median_ms": 39.899434,
+        "queries": 1,
+        "reference_score_bytes": 524288,
+        "samples_ms": [
+          27.317131,
+          30.252658,
+          34.578815999999996,
+          39.899434,
+          42.117782999999996,
+          42.491264,
+          42.575773
+        ],
+        "tiled_resources": null
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 2,
+          "mode": "strict_tiled",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 4096,
+        "median_ms": 44.466716000000005,
+        "queries": 1,
+        "reference_score_bytes": 524288,
+        "samples_ms": [
+          44.152024999999995,
+          44.376667000000005,
+          44.447390000000006,
+          44.466716000000005,
+          44.582333,
+          44.687531,
+          44.905832
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 17440,
+          "local_memory_type": 2,
+          "numeric_contract": "reference_order_three_pass",
+          "preferred_work_group_multiple": 32,
+          "program_key": "653a59007a6717ab2ac34208f2bce49aa5a5b068f12edde745ae4458061b82fc",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 2,
+            "mode": "strict_tiled",
+            "splits": 1,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 0,
+          "unused_memory_argument_bytes": 4
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 2,
+          "mode": "online_experimental",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 4096,
+        "median_ms": 6.065316999999999,
+        "queries": 1,
+        "reference_score_bytes": 524288,
+        "samples_ms": [
+          5.908212000000001,
+          5.919884000000001,
+          5.965309,
+          6.065316999999999,
+          6.06731,
+          6.220899,
+          6.36482
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 17440,
+          "local_memory_type": 2,
+          "numeric_contract": "experimental_online_not_bitwise",
+          "preferred_work_group_multiple": 32,
+          "program_key": "653a59007a6717ab2ac34208f2bce49aa5a5b068f12edde745ae4458061b82fc",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 2,
+            "mode": "online_experimental",
+            "splits": 1,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 0,
+          "unused_memory_argument_bytes": 4
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 1,
+          "mode": "split_kv_experimental",
+          "splits": 8,
+          "work_group": 64
+        },
+        "history": 4096,
+        "median_ms": 5.9112469999999995,
+        "queries": 1,
+        "reference_score_bytes": 524288,
+        "samples_ms": [
+          5.892663000000001,
+          5.899846,
+          5.901299,
+          5.9112469999999995,
+          6.025342,
+          6.064456,
+          6.317371
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 16912,
+          "local_memory_type": 2,
+          "numeric_contract": "experimental_online_not_bitwise",
+          "preferred_work_group_multiple": 32,
+          "program_key": "354c0461cf7cac016fdb28c565daee0a043fa67bbfdbc85a7ced57249de98c3e",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 1,
+            "mode": "split_kv_experimental",
+            "splits": 8,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 9,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 133120,
+          "unused_memory_argument_bytes": 0
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 1,
+          "mode": "reference",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 4096,
+        "median_ms": 259.315854,
+        "queries": 8,
+        "reference_score_bytes": 4194304,
+        "samples_ms": [
+          241.49635,
+          247.34605200000001,
+          256.686624,
+          259.315854,
+          259.98077400000005,
+          262.110987,
+          270.45482599999997
+        ],
+        "tiled_resources": null
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 2,
+          "mode": "strict_tiled",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 4096,
+        "median_ms": 175.55999,
+        "queries": 8,
+        "reference_score_bytes": 4194304,
+        "samples_ms": [
+          174.47986100000003,
+          174.62096599999998,
+          175.111377,
+          175.55999,
+          175.672172,
+          176.84235,
+          177.686607
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 17440,
+          "local_memory_type": 2,
+          "numeric_contract": "reference_order_three_pass",
+          "preferred_work_group_multiple": 32,
+          "program_key": "653a59007a6717ab2ac34208f2bce49aa5a5b068f12edde745ae4458061b82fc",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 2,
+            "mode": "strict_tiled",
+            "splits": 1,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 0,
+          "unused_memory_argument_bytes": 4
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 2,
+          "mode": "online_experimental",
+          "splits": 1,
+          "work_group": 64
+        },
+        "history": 4096,
+        "median_ms": 28.270383,
+        "queries": 8,
+        "reference_score_bytes": 4194304,
+        "samples_ms": [
+          28.226088999999998,
+          28.267226,
+          28.268048,
+          28.270383,
+          28.273458,
+          28.334743999999997,
+          28.541081
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 17440,
+          "local_memory_type": 2,
+          "numeric_contract": "experimental_online_not_bitwise",
+          "preferred_work_group_multiple": 32,
+          "program_key": "653a59007a6717ab2ac34208f2bce49aa5a5b068f12edde745ae4458061b82fc",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 2,
+            "mode": "online_experimental",
+            "splits": 1,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 0,
+          "unused_memory_argument_bytes": 4
+        }
+      },
+      {
+        "config": {
+          "block_keys": 64,
+          "block_queries": 1,
+          "mode": "split_kv_experimental",
+          "splits": 8,
+          "work_group": 64
+        },
+        "history": 4096,
+        "median_ms": 45.825049,
+        "queries": 8,
+        "reference_score_bytes": 4194304,
+        "samples_ms": [
+          45.557245,
+          45.631465000000006,
+          45.701055999999994,
+          45.825049,
+          45.982414999999996,
+          46.006079,
+          46.323165
+        ],
+        "tiled_resources": {
+          "dispatches_since_configuration": 9,
+          "fallback_policy": "nonresident ColdStore V retains the original verified attention route",
+          "global_score_matrix_bytes": 0,
+          "local_bytes_per_group": 16912,
+          "local_memory_type": 2,
+          "numeric_contract": "experimental_online_not_bitwise",
+          "preferred_work_group_multiple": 32,
+          "program_key": "354c0461cf7cac016fdb28c565daee0a043fa67bbfdbc85a7ced57249de98c3e",
+          "settings": {
+            "block_keys": 64,
+            "block_queries": 1,
+            "mode": "split_kv_experimental",
+            "splits": 8,
+            "work_group": 64
+          },
+          "split_dispatches_since_configuration": 0,
+          "split_policy": "split only single-query decode; multi-query prefill uses online blocks",
+          "split_scratch_bytes": 133120,
+          "unused_memory_argument_bytes": 0
+        }
+      }
+    ],
+    "device": "AMD Radeon Graphics (radeonsi, phoenix, LLVM 20.1.2, DRM 3.64, 7.0.0-38-generic)",
+    "scope": "attention only, deterministic synthetic BF16 inputs, no model throughput claim"
+  },
+  "real_model_calibration": {
+    "report_sha256": "ca4624509d6440b221b4d8970e10d1b36a0759728cbf7b3493c8efa33bbb1cc0",
+    "contexts": [
+      8,
+      16,
+      24
+    ],
+    "repeats": 3,
+    "warmups": 1,
+    "decode_probes": 2,
+    "parity_ok": true,
+    "maximum_logit_error": 0.0,
+    "promotion_requested": false,
+    "status": "no_candidate_passed",
+    "rejection_reasons": [
+      "throughput_gate_failed",
+      "latency_gate_failed"
+    ],
+    "original_restored": true
+  },
+  "incident": {
+    "initial_scope": "attention benchmark at 8192 historical tokens",
+    "result": "AMDGPU compute queue timeout and recovered context reset; precise triggering variant not captured",
+    "subsequent_change": "bounded work per enqueue, added per-variant breadcrumbs and limited benchmark scope",
+    "revalidated_scope": "six tests passed; attention histories up to 4097, timing contexts 1024/4096",
+    "claim": "8192-token benchmark not revalidated; no universal watchdog guarantee"
+  },
+  "limits": [
+    "not a complete FlashAttention/FlashDecoding performance implementation",
+    "no long-context full-model certification",
+    "no general speedup claim",
+    "tiled scratch saving is not whole-model RAM or VRAM reduction",
+    "experimental modes do not preserve reference bits generally",
+    "nonresident ColdStore decode still uses existing fallback",
+    "physical-conformance build retains 27 pre-existing unused-import warnings in old tests",
+    "no LibTorch or HIP validation",
+    "GPU tests use deterministic synthetic data except separately stated real-model tests"
+  ],
+  "local_receipts_directory": "deploy/local-production/runtime/receipts/tiled-attention-20261031T231656Z",
+  "log_sha256": {
+    "gate-final.log": "3f08dea79696d3ff87b73d4113e3f1c53f1c8577db5c1dcb43d6ce7d2db06a07",
+    "physical-suite-1.log": "101ec2266300113232ffe70f2a252dff7788fd3c23f4d86042c4ec3f1e4c7377",
+    "physical-suite-2.log": "54fac8c4e9a657abb3dc80b90f69b4ad929fc5714f7bbe0104c14a06f98ea2da",
+    "calibration-1.log": "e09a56ad38af32ac39fd7b1702c936fac4990c2ca6ad18daee469aa9f33c3f34"
+  },
+  "source_commit": "2b0fde0c55e8f1661cf1b43ab5163e0326b7f693",
+  "build_provenance": "Binaries were built from the recorded dirty base; source hashes were verified unchanged and match source_commit. This is not a claim of a clean-commit rebuild.",
+  "usage": {
+    "cli_strict_flag": "--attention-kernel-json",
+    "cli_strict_json": {
+      "mode": "strict_tiled",
+      "block_queries": 2,
+      "block_keys": 64,
+      "work_group": 64,
+      "splits": 1
+    },
+    "experimental_cli_requires": [
+      "--attention-kernel-json JSON",
+      "--allow-experimental-attention"
+    ],
+    "adapter_settings": [
+      "mslim_attention_kernel",
+      "mslim_allow_experimental_attention"
+    ],
+    "calibrator_cli": "mslim-calibrate MODEL --tune-prefill --kernel-candidates-json JSON_ARRAY",
+    "calibrator_candidate_example": [
+      {
+        "batch_tokens": 16,
+        "weight_reuse_tokens": 8,
+        "attention": {
+          "mode": "strict_tiled",
+          "block_queries": 2,
+          "block_keys": 64,
+          "work_group": 64,
+          "splits": 1
+        }
+      }
+    ],
+    "safety": "All variants remain opt-in. Current reference defaults, main, installed services and model data unchanged. This branch was not pushed."
+  }
+}
