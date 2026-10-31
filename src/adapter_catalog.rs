@@ -308,9 +308,7 @@ pub fn create_adapter(adapter_id: &str) -> Result<Box<dyn ModelAdapter>> {
     match adapter_id {
         "accelerator-runtime" => {
             #[cfg(feature = "accelerator-backend")]
-            return Ok(Box::new(
-                crate::gpu_adapter::GpuModelAdapter::default(),
-            ));
+            return Ok(Box::new(crate::gpu_adapter::GpuModelAdapter::default()));
             #[cfg(not(feature = "accelerator-backend"))]
             bail!("accelerator adapter is not compiled");
         }
@@ -360,9 +358,15 @@ mod tests {
     fn compiled_adapters_follow_enabled_features() {
         let ids: Vec<_> = compiled_adapters().into_iter().map(|a| a.id).collect();
         let has = |id: &str| ids.iter().any(|candidate| candidate == id);
-        assert_eq!(has("native-cpu-runtime"), cfg!(feature = "native-cpu-backend"));
+        assert_eq!(
+            has("native-cpu-runtime"),
+            cfg!(feature = "native-cpu-backend")
+        );
         assert_eq!(has("libtorch-cpu-runtime"), cfg!(feature = "torch-backend"));
-        assert_eq!(has("accelerator-runtime"), cfg!(feature = "accelerator-backend"));
+        assert_eq!(
+            has("accelerator-runtime"),
+            cfg!(feature = "accelerator-backend")
+        );
     }
 
     #[test]
@@ -373,9 +377,10 @@ mod tests {
                 .find(|a| a.id == id)
                 .map(|a| a.priority)
         };
-        if let (Some(native), Some(torch)) =
-            (priority("native-cpu-runtime"), priority("libtorch-cpu-runtime"))
-        {
+        if let (Some(native), Some(torch)) = (
+            priority("native-cpu-runtime"),
+            priority("libtorch-cpu-runtime"),
+        ) {
             assert!(torch > native);
         }
         if let (Some(cpu), Some(accel)) = (

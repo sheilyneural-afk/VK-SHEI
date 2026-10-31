@@ -22,12 +22,12 @@ use mslim::{
     generic_runtime::{
         Capability, IPC_SCHEMA, IpcOperation, IpcRequest, IpcResponse, RuntimeManifest,
     },
+    gpu_llm::{GpuLlm, WeightMode},
     gpu_region_store::GpuRegionConfig,
     inference_worker::{InferenceError, InferenceExecutor, InferenceWorker, SubmitError},
     ipc_transport::IpcClient,
     model_bundle::validated_bundle_manifest,
     model_config::ModelSpec,
-    gpu_llm::{GpuLlm, WeightMode},
     session_store::SessionStore,
 };
 use mslim_adapter_api::{CacheReceipt as RuntimeCacheReceipt, GenerationRequest, GenerationResult};

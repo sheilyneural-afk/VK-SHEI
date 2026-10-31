@@ -263,11 +263,7 @@ fn prepare_probe(runtime: &mut GpuLlm, scratch: &Path, settings: PrefillSettings
     runtime.set_calibration_prefill_settings(settings)
 }
 
-fn probe(
-    runtime: &mut GpuLlm,
-    prompt: &[u32],
-    decode_probes: usize,
-) -> Result<(f64, Reference)> {
+fn probe(runtime: &mut GpuLlm, prompt: &[u32], decode_probes: usize) -> Result<(f64, Reference)> {
     let started = Instant::now();
     let (step, _) = runtime.prefill_only(prompt, true, &AtomicBool::new(false))?;
     let micros = started.elapsed().as_secs_f64() * 1_000_000.0;

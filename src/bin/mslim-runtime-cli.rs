@@ -3,8 +3,8 @@
 //! Local runtime command line entry point for a verified model bundle.
 
 use anyhow::{Context, Result, bail, ensure};
-use mslim::gpu_region_store::GpuRegionConfig;
 use mslim::gpu_llm::{GpuLlm, WeightMode};
+use mslim::gpu_region_store::GpuRegionConfig;
 use serde_json::json;
 use std::{path::PathBuf, time::Instant};
 use tokenizers::Tokenizer;
@@ -244,12 +244,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "hip-backend")]
         {
             if let Some(config) = lod {
-                GpuLlm::load_with_gpu_region_native_hip(
-                    &model,
-                    max_context_tokens,
-                    mode,
-                    config,
-                )?
+                GpuLlm::load_with_gpu_region_native_hip(&model, max_context_tokens, mode, config)?
             } else {
                 GpuLlm::load_dense_native_hip(&model, max_context_tokens, mode)?
             }

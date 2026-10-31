@@ -8,11 +8,7 @@ use anyhow::{Context, Result, ensure};
 use memmap2::{Advice, MmapOptions};
 use opencl3::{kernel::Kernel, memory::Buffer, program::Program};
 use safetensors::{SafeTensors, tensor::TensorView};
-use std::{
-    collections::HashMap,
-    fs::File,
-    path::Path,
-};
+use std::{collections::HashMap, fs::File, path::Path};
 
 use crate::model_config::ModelSpec;
 
@@ -346,4 +342,3 @@ impl LlmKernels {
         })
     }
 }
-

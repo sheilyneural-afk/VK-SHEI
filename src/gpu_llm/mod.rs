@@ -17,11 +17,7 @@
 //! for arbitrary checkpoint architectures or devices. No GPU CPU fallback.
 
 use anyhow::{Context, Result, ensure};
-use opencl3::{
-    kernel::ExecuteKernel,
-    memory::Buffer,
-    types::CL_BLOCKING,
-};
+use opencl3::{kernel::ExecuteKernel, memory::Buffer, types::CL_BLOCKING};
 use safetensors::Dtype;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -32,9 +28,9 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-mod prefill;
-mod kernels;
 mod gpu_resources;
+mod kernels;
+mod prefill;
 
 #[cfg(feature = "hip-backend")]
 use crate::native_hip::{HipRuntime, HipWeight};
@@ -49,8 +45,8 @@ use crate::{
 
 pub(crate) use gpu_resources::GpuEngine;
 pub(crate) use kernels::{
-    CheckpointShards, GpuHotValues, GpuLayer, GpuWeight,
-    MicroSelectedDevice, RopeKernelConfig, VerifiedGpuPromptReplay, Workspace,
+    CheckpointShards, GpuHotValues, GpuLayer, GpuWeight, MicroSelectedDevice, RopeKernelConfig,
+    VerifiedGpuPromptReplay, Workspace,
 };
 
 const LOCAL_WORK_SIZE: usize = 128;
@@ -5170,13 +5166,9 @@ mod tests {
             };
             let ids = [128000_u32, 9906, 11, 1917, 0, 128001, 128006, 882];
             {
-                let mut source = GpuLlm::load_with_gpu_region(
-                    &model,
-                    32,
-                    WeightMode::Resident,
-                    config.clone(),
-                )
-                .unwrap();
+                let mut source =
+                    GpuLlm::load_with_gpu_region(&model, 32, WeightMode::Resident, config.clone())
+                        .unwrap();
                 source.set_batch_prefill_tokens(Some(8)).unwrap();
                 source.generate(&ids, 1, false).unwrap();
                 assert_eq!(source.position(), ids.len());
