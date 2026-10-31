@@ -1,4 +1,4 @@
-# KV-SHEI · KVSLIM
+<h1 align="center">VKSLIM</h1>
 
 <p align="center">
   <strong>Contexto verificable, continuidad persistente y ejecución local para LLMs.</strong><br>
