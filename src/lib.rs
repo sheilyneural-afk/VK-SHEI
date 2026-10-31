@@ -18,6 +18,7 @@ pub mod decoder_layout;
 pub mod document_graph;
 pub mod engine;
 pub mod inference_worker;
+pub mod ipc_transport;
 #[cfg(feature = "torch-backend")]
 pub mod prefill_tch;
 pub mod runtime_registry;
