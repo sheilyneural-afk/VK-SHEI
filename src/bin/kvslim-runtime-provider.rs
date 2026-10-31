@@ -67,6 +67,7 @@ fn load(
     fs::create_dir_all(cold_dir)?;
     config["kvslim_cold_directory"] = Value::String(cold_dir.display().to_string());
     config["kvslim_hot_v_tokens"] = 512u64.into();
+    config["kvslim_decode_unroll4"] = Value::Bool(true);
     let mut adapter = OpenClModelAdapter::default();
     adapter.load(model, &config)?;
     let identity = ModelIdentity {
