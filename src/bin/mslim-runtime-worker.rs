@@ -312,8 +312,8 @@ impl InferenceExecutor for GpuExecutor {
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
         let ids = input.get_ids();
         ensure!(!ids.is_empty(), "empty tokenized prompt");
-        // Replay and prefix reuse both require an empty position, and a reset
-        // clears the replay cache, so a non-empty session cannot be reused.
+        // Replay uploads only into an empty session. reset_session keeps the
+        // host snapshot, so this does not throw away a reusable prefix.
         if self.model.position() != 0 {
             self.model.reset_session()?;
         }

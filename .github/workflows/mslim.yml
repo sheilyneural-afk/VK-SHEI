@@ -86,7 +86,6 @@ jobs:
         run: cargo run --locked --release --features accelerator-backend --bin mslim-calibrate -- "$MSLIM_PHYSICAL_MODEL" --force --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048
 
   load:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
