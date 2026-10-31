@@ -263,7 +263,9 @@ impl GpuRegionStore {
                 for token in 0..count {
                     let key = &keys_token_major[token * token_bytes..(token + 1) * token_bytes];
                     let signal = key
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|bits| {
                             bf16::from_bits(u16::from_le_bytes([bits[0], bits[1]])).to_f32()
                         })
@@ -429,7 +431,9 @@ impl GpuRegionStore {
             let v = &values_token_major[i * token_bytes..(i + 1) * token_bytes];
             if layer == 0 {
                 let signal = k
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|bits| bf16::from_bits(u16::from_le_bytes([bits[0], bits[1]])).to_f32())
                     .collect::<Vec<_>>();
                 ensure!(

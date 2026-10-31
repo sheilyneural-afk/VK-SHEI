@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Hand-labelled retrieval benchmark for mslim-document (routing vs fused).
+"""Hand-labelled retrieval benchmark for mslim-document.
 
 Usage: eval-retrieval-labeled.py BIN QUESTIONS.json [--page-characters C]
 Gold pages = pages whose original text contains the question's `marker`.
 Questions whose marker is missing or straddles a page boundary are skipped
-and reported. Prints a JSON report with per-question outcomes.
+and reported. Compares the variants below on identical questions and prints a
+JSON report with hit rate, MRR, paired differences and the misses.
 """
 import argparse, json, os, subprocess, tempfile
+
+VARIANTS = {
+    "routing": ["--rank", "routing"],
+    "fused": ["--rank", "fused"],
+    "fused+prf4": ["--rank", "fused", "--expansion-terms", "4"],
+    "fused+prf8": ["--rank", "fused", "--expansion-terms", "8"],
+}
 
 
 def run(bin_, *args):
@@ -16,8 +24,8 @@ def run(bin_, *args):
     return json.loads(r.stdout) if r.stdout.lstrip().startswith("{") else r.stdout
 
 
-def pages_of(res, mode):
-    ev = res["evidence"] if mode == "routing" else res["phase"]["evidence"]
+def pages_of(res):
+    ev = res["evidence"] if "evidence" in res else res["phase"]["evidence"]
     return [e["page_number"] for e in ev]
 
 
@@ -45,35 +53,33 @@ def main():
                     skipped.append(q["q"])
                     continue
                 for k in (1, 2, 3):
-                    for mode in ("routing", "fused"):
+                    for name, flags in VARIANTS.items():
                         res = run(a.bin, "query", "--graph", graph, "--text", q["q"],
-                                  "--rank", mode, "--max-pages", str(k))
-                        got = pages_of(res, mode)
+                                  *flags, "--max-pages", str(k))
+                        got = pages_of(res)
                         rank = next((j + 1 for j, p in enumerate(got) if p in gold), None)
-                        rows.append({"doc": s["doc"], "q": q["q"], "k": k, "mode": mode,
+                        rows.append({"q": q["q"], "k": k, "variant": name,
                                      "gold": gold, "got": got, "rank": rank})
-    report = {"page_characters": a.page_characters, "skipped_marker_not_in_a_page": skipped,
-              "by_k": {}, "paired": {}, "misses": []}
+    report = {"page_characters": a.page_characters,
+              "skipped_marker_not_in_a_page": skipped, "by_k": {}, "paired_vs_routing": {}, "misses_at_3": {}}
     for k in (1, 2, 3):
-        rep = {}
-        for mode in ("routing", "fused"):
-            sel = [r for r in rows if r["k"] == k and r["mode"] == mode]
+        report["by_k"][str(k)] = {}
+        report["paired_vs_routing"][str(k)] = {}
+        base_rows = {r["q"]: r for r in rows if r["k"] == k and r["variant"] == "routing"}
+        for name in VARIANTS:
+            sel = [r for r in rows if r["k"] == k and r["variant"] == name]
             hit = [r for r in sel if r["rank"] is not None]
-            rep[mode] = {"n": len(sel), "hit_rate": round(len(hit) / len(sel), 4),
-                         "mrr": round(sum(1 / r["rank"] for r in hit) / len(sel), 4)}
-        report["by_k"][str(k)] = rep
-        pairs = [(r, f) for r, f in zip(
-            [x for x in rows if x["k"] == k and x["mode"] == "routing"],
-            [x for x in rows if x["k"] == k and x["mode"] == "fused"])]
-        report["paired"][str(k)] = {
-            "fused_only": sum(1 for r, f in pairs if f["rank"] and not r["rank"]),
-            "routing_only": sum(1 for r, f in pairs if r["rank"] and not f["rank"]),
-            "both": sum(1 for r, f in pairs if r["rank"] and f["rank"]),
-            "neither": sum(1 for r, f in pairs if not r["rank"] and not f["rank"]),
-        }
-    for r in rows:
-        if r["k"] == 3 and r["rank"] is None:
-            report["misses"].append({"mode": r["mode"], "q": r["q"], "gold": r["gold"], "got": r["got"]})
+            report["by_k"][str(k)][name] = {
+                "n": len(sel), "hit_rate": round(len(hit) / len(sel), 4),
+                "mrr": round(sum(1 / r["rank"] for r in hit) / len(sel), 4)}
+            if name != "routing":
+                report["paired_vs_routing"][str(k)][name] = {
+                    "gained": sum(1 for r in sel if r["rank"] and not base_rows[r["q"]]["rank"]),
+                    "lost": sum(1 for r in sel if not r["rank"] and base_rows[r["q"]]["rank"]),
+                }
+    for name in VARIANTS:
+        report["misses_at_3"][name] = [r["q"] for r in rows
+                                       if r["k"] == 3 and r["variant"] == name and r["rank"] is None]
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 

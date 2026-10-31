@@ -1,6 +1,7 @@
 # Project-local build boundary.
-# This deliberately overrides the machine-wide SHEILY/INICIO Cargo policy so
-# this project never writes build products to an external generated tree.
+# Project-local build boundary: build products and temporary files stay inside
+# this repository tree. The directories below are created by scripts/check.sh
+# and by CI; create them first (mkdir -p) when running cargo by hand.
 [build]
 target-dir = "deploy/local-production/runtime/build-target"
 

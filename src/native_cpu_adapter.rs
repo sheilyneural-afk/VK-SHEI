@@ -34,6 +34,10 @@ impl WeightShard {
     fn open(path: PathBuf) -> Result<Self> {
         let file =
             File::open(&path).with_context(|| format!("no se pudo abrir {}", path.display()))?;
+        // SAFETY: the weight shard is opened read-only and mapped immutably for
+        // the lifetime of `WeightShard`. Truncating or rewriting the file from
+        // outside this process while it is mapped is undefined behaviour; the
+        // bundle directory is treated as immutable once validated.
         let map = unsafe { MmapOptions::new().map(&file) }
             .with_context(|| format!("no se pudo mapear {}", path.display()))?;
         SafeTensors::deserialize(&map)
@@ -101,7 +105,9 @@ impl NativeWeightArchive {
     fn vector(&self, name: &str, size: usize) -> Result<Vec<f32>> {
         self.with_bf16(name, &[size], |bytes| {
             Ok(bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|x| bf16::from_bits(u16::from_le_bytes([x[0], x[1]])).to_f32())
                 .collect())
         })
@@ -112,7 +118,9 @@ impl NativeWeightArchive {
         self.with_bf16(name, &[rows, cols], |bytes| {
             let start = row * cols * 2;
             Ok(bytes[start..start + cols * 2]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|x| bf16::from_bits(u16::from_le_bytes([x[0], x[1]])).to_f32())
                 .collect())
         })
@@ -126,7 +134,9 @@ impl NativeWeightArchive {
                 .par_chunks_exact(row_bytes)
                 .map(|row| {
                     let sum = row
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .zip(x)
                         .map(|(w, &v)| {
                             bf16::from_bits(u16::from_le_bytes([w[0], w[1]])).to_f32() * v
@@ -268,7 +278,7 @@ fn dense_attention_bf16(
                 .map(|token| {
                     let start = token * token_bytes + kh * head_bytes;
                     q.iter()
-                        .zip(keys[start..start + head_bytes].chunks_exact(2))
+                        .zip(keys[start..start + head_bytes].as_chunks::<2>().0.iter())
                         .map(|(&a, bits)| {
                             a * bf16::from_bits(u16::from_le_bytes([bits[0], bits[1]])).to_f32()
                         })
@@ -280,7 +290,9 @@ fn dense_attention_bf16(
             for (token, probability) in scores.into_iter().enumerate() {
                 let start = token * token_bytes + kh * head_bytes;
                 for (dimension, bits) in values[start..start + head_bytes]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .enumerate()
                 {
                     out[dimension] += probability
@@ -394,7 +406,7 @@ impl NativeCpuDecoder {
                 let bytes = &keys[start..start + head_bytes];
                 let dot = q
                     .iter()
-                    .zip(bytes.chunks_exact(2))
+                    .zip(bytes.as_chunks::<2>().0.iter())
                     .map(|(&a, value)| {
                         a * bf16::from_bits(u16::from_le_bytes([value[0], value[1]])).to_f32()
                     })
@@ -427,7 +439,9 @@ impl NativeCpuDecoder {
             for (selected, probability) in selected_scores[qh].iter().copied().enumerate() {
                 let start = (selected * g.kv_heads + kh) * head_bytes;
                 for (d, value) in values[start..start + head_bytes]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .enumerate()
                 {
                     output[qh * g.head_dim + d] += probability

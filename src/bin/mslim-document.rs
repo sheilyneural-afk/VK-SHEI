@@ -176,9 +176,16 @@ fn query(arguments: Vec<String>) -> Result<()> {
     let mut graph_hops = 1usize;
     let mut scope = RetrievalScope::Focused;
     let mut rank = RankMode::Routing;
+    let mut expansion_terms = 0usize;
     let mut values = arguments.into_iter();
     while let Some(argument) = values.next() {
         match argument.as_str() {
+            "--expansion-terms" => {
+                expansion_terms = values
+                    .next()
+                    .context("--expansion-terms requires a value")?
+                    .parse()?
+            }
             "--rank" => {
                 rank = match values.next().context("--rank requires a value")?.as_str() {
                     "routing" => RankMode::Routing,
@@ -235,7 +242,10 @@ fn query(arguments: Vec<String>) -> Result<()> {
                 &text,
                 budget,
                 scope,
-                FusedRetrievalConfig::default(),
+                FusedRetrievalConfig {
+                    expansion_terms,
+                    ..FusedRetrievalConfig::default()
+                },
             )?;
             println!("{}", serde_json::to_string_pretty(&retrieval)?);
         }
@@ -252,7 +262,7 @@ fn print_help() {
         "  mslim-document build-text --document-id ID --version HASH --text document.txt --output graph.json [--page-characters 4000]"
     );
     println!(
-        "  mslim-document query --graph graph.json --text QUESTION [--scope focused|exhaustive] [--rank routing|fused] [--max-pages 8] [--max-characters 32000] [--graph-hops 1]"
+        "  mslim-document query --graph graph.json --text QUESTION [--scope focused|exhaustive] [--rank routing|fused] [--expansion-terms 0] [--max-pages 8] [--max-characters 32000] [--graph-hops 1]"
     );
     println!(
         "  --rank fused adds a BM25 channel and fuses it with the routing ranking; output is {{\"phase\":..., \"fusion\":...}}"

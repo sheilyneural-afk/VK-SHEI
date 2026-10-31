@@ -61,6 +61,7 @@ fn main() -> Result<()> {
     fs::create_dir_all(&validation_root)?;
     let receipt = serde_json::json!({
         "schema": "mslim.validation_receipt/v1",
+        "source_revision": mslim::build_info::source_revision(),
         "bundle_sha256": bundle_digest,
         "adapter": selection.adapter_id,
         "checks": ["inspect", "load", "prefill", "decode", "kv_snapshot", "kv_restore"],

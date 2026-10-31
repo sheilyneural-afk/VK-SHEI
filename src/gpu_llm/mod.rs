@@ -16,7 +16,7 @@
 //! with plain or Llama-3 scaling and no custom norm/model operators. No fake compatibility
 //! for arbitrary checkpoint architectures or devices. No GPU CPU fallback.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use opencl3::{kernel::ExecuteKernel, memory::Buffer, types::CL_BLOCKING};
 use safetensors::Dtype;
 use serde::Serialize;
@@ -93,6 +93,40 @@ fn checkpoint_eos_token_ids(model_dir: &Path, vocab: usize) -> Result<Vec<u32>> 
         }
     }
     Ok(eos)
+}
+
+#[cfg(test)]
+mod replay_reset_tests {
+    use super::{
+        ReplayAdmission, admit_verified_replay, retain_replay_after_causal_reset,
+        retain_replay_after_namespace_bind,
+    };
+
+    #[test]
+    fn second_turn_keeps_replay_and_a_live_session_is_not_poison() {
+        let cache = Some(vec![7u32, 8, 9]);
+        let after_reset = retain_replay_after_causal_reset(cache.clone());
+        assert_eq!(
+            after_reset, cache,
+            "reset_session must retain the host replay snapshot"
+        );
+        assert!(
+            retain_replay_after_namespace_bind(cache).is_none(),
+            "binding a foreign ColdStore must not keep another turn's K/V"
+        );
+        assert_eq!(
+            admit_verified_replay(after_reset.as_deref() == Some(&[7, 8, 9][..]), 0, false),
+            ReplayAdmission::Ready
+        );
+        assert_eq!(
+            admit_verified_replay(true, 40, false),
+            ReplayAdmission::NeedsFreshSession
+        );
+        assert_ne!(
+            admit_verified_replay(true, 40, false),
+            ReplayAdmission::Poisoned
+        );
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +284,61 @@ pub struct GpuLlm {
         crate::calibration_profile::PrefillProfileParameters,
         crate::calibration_profile::PrefillSettings,
     )>,
+}
+
+/// Host replay snapshot is not GPU session state. A causal reset must keep
+/// it so the next turn can rehydrate. Binding a foreign ColdStore must drop
+/// it so one conversation cannot inherit another's K/V.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CausalReset {
+    SameProcess,
+    ForeignNamespace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayAdmission {
+    Miss,
+    Ready,
+    /// Matching cache, but the session still holds a previous turn.
+    /// This is not a dead GPU: the caller resets, then retries.
+    NeedsFreshSession,
+    Poisoned,
+}
+
+pub(crate) fn keep_prompt_replay(kind: CausalReset) -> bool {
+    matches!(kind, CausalReset::SameProcess)
+}
+
+pub(crate) fn retain_replay_after_causal_reset<T>(snapshot: Option<T>) -> Option<T> {
+    if keep_prompt_replay(CausalReset::SameProcess) {
+        snapshot
+    } else {
+        None
+    }
+}
+
+pub(crate) fn retain_replay_after_namespace_bind<T>(snapshot: Option<T>) -> Option<T> {
+    if keep_prompt_replay(CausalReset::ForeignNamespace) {
+        snapshot
+    } else {
+        None
+    }
+}
+
+pub(crate) fn admit_verified_replay(
+    cache_matches: bool,
+    position: usize,
+    poisoned: bool,
+) -> ReplayAdmission {
+    if poisoned {
+        ReplayAdmission::Poisoned
+    } else if !cache_matches {
+        ReplayAdmission::Miss
+    } else if position != 0 {
+        ReplayAdmission::NeedsFreshSession
+    } else {
+        ReplayAdmission::Ready
+    }
 }
 
 impl GpuLlm {
@@ -1360,7 +1449,12 @@ impl GpuLlm {
     /// Reset only the active causal session. The resident model weights survive.
     /// A fresh physical ColdStore namespace prevents old conversation pages from
     /// being reopened as if they belonged to the new conversation.
+    ///
+    /// The host replay snapshot is not causal-session state. It is retained so
+    /// the next prefill can rehydrate K/V instead of recomputing the prefix.
+    /// `reset_session_at` still drops it: that path binds a foreign ColdStore.
     pub fn reset_session(&mut self) -> Result<()> {
+        let replay = self.gpu_prompt_replay.take();
         let next_directory = self.active_cold_directory().map(|current| {
             let root = current.parent().unwrap_or(current.as_path());
             let nonce = SystemTime::now()
@@ -1369,7 +1463,9 @@ impl GpuLlm {
                 .unwrap_or_default();
             root.join(format!("session-{}-{nonce}", std::process::id()))
         });
-        self.reset_session_at(next_directory)
+        let result = self.reset_session_at(next_directory);
+        self.gpu_prompt_replay = retain_replay_after_causal_reset(replay);
+        result
     }
 
     /// Reset into a specific ColdStore namespace. Restore uses this to reopen
@@ -1405,7 +1501,8 @@ impl GpuLlm {
         }
         self.position = 0;
         self.session_tokens.clear();
-        self.gpu_prompt_replay = None;
+        // Foreign ColdStore bind. `reset_session` writes the snapshot back.
+        self.gpu_prompt_replay = retain_replay_after_namespace_bind(self.gpu_prompt_replay.take());
         if let Some(hot) = self.hot_values.as_mut() {
             hot.valid_prefix_tokens = 0;
             hot.attention_calls = 0;
@@ -1555,10 +1652,13 @@ impl GpuLlm {
         if prompt_ids.len() > capacity {
             return Ok(0);
         }
-        ensure!(
-            self.position == 0 && !self.poisoned,
-            "GPU shared prefix needs new healthy original BF16 session"
-        );
+        match admit_verified_replay(true, self.position, self.poisoned) {
+            ReplayAdmission::Ready => {}
+            ReplayAdmission::Miss | ReplayAdmission::NeedsFreshSession => return Ok(0),
+            ReplayAdmission::Poisoned => {
+                bail!("GPU runtime poisoned; restart the worker")
+            }
+        }
         if !snapshot.verify() {
             self.gpu_prompt_replay = None;
             return Ok(0); // safe recomputation; no stale BF16 uploads
@@ -1638,13 +1738,15 @@ impl GpuLlm {
         let Some(snapshot) = self.gpu_prompt_replay.as_ref() else {
             return Ok(None);
         };
-        if snapshot.ids != prompt_ids {
-            return Ok(None);
+        match admit_verified_replay(snapshot.ids == prompt_ids, self.position, self.poisoned) {
+            ReplayAdmission::Ready => {}
+            // A live session is a miss. Poisoning here kills the worker on a
+            // repeated prompt; the caller must reset before uploading.
+            ReplayAdmission::Miss | ReplayAdmission::NeedsFreshSession => return Ok(None),
+            ReplayAdmission::Poisoned => {
+                bail!("GPU runtime poisoned; restart the worker")
+            }
         }
-        ensure!(
-            self.position == 0 && !self.poisoned,
-            "exact GPU prompt replay requires a fresh healthy session"
-        );
         if !snapshot.verify() {
             // No K/V or logit is restored before SHA256 verification.
             // On any corruption the original physical BF16 GPU prefill
@@ -2306,6 +2408,17 @@ impl GpuLlm {
         response
     }
 
+    /// Replay uploads only into position 0. A live turn is reset without
+    /// dropping the host snapshot. A poisoned runtime is not reused.
+    fn prepare_fresh_session_for_replay(&mut self) -> Result<()> {
+        if self.position != 0 {
+            self.reset_session()?;
+        }
+        ensure!(self.position == 0, "causal reset left a non-empty session");
+        ensure!(!self.poisoned, "GPU runtime poisoned; restart the worker");
+        Ok(())
+    }
+
     /// Prefill only: computes logits for the final prompt token without
     /// generating or appending a first output token. The returned state
     /// therefore represents exactly the prompt and nothing else.
@@ -2316,6 +2429,7 @@ impl GpuLlm {
         cancel: &AtomicBool,
     ) -> Result<(GpuStep, f64)> {
         ensure!(!prompt_ids.is_empty(), "GPU prompt IDs empty");
+        self.prepare_fresh_session_for_replay()?;
         self.select_calibrated_prefill(prompt_ids.len())?;
         ensure!(
             prompt_ids.len() < self.max_tokens,
@@ -2415,6 +2529,7 @@ impl GpuLlm {
                 .is_some_and(|n| n <= self.max_tokens),
             "GPU context capacity not large enough for prompt + generation"
         );
+        self.prepare_fresh_session_for_replay()?;
         self.select_calibrated_prefill(prompt_ids.len())?;
         let started = Instant::now();
         self.last_prompt_replay_hit = false;
@@ -2694,6 +2809,7 @@ mod tests {
     #[cfg(feature = "physical-conformance")]
     mod physical_conformance {
         use super::super::*;
+        use safetensors::{Dtype, tensor::TensorView};
 
         #[test]
         #[ignore = "requires a physical accelerator and compatible checkpoint"]
@@ -2829,7 +2945,10 @@ mod tests {
             let lod_result = lod.generate(&ids, 16, true).unwrap();
             assert_eq!(dense_ids, lod_result.tokens);
             assert!(lod_result.gpu_region_components_active);
-            assert!(lod_result.gpu_kv_capacity_bytes < 64 * 2 * 2 * 128 * 24 * 2);
+            assert!(
+                lod_result.gpu_kv_capacity_bytes
+                    < 64 * 2 * 2 * 128 * lod.spec().num_hidden_layers * 2
+            );
             let stats = lod_result.gpu_region_stats.as_ref().unwrap();
             assert!(stats.exact_v_tokens_read_from_cold > 0);
             assert_eq!(stats.exact_v_tokens_skipped, 0);
@@ -2943,14 +3062,27 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let text = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
+            let text_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tokenizer
+                        .encode(text_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let mut old = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             let old_gen = old.generate(&ids, 2, true).unwrap();
@@ -3047,7 +3179,7 @@ mod tests {
             }
             assert_eq!(
                 current.gpu_hot_v_attention_calls,
-                15 * 24,
+                15 * lod.spec().num_hidden_layers,
                 "hot decode should cover all GPU layer attentions"
             );
             assert_eq!(current.gpu_hot_v_cold_fallback_calls, 0);
@@ -3157,14 +3289,27 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let chat = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
+            let chat_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tokenizer
+                        .encode(chat_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let make = || {
                 let mut gpu = GpuLlm::load_with_gpu_region(
@@ -3214,7 +3359,10 @@ mod tests {
             let result = improved.generate(&ids, 16, true).unwrap();
             assert!(result.gpu_deferred_cold_enabled);
             assert!(result.gpu_deferred_cold_activated);
-            assert_eq!(result.gpu_deferred_cold_committed_token_layers, 15 * 24);
+            assert_eq!(
+                result.gpu_deferred_cold_committed_token_layers,
+                15 * improved.spec().num_hidden_layers
+            );
             assert!(result.gpu_deferred_cold_commit_seconds > 0.0);
             assert_eq!(result.tokens, previous.tokens);
             for (index, (a, b)) in previous.steps.iter().zip(&result.steps).enumerate() {
@@ -3282,14 +3430,27 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let chat = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tokenizer.encode(chat, false).unwrap().get_ids().to_vec();
+            let chat_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tokenizer
+                        .encode(chat_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let create = |fused: bool| {
                 let mut gpu = GpuLlm::load_with_gpu_region(
@@ -3813,14 +3974,26 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let chat = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tok.encode(chat, false).unwrap().get_ids().to_vec();
+            let chat_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tok.encode(chat_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
 
             // ORIGINAL GPU dense BF16 reference, no metadata/no approximation.
@@ -3861,7 +4034,10 @@ mod tests {
                 actual.gpu_micro_hot_sparse_calls, 0,
                 "actual 375-token sample has no certified region omissions"
             );
-            assert_eq!(actual.gpu_micro_hot_exact_fallback_calls, 24 * 15);
+            assert_eq!(
+                actual.gpu_micro_hot_exact_fallback_calls,
+                runtime.spec().num_hidden_layers * 15
+            );
             assert_eq!(
                 actual.gpu_hot_v_cold_fallback_calls, 0,
                 "hot BF16 V must avoid cold value staging"
@@ -3927,7 +4103,10 @@ mod tests {
             let again = runtime.generate(&ids, 16, true).unwrap();
             assert_eq!(again.tokens, expected.tokens);
             assert!(again.gpu_exact_hot_fused_attention);
-            assert_eq!(again.gpu_micro_hot_exact_fallback_calls, 24 * 15);
+            assert_eq!(
+                again.gpu_micro_hot_exact_fallback_calls,
+                runtime.spec().num_hidden_layers * 15
+            );
             for (step, (a, b)) in again.steps.iter().zip(expected.steps.iter()).enumerate() {
                 assert_eq!(
                     a.logits, b.logits,
@@ -4242,14 +4421,27 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let prompt = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
+            let prompt_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tokenizer
+                        .encode(prompt_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let mut gpu = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             gpu.set_batch_prefill_tokens(Some(128)).unwrap();
@@ -4323,14 +4515,27 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let prompt = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
+            let prompt_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tokenizer
+                        .encode(prompt_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let mut gpu = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             gpu.set_batch_prefill_tokens(Some(128)).unwrap();
@@ -4391,14 +4596,26 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let prompt = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tok.encode(prompt, false).unwrap().get_ids().to_vec();
+            let prompt_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tok.encode(prompt_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let cfg = GpuRegionConfig {
                 epsilon: 0.0,
@@ -4842,14 +5059,26 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let chat = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tok.encode(chat, false).unwrap().get_ids().to_vec();
+            let chat_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tok.encode(chat_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let mut gpu = GpuLlm::load_with_gpu_region(
                 &model,
@@ -5019,14 +5248,27 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let text = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
+            let text_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tokenizer
+                        .encode(text_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let mut model = GpuLlm::load_with_gpu_region(
                 &model,

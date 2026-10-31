@@ -209,7 +209,11 @@ impl DenseKvCache {
             .collect())
     }
 
-    pub(super) fn compare_appended_state(&self, other: &Self, appended: usize) -> Result<KvStateDifference> {
+    pub(super) fn compare_appended_state(
+        &self,
+        other: &Self,
+        appended: usize,
+    ) -> Result<KvStateDifference> {
         ensure!(
             self.sequence_tokens == other.sequence_tokens && appended <= self.sequence_tokens,
             "estados KV no comparables"
@@ -912,7 +916,10 @@ impl MslimKvCache {
         }
     }
 
-    pub(super) fn assemble_committed_layer(&mut self, layer_index: usize) -> Result<(Tensor, Tensor)> {
+    pub(super) fn assemble_committed_layer(
+        &mut self,
+        layer_index: usize,
+    ) -> Result<(Tensor, Tensor)> {
         let pages = self.layers[layer_index].pages.clone();
         ensure!(!pages.is_empty(), "capa comprometida vacía");
         let spans = pages
@@ -3942,7 +3949,12 @@ impl DeterministicSuffixDrafter {
     /// The first token is already the target model's exact argmax from the
     /// previous forward. Only the remaining suffix is drafted from unique
     /// prompt continuations.
-    pub(super) fn draft(&self, generated: &[u32], exact_first_token: i64, maximum: usize) -> Vec<i64> {
+    pub(super) fn draft(
+        &self,
+        generated: &[u32],
+        exact_first_token: i64,
+        maximum: usize,
+    ) -> Vec<i64> {
         if maximum == 0 {
             return Vec::new();
         }

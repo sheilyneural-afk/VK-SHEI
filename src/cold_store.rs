@@ -239,6 +239,10 @@ impl ColdStore {
         if self.file.metadata()?.len() == 0 {
             return Err(invalid("almacén KV vacío no se puede mapear"));
         }
+        // SAFETY: the file is owned by this store and the mapping is read-only
+        // and dropped before returning. As with any memory map, truncating the
+        // file from outside this process while it is mapped is undefined
+        // behaviour; the store directory is private to the runtime.
         let mapping = unsafe { MmapOptions::new().map(&self.file)? };
         self.pages
             .par_iter()
@@ -600,8 +604,10 @@ impl ColdStore {
         }
         let hashes = Arc::new(
             bytes
-                .chunks_exact(8)
-                .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| u64::from_le_bytes(*chunk))
                 .collect::<Vec<u64>>(),
         );
         self.hash_tables.insert(offset, hashes.clone());

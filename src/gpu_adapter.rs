@@ -561,32 +561,6 @@ impl ModelAdapter for GpuModelAdapter {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unloaded_adapter_does_not_claim_physical_restore() {
-        let mut adapter = GpuModelAdapter::default();
-        assert!(!adapter.capabilities().supports_kv_restore);
-        assert!(!adapter.capabilities().supports_streaming);
-        assert!(adapter.snapshot_kv().is_err());
-    }
-
-    #[test]
-    fn kv_mode_is_explicit_and_fail_closed() {
-        assert_eq!(
-            GpuKvMode::parse(&json!({"mslim_kv_mode": "dense"})).unwrap(),
-            GpuKvMode::Dense
-        );
-        assert_eq!(
-            GpuKvMode::parse(&json!({"mslim_kv_mode": "exact-coldstore"})).unwrap(),
-            GpuKvMode::ExactColdStore
-        );
-        assert!(GpuKvMode::parse(&json!({"mslim_kv_mode": "automatic"})).is_err());
-    }
-}
-
 const COLD_PAGES_FILE: &str = "pages-exact.kv";
 
 fn snapshot_pin_name(kv_sha256: &str, prefix_bytes: u64) -> String {
@@ -611,4 +585,30 @@ fn fork_cold_prefix(source_dir: &Path, prefix_bytes: u64) -> Result<PathBuf> {
         .context("copy ColdStore prefix for physical GPU restore")?;
     output.sync_all()?;
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unloaded_adapter_does_not_claim_physical_restore() {
+        let mut adapter = GpuModelAdapter::default();
+        assert!(!adapter.capabilities().supports_kv_restore);
+        assert!(!adapter.capabilities().supports_streaming);
+        assert!(adapter.snapshot_kv().is_err());
+    }
+
+    #[test]
+    fn kv_mode_is_explicit_and_fail_closed() {
+        assert_eq!(
+            GpuKvMode::parse(&json!({"mslim_kv_mode": "dense"})).unwrap(),
+            GpuKvMode::Dense
+        );
+        assert_eq!(
+            GpuKvMode::parse(&json!({"mslim_kv_mode": "exact-coldstore"})).unwrap(),
+            GpuKvMode::ExactColdStore
+        );
+        assert!(GpuKvMode::parse(&json!({"mslim_kv_mode": "automatic"})).is_err());
+    }
 }

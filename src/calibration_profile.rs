@@ -253,6 +253,22 @@ pub fn read_promoted_profile(
         authorized_digest == Some(digest.as_str()),
         "prefill profile is not the authorized activation"
     );
+    // A rollback restores the previous state, so it keeps a previously promoted
+    // profile loadable. It must not turn a profile that was never promoted
+    // (for example a hand-written baseline) into an authorized one.
+    if activation.event == "rollback_verified" {
+        ensure!(
+            receipts.iter().any(|receipt| {
+                receipt.event == "promotion_committed"
+                    && receipt
+                        .details
+                        .get("candidate_digest")
+                        .and_then(Value::as_str)
+                        == Some(digest.as_str())
+            }),
+            "prefill profile was restored by a rollback but was never promoted"
+        );
+    }
     // Recheck after reading the chain to reject a concurrently started activation.
     ensure!(
         !pending_profile_path(path).exists()

@@ -97,6 +97,7 @@ fn main() -> Result<()> {
     };
     let receipt = json!({
         "schema": "mslim.certification/v1",
+        "source_revision": mslim::build_info::source_revision(),
         "started_unix_seconds": started,
         "finished_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         "status": status,

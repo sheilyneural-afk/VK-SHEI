@@ -150,17 +150,23 @@ impl RawTensor {
         match self.dtype {
             FloatFormat::Bf16 => self
                 .bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
                 .collect(),
             FloatFormat::F16 => self
                 .bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
                 .collect(),
             FloatFormat::F32 => self
                 .bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|b| f32::from_bits(u32::from_le_bytes([b[0], b[1], b[2], b[3]])))
                 .collect(),
         }

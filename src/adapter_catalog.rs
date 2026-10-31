@@ -7,11 +7,17 @@
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use mslim_adapter_api::{
-    ActivationPolicy, AdapterDescriptor, AdapterSelection, ComputeKind, select_adapter,
-    select_available_adapter,
-};
+#[cfg(any(
+    test,
+    feature = "native-cpu-backend",
+    feature = "accelerator-backend",
+    feature = "torch-backend"
+))]
+use mslim_adapter_api::ActivationPolicy;
 use mslim_adapter_api::{AdapterAvailability, AdapterStatus, ModelAdapter};
+use mslim_adapter_api::{
+    AdapterDescriptor, AdapterSelection, ComputeKind, select_adapter, select_available_adapter,
+};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HostCapabilities {

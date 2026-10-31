@@ -131,6 +131,56 @@ fn regression_rolls_back_and_cannot_leave_a_loadable_candidate() {
     assert!(read_promoted_profile(&path, &environment()).is_err());
 }
 #[test]
+fn rolled_back_proposal_keeps_the_previously_promoted_profile_loadable() {
+    let (dir, path, mut tx) = setup();
+    tx.propose().unwrap();
+    tx.begin_shadow().unwrap();
+    tx.complete_shadow(&observation(128, 10.0), &observation(64, 12.0))
+        .unwrap();
+    tx.begin_canary().unwrap();
+    tx.complete_canary(&observation(128, 10.0), &observation(64, 12.0))
+        .unwrap();
+    tx.promote("test-explicit-authority").unwrap();
+    drop(tx);
+    assert_eq!(
+        read_promoted_profile(&path, &environment())
+            .unwrap()
+            .settings,
+        settings(64)
+    );
+
+    // A later proposal that fails its canary rolls back to the promoted profile.
+    let proposal = CalibrationProposal {
+        proposal_id: "second-proposal".into(),
+        baseline_profile_digest: sha256(&fs::read(&path).unwrap()),
+        candidate: profile(32),
+        gates: CalibrationGates::default(),
+    };
+    let mut second = CalibrationTransaction::new(dir.path(), &path, proposal).unwrap();
+    second.propose().unwrap();
+    second.begin_shadow().unwrap();
+    second
+        .complete_shadow(&observation(64, 12.0), &observation(32, 14.0))
+        .unwrap();
+    second.begin_canary().unwrap();
+    let mut wrong = observation(32, 100.0);
+    wrong.parity_ok = false;
+    assert!(
+        !second
+            .complete_canary(&observation(64, 12.0), &wrong)
+            .unwrap()
+            .accepted
+    );
+    assert_eq!(second.state(), CalibrationState::RolledBack);
+    drop(second);
+    assert_eq!(
+        read_promoted_profile(&path, &environment())
+            .unwrap()
+            .settings,
+        settings(64)
+    );
+}
+#[test]
 fn missing_measurements_are_not_replaced_by_predictions() {
     let (_dir, path, mut tx) = setup();
     let original = fs::read(&path).unwrap();

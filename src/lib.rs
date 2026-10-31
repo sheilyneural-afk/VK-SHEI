@@ -5,9 +5,14 @@
 //! coordinates; exact BF16 state fragments are then read from the append-only cold
 //! store. There is no alternate low-bit K/V authority.
 
+// Every `unsafe` block must state why it is sound; enforced by the shared gate
+// (`scripts/check.sh` runs clippy with `-D warnings`).
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 pub mod adapter_catalog;
 pub mod adaptive_extent;
 pub mod attention_certificate;
+pub mod build_info;
 pub mod calibration_contract;
 pub mod calibration_predictor;
 pub mod calibration_profile;
@@ -34,6 +39,7 @@ pub mod runtime_registry;
 pub mod session_coordinator;
 pub mod session_store;
 pub mod shadow_metrics;
+pub mod stem_index;
 #[cfg(feature = "torch-backend")]
 pub mod torch_runtime;
 

@@ -8,6 +8,9 @@
 - [PREFILL_PROFILE.md](PREFILL_PROFILE.md): selector de perfiles de prefill.
 - [ADAPTIVE_CALIBRATION.md](ADAPTIVE_CALIBRATION.md): aprendizaje auxiliar,
   medición física y activación transaccional del prefill.
+- [RETRIEVAL_EVALUATION.md](RETRIEVAL_EVALUATION.md): medición de la
+  recuperación documental (`routing` frente a `fused`) y cómo reproducirla.
+- [PENDIENTE.md](PENDIENTE.md): trabajo aplazado hacia producción y su motivo.
 - [NAMING_STANDARD.md](NAMING_STANDARD.md): identidad y vocabulario técnico.
 - [Entorno local](../deploy/local-production/README.md): layout, instalación,
   verificación y arranque.
