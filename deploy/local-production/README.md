@@ -1,5 +1,21 @@
 # Entorno local de producción de KVSLIM
 
+## Catálogo e instalación de runtimes
+
+El catálogo de runtimes está en `../../catalogs/runtime-catalog.example.json`. No contiene binarios ni hashes inventados: cada release concreta debe aportar una URL HTTPS y un fichero oficial de checksums.
+
+Para resolver e instalar un artefacto:
+
+```bash
+deploy/local-production/scripts/resolve-runtime-manifest.sh \\
+  <runtime-id> <version> <artifact-url> <checksum-url> \\
+  <ruta-relativa-dentro-de-runtime>
+```
+
+El script descarga el artefacto, obtiene el SHA-256 del fichero oficial, verifica la coincidencia y genera un manifest en `runtime/manifests/`.
+
+Los drivers del sistema no se instalan automáticamente. Si un runtime requiere driver, el instalador se detiene y pide la instalación administrativa.
+
 Este directorio define el entorno local aislado para ejecutar `KV-SHEI` como un
 servicio controlado dentro del propio proyecto. No usa `/opt`, `/var`, el home
 del usuario, un repositorio externo ni rutas de modelos descubiertas por
