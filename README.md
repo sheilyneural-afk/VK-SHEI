@@ -49,7 +49,7 @@ flowchart TB
     host --> provider["Runtime provider opcional"]
     worker --> sessions["SessionStore + Coordinator"]
     sessions --> cold["ColdStore (K/V BF16)"]
-    worker --> graph["DocumentGraph y evidencia"]
+    worker --> docgraph["DocumentGraph y evidencia"]
     provider --> bundle["Model bundle verificado"]
 ```
 
