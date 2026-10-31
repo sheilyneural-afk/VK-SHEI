@@ -21,13 +21,14 @@ El proyecto **sí está probado** en un bundle y una máquina de referencia. Est
 
 | Evidencia | Resultado observado |
 |---|---|
-| [`physical-certification.json`](deploy/local-production/runtime/validation/physical-certification.json) | **PASSED**: `inspect`, `load`, `prefill`, `decode`, `kv_snapshot` y `kv_restore` completados con `exit_code: 0`. Bundle `43e8fa46…d3d686`, adapter `opencl-runtime`, dispositivo AMD Radeon Graphics/OpenCL, host x86_64 con 16 hilos y 64 GB de RAM. |
-| [`calibration/*.json`](deploy/local-production/runtime/calibration/) | Ejecución básica medida: 286,553 µs de prefill, 244,447 µs de decode y snapshot K/V de 210 bytes para la muestra calibrada. |
-| [`external-e2e/.../generation.json`](deploy/local-production/runtime/validation/external-e2e/) | Ruta real proveedor → IPC → worker HTTP: respuesta `"(S"`, 16 tokens de prompt, 1 token de completion, 103.558 s de pared, 52.644 s de prefill y 50.897 s de decode. |
-| [`external-e2e/.../resume.json`](deploy/local-production/runtime/validation/external-e2e/) | Tras reiniciar el worker, la sesión se reanudó con modo `exact` y `restored_bytes: 351`; el recibo y los digests de modelo/tokenizer fueron aceptados. |
-| [`adapter-parity-*.json`](deploy/local-production/runtime/validation/) | Los 8 tokens greedy coincidieron con CPU, pero los logits no quedaron dentro de una ULP BF16 (`max_abs_difference` hasta `0.8125`); por eso el gate marca `blocked-fallback-required`. |
+| `physical-certification.json` *(artefacto local no versionado)* | **PASSED**: `inspect`, `load`, `prefill`, `decode`, `kv_snapshot` y `kv_restore` completados con `exit_code: 0`. Bundle `43e8fa46…d3d686`, adapter `opencl-runtime`, dispositivo AMD Radeon Graphics/OpenCL, host x86_64 con 16 hilos y 64 GB de RAM. |
+| `runtime/calibration/*.json` *(artefactos locales)* | Ejecución básica medida: 286,553 µs de prefill, 244,447 µs de decode y snapshot K/V de 210 bytes para la muestra calibrada. |
+| `runtime/validation/external-e2e/.../generation.json` *(artefacto local)* | Ruta real proveedor → IPC → worker HTTP: respuesta `"(S"`, 16 tokens de prompt, 1 token de completion, 103.558 s de pared, 52.644 s de prefill y 50.897 s de decode. |
+| `runtime/validation/external-e2e/.../resume.json` *(artefacto local)* | Tras reiniciar el worker, la sesión se reanudó con modo `exact` y `restored_bytes: 351`; el recibo y los digests de modelo/tokenizer fueron aceptados. |
+| `runtime/validation/adapter-parity-*.json` *(artefacto local)* | Los 8 tokens greedy coincidieron con CPU, pero los logits no quedaron dentro de una ULP BF16 (`max_abs_difference` hasta `0.8125`); por eso el gate marca `blocked-fallback-required`. |
 
 La conclusión correcta es: **el flujo funcional de inferencia, memoria, snapshot, reinicio y recuperación está demostrado en el entorno certificado**. Lo que todavía no se puede afirmar es la paridad numérica bit-exacta del acelerador ni la misma velocidad en cualquier hardware/modelo.
+
 ## Qué es
 
 KV-SHEI es el repositorio del runtime **KVSLIM**: una base local para organizar contexto, almacenar estado K/V y conectar runtimes de inferencia mediante contratos verificables.
@@ -51,6 +52,21 @@ flowchart TB
     sessions --> cold["ColdStore (K/V BF16)"]
     worker --> docgraph["DocumentGraph y evidencia"]
     provider --> bundle["Model bundle verificado"]
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Cliente
+    participant W as Worker HTTP
+    participant R as Runtime IPC
+    participant S as SessionStore
+    C->>W: chat completion
+    W->>R: prefill + decode
+    R-->>W: respuesta + métricas
+    W->>S: snapshot + recibo
+    Note over W,S: reinicio del worker
+    W->>S: restore verificado
+    S-->>W: estado exacto
 ```
 
 El flujo importante es deliberadamente explícito: un catálogo puede encontrar una implementación compilada, pero solo el sondeo local y la inspección del bundle pueden marcarla como utilizable. Si una capacidad no está demostrada, la selección falla de forma cerrada; no hay fallback silencioso que finja compatibilidad.
