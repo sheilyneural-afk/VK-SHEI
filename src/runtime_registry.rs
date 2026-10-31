@@ -3,8 +3,8 @@
 //! vendor/backend names.
 use anyhow::{Result, bail};
 use kvslim_adapter_api::{
-    AdapterAvailability, AdapterCapabilities, AdapterSelection, AdapterStatus, ComputeKind,
-    ModelAdapter, select_available_adapter,
+    AdapterAvailability, AdapterSelection, AdapterStatus, ComputeKind, ModelAdapter,
+    select_available_adapter,
 };
 use std::path::Path;
 
@@ -50,7 +50,7 @@ impl RuntimeRegistry {
         model_dir: &Path,
         config: &serde_json::Value,
     ) -> Result<Box<dyn ModelAdapter>> {
-        let mut adapter = self.create_selected(selection)?;
+        let adapter = self.create_selected(selection)?;
         adapter.inspect(model_dir, config)?;
         Ok(adapter)
     }
