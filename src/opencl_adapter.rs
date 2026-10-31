@@ -15,6 +15,7 @@ pub struct OpenClModelAdapter {
     model_dir: Option<PathBuf>,
     runtime: Option<OpenClLlm>,
     last_logits: Option<Vec<f32>>,
+    cached_prompt: Vec<u32>,
 }
 
 impl Default for OpenClModelAdapter {
@@ -31,6 +32,7 @@ impl Default for OpenClModelAdapter {
             model_dir: None,
             runtime: None,
             last_logits: None,
+            cached_prompt: Vec::new(),
         }
     }
 }
@@ -171,6 +173,7 @@ impl ModelAdapter for OpenClModelAdapter {
         self.model_dir = Some(model_dir.to_owned());
         self.runtime = Some(runtime);
         self.last_logits = None;
+        self.cached_prompt.clear();
         Ok(())
     }
 
@@ -180,9 +183,16 @@ impl ModelAdapter for OpenClModelAdapter {
             .as_mut()
             .context("local accelerator adapter is not loaded")?;
         ensure!(!input.is_empty(), "accelerator prefill vacío");
+        if self.cached_prompt == input && runtime.position() >= input.len() {
+            return Ok(json!({"tokens": input.len(), "position": runtime.position(), "mode": "verified-prefix-reuse", "reused_tokens": input.len()}));
+        }
+        if runtime.position() != 0 {
+            runtime.reset_session()?;
+        }
         if runtime.position() == 0 {
             let generation = runtime.generate(input, 1, true)?;
             self.last_logits = generation.steps.last().and_then(|step| step.logits.clone());
+            self.cached_prompt = input.to_vec();
             Ok(json!({
                 "tokens": input.len(),
                 "position": runtime.position(),
@@ -292,6 +302,7 @@ impl ModelAdapter for OpenClModelAdapter {
             );
         }
         self.last_logits = None;
+        self.cached_prompt.clear();
         Ok(())
     }
 }
