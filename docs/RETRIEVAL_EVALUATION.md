@@ -26,6 +26,33 @@ fallan cuando la pregunta y el documento usan palabras distintas para lo mismo
 (por ejemplo "tarjeta gráfica" frente a GPU). Eso requiere expansión semántica
 o embeddings, que no están implementados.
 
+## Canal por raíces (stems), sin latencia añadida
+
+`fused` usa ahora un índice BM25 sobre raíces ligeras (`stem_index`): quita
+plurales y sufijos frecuentes del español y del inglés, de modo que "recibos" y
+"recibo" o "activación" y "activaciones" coinciden. Se construye al consultar,
+con el stem de cada token distinto calculado una sola vez. No hay modelo, red ni
+caché que mantener.
+
+Mismas 36 preguntas, páginas de 1000 caracteres (acierto = página correcta
+entre las `k` primeras):
+
+| k | `routing` | `fused` | ganadas / perdidas por `fused` |
+|---|---|---|---|
+| 1 | 50,0 % | 55,6 % | 3 / 1 |
+| 2 | 58,3 % | 63,9 % | 3 / 1 |
+| 3 | 66,7 % | 69,4 % | 1 / 0 |
+
+Mejora pequeña y consistente, pero sobre 36 preguntas no es significativa.
+`--expansion-terms N` (realimentación de pseudo-relevancia) no mejora de forma
+estable (k=1: 50,0 % con N=4 y 47,2 % con N=8, ambos por debajo de `fused`
+sin expansión), así que queda desactivado (N=0).
+
+Latencia medida con el binario release sobre un grafo de 122 páginas, mediana de
+30 invocaciones: `routing` 91,5 ms, `fused` 82,4 ms, `fused` con N=4 80,6 ms. Las
+tres quedan dentro del ruido de arranque del proceso; `fused` no añade latencia
+apreciable.
+
 ## Reproducir
 
 ```bash
