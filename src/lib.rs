@@ -61,4 +61,5 @@ pub mod gpu_canonical_lod;
 #[cfg(feature = "hip-backend")]
 pub mod native_hip;
 
+pub mod generic_runtime;
 pub mod gpu_micro_regions;
