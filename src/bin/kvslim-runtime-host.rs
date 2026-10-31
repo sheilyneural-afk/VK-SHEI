@@ -7,13 +7,15 @@
 use anyhow::{Context, Result, bail};
 use kvslim::{
     ipc_transport::{read_request, write_response},
+    opencl_adapter::OpenClModelAdapter,
     runtime_host::RuntimeHost,
 };
 use kvslim_adapter_api::{
     AdapterCapabilities, CacheMode, CacheReceipt, GenerationRequest, GenerationResult,
-    GenerationStats, ModelIdentity, RuntimeSession,
+    GenerationStats, ModelAdapter, ModelAdapterSession, ModelIdentity, RuntimeSession,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     os::unix::net::{UnixListener, UnixStream},
@@ -97,8 +99,40 @@ impl RuntimeSession for DeterministicSession {
     }
 }
 
-fn serve_connection(mut stream: UnixStream, session_id: &str) -> Result<()> {
-    let mut host = RuntimeHost::new(Box::new(DeterministicSession::new()), session_id)?;
+fn digest_file(path: &std::path::Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn load_session(model: Option<&std::path::Path>) -> Result<Box<dyn RuntimeSession>> {
+    let Some(model) = model else {
+        return Ok(Box::new(DeterministicSession::new()));
+    };
+    let mut config: Value = serde_json::from_slice(&fs::read(model.join("config.json"))?)?;
+    if config.get("max_context_tokens").is_none() {
+        let max = config
+            .get("max_position_embeddings")
+            .and_then(Value::as_u64)
+            .context("model context missing")?;
+        config["max_context_tokens"] = json!(max);
+    }
+    config["kvslim_cold_directory"] = Value::Null;
+    let mut adapter = OpenClModelAdapter::default();
+    adapter.load(model, &config)?;
+    let identity = ModelIdentity {
+        model_digest: digest_file(&model.join("config.json"))?,
+        tokenizer_digest: digest_file(&model.join("tokenizer.json"))?,
+        architecture_digest: digest_file(&model.join("config.json"))?,
+    };
+    Ok(Box::new(ModelAdapterSession::new(adapter, identity)))
+}
+
+fn serve_connection(
+    mut stream: UnixStream,
+    session: Box<dyn RuntimeSession>,
+    session_id: &str,
+) -> Result<()> {
+    let mut host = RuntimeHost::new(session, session_id)?;
     loop {
         let request = match read_request(&mut stream) {
             Ok(request) => request,
@@ -118,6 +152,7 @@ fn main() -> Result<()> {
     let mut socket = PathBuf::from("/tmp/kvslim-runtime-host.sock");
     let mut session_id = String::from("runtime-session");
     let mut self_test = false;
+    let mut model: Option<PathBuf> = None;
     let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -126,13 +161,21 @@ fn main() -> Result<()> {
                 i += 1;
                 socket = PathBuf::from(args.get(i).context("--socket needs a path")?);
             }
+            "--model" => {
+                i += 1;
+                model = Some(PathBuf::from(
+                    args.get(i).context("--model needs a directory")?,
+                ));
+            }
             "--session-id" => {
                 i += 1;
                 session_id = args.get(i).context("--session-id needs a value")?.clone();
             }
             "--self-test" => self_test = true,
             "--help" => {
-                println!("kvslim-runtime-host --socket PATH [--session-id ID] [--self-test]");
+                println!(
+                    "kvslim-runtime-host --socket PATH [--model DIR] [--session-id ID] [--self-test]"
+                );
                 return Ok(());
             }
             other => bail!("unrecognized option {other}"),
@@ -148,14 +191,16 @@ fn main() -> Result<()> {
     if socket.exists() {
         fs::remove_file(&socket).context("remove stale runtime socket")?;
     }
+    let session = load_session(model.as_deref())?;
     let listener = UnixListener::bind(&socket).context("bind runtime IPC socket")?;
     println!("generic runtime host listening on {}", socket.display());
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = serve_connection(stream, &session_id) {
+                if let Err(error) = serve_connection(stream, session, &session_id) {
                     eprintln!("connection failed: {error:#}");
                 }
+                break;
             }
             Err(error) => return Err(error.into()),
         }

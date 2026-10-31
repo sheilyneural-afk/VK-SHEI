@@ -140,6 +140,7 @@ required-features = ["accelerator-backend"]
 [[bin]]
 name = "kvslim-runtime-host"
 path = "src/bin/kvslim-runtime-host.rs"
+required-features = ["accelerator-backend"]
 
 [[bin]]
 name = "kvslim-runtime-proxy"
