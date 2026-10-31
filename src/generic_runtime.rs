@@ -106,6 +106,98 @@ impl GenericRuntimeRegistry {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLocation {
+    Local,
+    Shared,
+    External,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TensorHandle {
+    pub id: String,
+    pub dtype: String,
+    pub shape: Vec<u64>,
+    pub bytes: u64,
+    pub location: MemoryLocation,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcOperation {
+    Probe,
+    OpenSession,
+    Prefill,
+    Decode,
+    SnapshotKv,
+    RestoreKv,
+    Release,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IpcRequest {
+    pub schema: String,
+    pub operation: IpcOperation,
+    pub request_id: String,
+    pub session_id: Option<String>,
+    pub tensors: Vec<TensorHandle>,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IpcResponse {
+    pub schema: String,
+    pub request_id: String,
+    pub ok: bool,
+    pub session_id: Option<String>,
+    pub receipts: Vec<serde_json::Value>,
+    pub tensors: Vec<TensorHandle>,
+    pub payload: serde_json::Value,
+    pub error: Option<String>,
+}
+
+pub const IPC_SCHEMA: &str = "kvslim.runtime.ipc/v1";
+
+pub fn encode_ipc(request: &IpcRequest) -> Result<Vec<u8>> {
+    ensure_ipc_schema(&request.schema)?;
+    Ok(serde_json::to_vec(request)?)
+}
+
+pub fn decode_ipc_request(bytes: &[u8]) -> Result<IpcRequest> {
+    let request: IpcRequest = serde_json::from_slice(bytes)?;
+    ensure_ipc_schema(&request.schema)?;
+    if request.request_id.is_empty() {
+        bail!("ipc request_id is required");
+    }
+    Ok(request)
+}
+
+pub fn encode_ipc_response(response: &IpcResponse) -> Result<Vec<u8>> {
+    ensure_ipc_schema(&response.schema)?;
+    Ok(serde_json::to_vec(response)?)
+}
+
+pub fn decode_ipc_response(bytes: &[u8]) -> Result<IpcResponse> {
+    let response: IpcResponse = serde_json::from_slice(bytes)?;
+    ensure_ipc_schema(&response.schema)?;
+    if response.request_id.is_empty() {
+        bail!("ipc response request_id is required");
+    }
+    Ok(response)
+}
+
+fn ensure_ipc_schema(schema: &str) -> Result<()> {
+    if schema != IPC_SCHEMA {
+        bail!("unsupported generic runtime IPC schema");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
