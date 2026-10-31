@@ -59,7 +59,7 @@
     <text x="751" y="225" fill="none" stroke="#ffffff" stroke-opacity="0.6" stroke-width="2">M-SLIM</text>
   </g>
 
-  <text x="800" y="350" text-anchor="middle" font-family="Inter, DejaVu Sans, sans-serif" font-size="38" font-weight="700" letter-spacing="16" fill="#b8f4ff" opacity="0.92">SLIM MEMORY</text>
+  <text x="800" y="350" text-anchor="middle" font-family="Inter, DejaVu Sans, sans-serif" font-size="27" font-weight="600" letter-spacing="10" fill="#b8f4ff" opacity="0.86">[SLIM MEMORY]</text>
 
   <g fill="#9aeaff">
     <circle cx="196" cy="102" r="3"/>
