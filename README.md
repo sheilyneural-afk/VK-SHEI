@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="assets/vkslim-title.svg" alt="VKSLIM" width="900">
+  <img src="assets/vkslim-title.svg" alt="M-SLIM (SLIM MEMORY)" width="900">
 </h1>
 
 <p align="center">
@@ -15,7 +15,7 @@
 </p>
 
 > [!IMPORTANT]
-> **Estado real:** KVSLIM no es una maqueta ni una simulación. El bundle y el host de referencia tienen certificación funcional pasada: inspección, carga, prefill, decode, snapshot K/V, restore y continuidad HTTP tras reinicio. El README separa esos resultados demostrados de las propiedades que todavía no están certificadas fuera de ese entorno.
+> **Estado real:** M-SLIM (SLIM MEMORY) no es una maqueta ni una simulación. El bundle y el host de referencia tienen certificación funcional pasada: inspección, carga, prefill, decode, snapshot K/V, restore y continuidad HTTP tras reinicio. El README separa esos resultados demostrados de las propiedades que todavía no están certificadas fuera de ese entorno.
 
 ## Evidencia ejecutada
 
@@ -33,7 +33,7 @@ La conclusión correcta es: **el flujo funcional de inferencia, memoria, snapsho
 
 ## Qué es
 
-KV-SHEI es el repositorio del runtime **KVSLIM**: una base local para organizar contexto, almacenar estado K/V y conectar runtimes de inferencia mediante contratos verificables.
+KV-SHEI es el repositorio de **M-SLIM (SLIM MEMORY)**. El runtime Rust aparece técnicamente como KVSLIM y proporciona una base local para organizar contexto, almacenar estado K/V y conectar runtimes de inferencia mediante contratos verificables.
 
 El núcleo está diseñado alrededor de cuatro ideas:
 
@@ -91,7 +91,7 @@ El flujo importante es deliberadamente explícito: un catálogo puede encontrar 
 
 ## Qué ha logrado realmente
 
-KVSLIM ya ha demostrado en ejecución real, no en mocks:
+M-SLIM ya ha demostrado en ejecución real, no en mocks:
 
 - cargar un bundle de modelo y validarlo antes de activarlo;
 - ejecutar prefill y decode sobre el runtime acelerado;
@@ -302,5 +302,5 @@ La arquitectura ya separa esas piezas. El README no las presenta como terminadas
 - [Workflow de CI](.github/workflows/kvslim.yml)
 
 <p align="center">
-  <sub>KV-SHEI / KVSLIM · documentación alineada con el código fuente y sus pruebas actuales.</sub>
+  <sub>M-SLIM (SLIM MEMORY) · KV-SHEI · documentación alineada con el código fuente y sus pruebas actuales.</sub>
 </p>
