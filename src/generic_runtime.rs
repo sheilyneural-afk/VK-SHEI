@@ -3,6 +3,7 @@
 //! This boundary intentionally contains no accelerator/vendor concepts. A runtime
 //! is selected only by the operations it proves it can execute.
 use anyhow::{Result, bail};
+use kvslim_adapter_api::RuntimeSession;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -62,6 +63,12 @@ impl RuntimeManifest {
 pub trait RuntimeProbe: Send + Sync {
     fn manifest(&self) -> &RuntimeManifest;
     fn probe(&self, model_dir: &Path) -> Result<bool>;
+
+    /// Opens an executable session only when the probe has demonstrated the
+    /// requested capabilities. Providers may reject this default explicitly.
+    fn open_session(&self, _model_dir: &Path) -> Result<Box<dyn RuntimeSession>> {
+        bail!("runtime probe does not expose an executable session")
+    }
 }
 
 #[derive(Default)]
@@ -88,6 +95,14 @@ impl GenericRuntimeRegistry {
 
     pub fn manifests(&self) -> impl Iterator<Item = &RuntimeManifest> {
         self.probes.iter().map(|probe| probe.manifest())
+    }
+
+    pub fn open_session(
+        &self,
+        model_dir: &Path,
+        required: &[Capability],
+    ) -> Result<Box<dyn RuntimeSession>> {
+        self.discover(model_dir, required)?.open_session(model_dir)
     }
 }
 
