@@ -56,6 +56,7 @@ fn main() -> Result<()> {
     let mut exact_hot_fused = false;
     let mut decode_unroll4 = false;
     let mut native_hip = false;
+    let mut prefill_profile: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -80,6 +81,13 @@ fn main() -> Result<()> {
             "--verify-weights" => verify_weights = true,
             "--logits" => capture_logits = true,
             "--thinking" => thinking = true,
+            "--prefill-profile" => {
+                prefill_profile = Some(
+                    args.next()
+                        .context("missing --prefill-profile path")?
+                        .into(),
+                );
+            }
             "--gpu-prefill-batch" => {
                 prefill_batch = Some(
                     args.next()
@@ -200,7 +208,7 @@ fn main() -> Result<()> {
             "--help" | "-h" => {
                 println!("M-SLIM BF16 Rust/OpenCL full LLM inference, experimental");
                 println!(
-                    "Usage: mslim-runtime-cli [--model dir] [--prompt Hola | --ids 1,2,3] [--max-new-tokens 1] [--max-context-tokens 128] [--resident|--stream-weights] [--load-only] [--verify-weights] [--logits] [--thinking] [--gpu-lod] [--lod-epsilon 0] [--lod-stage 64] [--gpu-dense-kv] [--gpu-prefill-batch 128|--gpu-prefill-fallback]"
+                    "Usage: mslim-runtime-cli [--model dir] [--prompt Hola | --ids 1,2,3] [--max-new-tokens 1] [--max-context-tokens 128] [--resident|--stream-weights] [--load-only] [--verify-weights] [--logits] [--thinking] [--gpu-lod] [--lod-epsilon 0] [--lod-stage 64] [--gpu-dense-kv] [--gpu-prefill-batch 128|--gpu-prefill-fallback] [--prefill-profile PATH]"
                 );
                 println!(
                     "GPU computes all transformer layers. --stream-weights minimizes GPU allocations at the expense of repeated weight transfers."
@@ -277,6 +285,11 @@ fn main() -> Result<()> {
     runtime.set_decode_unroll4(decode_unroll4)?;
     runtime.set_decode_fused_kernels(fused_decode)?;
     runtime.set_exact_hot_fused_attention(exact_hot_fused)?;
+    if let Some(path) = &prefill_profile {
+        runtime.apply_promoted_prefill_profile(path)?;
+        eprintln!("Applied measured prefill profile: {}", path.display());
+    }
+
     eprintln!("Physical GPU: {}", runtime.device_name());
     eprintln!(
         "GPU checkpoint upload/init seconds: {:.3}",
@@ -352,6 +365,7 @@ fn main() -> Result<()> {
             "gpu_micro_axis_novelty_sigma":runtime.gpu_micro_axis_policy().map(|p|p.novelty_sigma),
             "gpu_micro_axis_warmup":runtime.gpu_micro_axis_policy().map(|p|p.warmup_observations),
             "gpu_micro_axis_open_safety_fuse":runtime.gpu_micro_axis_policy().and_then(|p|p.open_extent_safety_limit),
+            "calibrated_prefill_profile": runtime.calibrated_prefill_profile(),
             "gpu_prefill_batch_tokens":generation.gpu_prefill_batch_tokens,
             "gpu_prefill_weight_reuse_tokens":generation.gpu_prefill_weight_reuse_tokens,
             "gpu_prefill_fused_projections":generation.gpu_prefill_fused_projections,

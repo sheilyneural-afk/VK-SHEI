@@ -72,6 +72,12 @@ impl Default for OpenClModelAdapter {
     }
 }
 
+impl OpenClModelAdapter {
+    pub(crate) fn calibration_runtime_mut(&mut self) -> Result<&mut OpenClLlm> {
+        self.runtime.as_mut().context("accelerator is not loaded")
+    }
+}
+
 impl ModelAdapter for OpenClModelAdapter {
     fn capabilities(&self) -> &AdapterCapabilities {
         &self.capabilities
@@ -171,6 +177,13 @@ impl ModelAdapter for OpenClModelAdapter {
             .context("mslim_prefill_batch_tokens fuera de rango")?
             .unwrap_or_else(|| max_tokens.clamp(1, 128));
         runtime.set_batch_prefill_tokens(Some(prefill_batch))?;
+        if let Some(value) = config.get("mslim_prefill_weight_reuse_tokens") {
+            let count = value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .context("invalid mslim_prefill_weight_reuse_tokens")?;
+            runtime.set_prefill_weight_reuse_tokens(count)?;
+        }
 
         if kv_mode == OpenClKvMode::ExactColdStore {
             let hot_tokens = config
@@ -231,6 +244,12 @@ impl ModelAdapter for OpenClModelAdapter {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
         )?;
+        if let Some(value) = config.get("mslim_prefill_profile") {
+            let path = value
+                .as_str()
+                .context("mslim_prefill_profile must be a path")?;
+            runtime.apply_promoted_prefill_profile(Path::new(path))?;
+        }
         self.capabilities.supports_kv_restore = kv_mode == OpenClKvMode::Dense || physical_restore;
         self.kv_mode = kv_mode;
         self.model_dir = Some(model_dir.to_owned());

@@ -327,7 +327,11 @@ impl InferenceExecutor for GpuExecutor {
             .tokenizer
             .decode(&generated.tokens, true)
             .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
-        let diagnostics = serde_json::to_value(&generated)?;
+        let mut diagnostics = serde_json::to_value(&generated)?;
+        diagnostics["calibrated_prefill_profile"] = self
+            .model
+            .calibrated_prefill_profile()
+            .unwrap_or(Value::Null);
         Ok(GpuAnswer {
             text: output,
             prompt_tokens: generated.prompt_tokens,
@@ -1160,6 +1164,7 @@ async fn main() -> Result<()> {
     let mut exact_hot_fused = true;
     let mut allow_network = false;
     let mut runtime_manifest_path = std::env::var_os("MSLIM_RUNTIME_MANIFEST").map(PathBuf::from);
+    let mut prefill_profile: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1181,6 +1186,13 @@ async fn main() -> Result<()> {
             }
             "--stream-weights" => mode = WeightMode::Stream,
             "--resident" => mode = WeightMode::Resident,
+            "--prefill-profile" => {
+                prefill_profile = Some(
+                    args.next()
+                        .context("missing --prefill-profile path")?
+                        .into(),
+                );
+            }
             "--gpu-prefill-batch" => {
                 prefill_batch_tokens = Some(
                     args.next()
@@ -1286,7 +1298,7 @@ async fn main() -> Result<()> {
             "--help" | "-h" => {
                 println!("M-SLIM local runtime worker (local model runtime)");
                 println!(
-                    "--model DIR --host 127.0.0.1 --port 8188 --max-context-tokens 2048 --timeout-secs 300 --resident|--stream-weights --gpu-lod|--gpu-dense-kv --lod-epsilon 0 --lod-stage 64 --gpu-prefill-batch 128|--gpu-prefill-fallback --gpu-prefill-weight-reuse 8 --gpu-hot-v-tokens 512 --gpu-decode-unroll4|--gpu-decode-original --gpu-deferred-cold|--gpu-immediate-cold --gpu-fused-decode|--gpu-unfused-decode"
+                    "--model DIR --host 127.0.0.1 --port 8188 --max-context-tokens 2048 --timeout-secs 300 --resident|--stream-weights --gpu-lod|--gpu-dense-kv --lod-epsilon 0 --lod-stage 64 --gpu-prefill-batch 128|--gpu-prefill-fallback --gpu-prefill-weight-reuse 8 --prefill-profile PATH --gpu-hot-v-tokens 512 --gpu-decode-unroll4|--gpu-decode-original --gpu-deferred-cold|--gpu-immediate-cold --gpu-fused-decode|--gpu-unfused-decode"
                 );
                 println!(
                     "No direct authentication: bind loopback only; use the authenticated gateway for clients."
@@ -1315,6 +1327,10 @@ async fn main() -> Result<()> {
     if verified_prompt_replay_tokens < 32 {
         verified_shared_prefix = false;
     }
+    ensure!(
+        prefill_profile.is_none() || runtime_manifest_path.is_none(),
+        "--prefill-profile is supported by the local accelerator only; external runtimes must not silently ignore it"
+    );
     let chat_template = validate_model_bundle(&model)?;
     let model_id = model
         .file_name()
@@ -1481,6 +1497,11 @@ async fn main() -> Result<()> {
         engine.set_deferred_cold_commit(deferred_cold)?;
         engine.set_decode_fused_kernels(fused_decode)?;
         engine.set_exact_hot_fused_attention(exact_hot_fused)?;
+        if let Some(path) = &prefill_profile {
+            engine.apply_promoted_prefill_profile(path)?;
+            eprintln!("Applied measured prefill profile: {}", path.display());
+        }
+
         let gpu_exact_hot_fused_attention = engine.exact_hot_fused_attention_enabled();
         let gpu_deferred_cold_enabled = engine.deferred_cold_enabled();
         let gpu_decode_fused_kernels = engine.decode_fused_kernels();

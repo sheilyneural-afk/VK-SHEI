@@ -76,7 +76,20 @@ struct Options {
 }
 
 fn main() -> Result<()> {
-    let options = parse_options(std::env::args().skip(1))?;
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--tune-prefill") {
+        #[cfg(feature = "accelerator-backend")]
+        {
+            let report = mslim::prefill_calibration::run_cli(args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        #[cfg(not(feature = "accelerator-backend"))]
+        bail!(
+            "--tune-prefill requires the physical accelerator-backend; no CPU simulation is substituted"
+        );
+    }
+    let options = parse_options(args.into_iter())?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let bundle = if options.bundle.is_absolute() {
         options.bundle.clone()

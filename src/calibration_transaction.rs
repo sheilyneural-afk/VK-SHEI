@@ -229,6 +229,19 @@ pub fn evaluate_candidate(
         ));
     }
 
+    if baseline.sample_count < gates.minimum_samples
+        || !baseline.parity_ok
+        || baseline.maximum_exactness_error > gates.maximum_exactness_error
+        || baseline.maximum_certificate_error > gates.maximum_certificate_error
+        || baseline.throughput_tokens_per_second <= 0.0
+        || baseline.latency_p95_ms <= 0.0
+        || baseline.peak_memory_bytes == 0
+        || candidate.peak_memory_bytes == 0
+    {
+        return Err(CalibrationError::Invalid(
+            "baseline or memory evidence is insufficient".into(),
+        ));
+    }
     // Correctness is deliberately evaluated before any performance property.
     let mut failures = Vec::new();
     if candidate.sample_count < gates.minimum_samples {
@@ -348,6 +361,12 @@ pub struct CalibrationTransaction {
     proposal: CalibrationProposal,
     state: CalibrationState,
     checkpoint: Option<ProfileCheckpoint>,
+    baseline_profile_id: String,
+    shadow_passed: bool,
+    canary_passed: bool,
+    proposal_recorded: bool,
+    // Held for the whole transaction, also across different transaction roots.
+    _profile_lease: FileLock,
 }
 
 impl CalibrationTransaction {
@@ -369,7 +388,36 @@ impl CalibrationTransaction {
                 "profile path must be absolute".into(),
             ));
         }
+        let _profile_lease = FileLock::acquire(profile_path.with_extension("transaction.lock"))?;
+        if pending_profile_path(&profile_path).exists() {
+            return Err(CalibrationError::Integrity(
+                "pending activation requires recovery".into(),
+            ));
+        }
+        let baseline_bytes = fs::read(&profile_path)?;
+        if digest_bytes(&baseline_bytes) != proposal.baseline_profile_digest {
+            return Err(CalibrationError::Integrity(
+                "baseline changed before proposal".into(),
+            ));
+        }
+        let baseline: CalibrationProfile = serde_json::from_slice(&baseline_bytes)?;
+        baseline.validate()?;
+        if baseline.model_identity != proposal.candidate.model_identity
+            || baseline.backend_identity != proposal.candidate.backend_identity
+        {
+            return Err(CalibrationError::Invalid(
+                "candidate cannot change model or backend".into(),
+            ));
+        }
         let receipt_path = root.join("calibration-receipts.jsonl");
+        if verify_receipt_chain(&receipt_path)?
+            .iter()
+            .any(|r| r.proposal_id == proposal.proposal_id)
+        {
+            return Err(CalibrationError::Invalid(
+                "proposal_id has already been used".into(),
+            ));
+        }
         Ok(Self {
             root,
             profile_path,
@@ -377,6 +425,11 @@ impl CalibrationTransaction {
             proposal,
             state: CalibrationState::Proposed,
             checkpoint: None,
+            baseline_profile_id: baseline.profile_id,
+            shadow_passed: false,
+            canary_passed: false,
+            proposal_recorded: false,
+            _profile_lease,
         })
     }
 
@@ -389,14 +442,28 @@ impl CalibrationTransaction {
     }
 
     pub fn propose(&mut self) -> CalibrationResult<CalibrationReceipt> {
-        if self.state != CalibrationState::Proposed {
+        if self.proposal_recorded {
             return self.idempotent_receipt("proposal_recorded");
         }
-        self.append_receipt("proposal_recorded", Map::new())
+        self.require_state(CalibrationState::Proposed)?;
+        let receipt = self.append_receipt(
+            "proposal_recorded",
+            Map::from_iter([
+                ("proposal".into(), serde_json::to_value(&self.proposal)?),
+                ("profile_path".into(), json!(self.profile_path)),
+            ]),
+        )?;
+        self.proposal_recorded = true;
+        Ok(receipt)
     }
 
     pub fn begin_shadow(&mut self) -> CalibrationResult<CalibrationReceipt> {
         self.require_state(CalibrationState::Proposed)?;
+        if !self.proposal_recorded {
+            return Err(CalibrationError::Invalid(
+                "proposal must be recorded before shadow".into(),
+            ));
+        }
         self.state = CalibrationState::Shadow;
         self.append_receipt("shadow_started", Map::new())
     }
@@ -407,11 +474,16 @@ impl CalibrationTransaction {
         candidate: &CalibrationObservation,
     ) -> CalibrationResult<GateReport> {
         self.require_state(CalibrationState::Shadow)?;
+        self.validate_observation_identities(baseline, candidate)?;
+        self.shadow_passed = false;
         let report = evaluate_candidate(baseline, candidate, &self.proposal.gates)?;
         let mut details = Map::new();
         details.insert("gate_report".into(), serde_json::to_value(&report)?);
         if report.accepted {
+            details.insert("baseline".into(), serde_json::to_value(baseline)?);
+            details.insert("candidate".into(), serde_json::to_value(candidate)?);
             self.append_receipt("shadow_passed", details)?;
+            self.shadow_passed = true;
         } else {
             self.state = CalibrationState::Quarantined;
             self.append_receipt("shadow_failed_quarantined", details)?;
@@ -422,6 +494,11 @@ impl CalibrationTransaction {
     /// Activates the candidate for canary traffic. This never promotes it.
     pub fn begin_canary(&mut self) -> CalibrationResult<CalibrationReceipt> {
         self.require_state(CalibrationState::Shadow)?;
+        if !self.shadow_passed {
+            return Err(CalibrationError::Invalid(
+                "canary requires a passing shadow evaluation".into(),
+            ));
+        }
         let _lock = FileLock::acquire(self.root.join(".calibration.lock"))?;
         let active = fs::read(&self.profile_path)?;
         let active_digest = digest_bytes(&active);
@@ -432,10 +509,21 @@ impl CalibrationTransaction {
         }
         let checkpoint_path = self.root.join(format!(
             "{}-profile.checkpoint",
-            sanitize_id(&self.proposal.proposal_id)
+            digest_bytes(self.proposal.proposal_id.as_bytes())
         ));
         atomic_write(&checkpoint_path, &active)?;
         let candidate = serde_json::to_vec_pretty(&self.proposal.candidate)?;
+        // Write-ahead marker blocks production readers after an interrupted canary.
+        atomic_write(
+            &pending_profile_path(&self.profile_path),
+            &serde_json::to_vec_pretty(&json!({
+                "schema": "mslim.pending_calibration/v1",
+                "proposal_id": self.proposal.proposal_id,
+                "checkpoint_path": checkpoint_path,
+                "original_digest": active_digest,
+                "candidate_digest": digest_bytes(&candidate)
+            }))?,
+        )?;
         atomic_write(&self.profile_path, &candidate)?;
         let written = fs::read(&self.profile_path)?;
         if digest_bytes(&written) != digest_bytes(&candidate) {
@@ -461,12 +549,17 @@ impl CalibrationTransaction {
         candidate: &CalibrationObservation,
     ) -> CalibrationResult<GateReport> {
         self.require_state(CalibrationState::Canary)?;
+        self.validate_observation_identities(baseline, candidate)?;
+        self.canary_passed = false;
         let report = evaluate_candidate(baseline, candidate, &self.proposal.gates)?;
         let mut details = Map::new();
         details.insert("gate_report".into(), serde_json::to_value(&report)?);
         if report.accepted {
             // Remain in Canary. Promotion is a separate, explicit authority action.
+            details.insert("baseline".into(), serde_json::to_value(baseline)?);
+            details.insert("candidate".into(), serde_json::to_value(candidate)?);
             self.append_receipt("canary_passed_awaiting_promotion", details)?;
+            self.canary_passed = true;
         } else {
             self.rollback_internal("canary_gate_failed", details)?;
         }
@@ -480,19 +573,31 @@ impl CalibrationTransaction {
                 "promotion authority is empty".into(),
             ));
         }
-        let receipts = verify_receipt_chain(&self.receipt_path)?;
-        if !receipts.iter().any(|receipt| {
-            receipt.proposal_id == self.proposal.proposal_id
-                && receipt.event == "canary_passed_awaiting_promotion"
-        }) {
+        if !self.canary_passed {
             return Err(CalibrationError::Invalid(
-                "candidate cannot be promoted before a passing canary".into(),
+                "promotion requires a passing canary in this transaction".into(),
+            ));
+        }
+        let expected = digest_bytes(&serde_json::to_vec_pretty(&self.proposal.candidate)?);
+        if digest_bytes(&fs::read(&self.profile_path)?) != expected {
+            return Err(CalibrationError::Integrity(
+                "active candidate changed before promotion".into(),
             ));
         }
         self.state = CalibrationState::Promoted;
-        let mut details = Map::new();
-        details.insert("authority".into(), json!(authority));
-        self.append_receipt("promoted", details)
+        let details = Map::from_iter([
+            ("authority".into(), json!(authority)),
+            ("candidate_digest".into(), json!(expected)),
+        ]);
+        let receipt = match self.append_receipt("promotion_committed", details) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.state = CalibrationState::Canary;
+                return Err(error);
+            }
+        };
+        fs::remove_file(pending_profile_path(&self.profile_path))?;
+        Ok(receipt)
     }
 
     pub fn rollback(&mut self, reason: &str) -> CalibrationResult<CalibrationReceipt> {
@@ -532,6 +637,13 @@ impl CalibrationTransaction {
                 "rollback checkpoint digest mismatch".into(),
             ));
         }
+        let expected_candidate =
+            digest_bytes(&serde_json::to_vec_pretty(&self.proposal.candidate)?);
+        if digest_bytes(&fs::read(&self.profile_path)?) != expected_candidate {
+            return Err(CalibrationError::Integrity(
+                "active profile changed outside transaction; refusing overwrite".into(),
+            ));
+        }
         atomic_write(&self.profile_path, &original)?;
         let restored = fs::read(&self.profile_path)?;
         if digest_bytes(&restored) != checkpoint.original_digest {
@@ -547,7 +659,27 @@ impl CalibrationTransaction {
         self.state = CalibrationState::RolledBack;
         details.insert("reason".into(), json!(reason));
         details.insert("restored_digest".into(), json!(checkpoint.original_digest));
-        self.append_receipt("rollback_verified", details)
+        let receipt = self.append_receipt("rollback_verified", details)?;
+        let pending = pending_profile_path(&self.profile_path);
+        if pending.exists() {
+            fs::remove_file(pending)?;
+        }
+        Ok(receipt)
+    }
+
+    fn validate_observation_identities(
+        &self,
+        baseline: &CalibrationObservation,
+        candidate: &CalibrationObservation,
+    ) -> CalibrationResult<()> {
+        if baseline.profile_id != self.baseline_profile_id
+            || candidate.profile_id != self.proposal.candidate.profile_id
+        {
+            return Err(CalibrationError::Invalid(
+                "measurement belongs to another profile".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn require_state(&self, expected: CalibrationState) -> CalibrationResult<()> {
@@ -675,7 +807,7 @@ fn append_json_line(path: &Path, value: &impl Serialize) -> CalibrationResult<()
     Ok(())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> CalibrationResult<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> CalibrationResult<()> {
     let parent = path
         .parent()
         .ok_or_else(|| CalibrationError::Invalid("atomic write target has no parent".into()))?;
@@ -715,17 +847,18 @@ fn digest_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn sanitize_id(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
+/// A pending marker is a denial of production activation, not an authorization.
+pub fn pending_profile_path(profile_path: &Path) -> PathBuf {
+    profile_path.with_extension("pending.json")
+}
+
+impl Drop for CalibrationTransaction {
+    fn drop(&mut self) {
+        if self.state == CalibrationState::Canary {
+            // An I/O failure leaves the write-ahead marker in place: readers fail closed.
+            let _ = self.rollback("transaction_dropped_without_promotion");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -860,5 +993,107 @@ mod tests {
         assert_eq!(tx.state(), CalibrationState::Canary);
         tx.promote("operator:test").unwrap();
         assert_eq!(tx.state(), CalibrationState::Promoted);
+    }
+    #[test]
+    fn unmeasured_shadow_cannot_activate() {
+        let (_temp, path, mut tx) = transaction();
+        let original = fs::read(&path).unwrap();
+        assert!(tx.begin_shadow().is_err());
+        let first = tx.propose().unwrap();
+        assert_eq!(first.hash, tx.propose().unwrap().hash);
+        tx.begin_shadow().unwrap();
+        assert!(tx.begin_canary().is_err());
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn foreign_measurements_and_uncertified_baseline_are_rejected() {
+        let (_temp, _path, mut tx) = transaction();
+        tx.propose().unwrap();
+        tx.begin_shadow().unwrap();
+        assert!(
+            tx.complete_shadow(
+                &observation("active", 10.0, true),
+                &observation("other", 20.0, true)
+            )
+            .is_err()
+        );
+        assert!(
+            tx.complete_shadow(
+                &observation("active", 10.0, false),
+                &observation("candidate", 20.0, true)
+            )
+            .is_err()
+        );
+        assert!(tx.begin_canary().is_err());
+    }
+
+    #[test]
+    fn dropping_unpromoted_canary_restores_file_and_clears_pending_marker() {
+        let (_temp, path, mut tx) = transaction();
+        let original = fs::read(&path).unwrap();
+        tx.propose().unwrap();
+        tx.begin_shadow().unwrap();
+        tx.complete_shadow(
+            &observation("active", 10.0, true),
+            &observation("candidate", 20.0, true),
+        )
+        .unwrap();
+        tx.begin_canary().unwrap();
+        assert!(pending_profile_path(&path).exists());
+        assert!(tx.promote("test").is_err());
+        drop(tx);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!pending_profile_path(&path).exists());
+    }
+
+    #[test]
+    fn external_changes_are_not_overwritten_by_rollback() {
+        let (_temp, path, mut tx) = transaction();
+        tx.propose().unwrap();
+        tx.begin_shadow().unwrap();
+        tx.complete_shadow(
+            &observation("active", 10.0, true),
+            &observation("candidate", 20.0, true),
+        )
+        .unwrap();
+        tx.begin_canary().unwrap();
+        fs::write(&path, b"external modification").unwrap();
+        assert!(tx.rollback("test").is_err());
+        drop(tx);
+        assert_eq!(fs::read(&path).unwrap(), b"external modification");
+        assert!(pending_profile_path(&path).exists());
+    }
+
+    #[test]
+    fn same_profile_cannot_have_two_simultaneous_transactions() {
+        let (temp, path, tx) = transaction();
+        let second = CalibrationTransaction::new(
+            temp.path().join("other"),
+            path.clone(),
+            tx.proposal.clone(),
+        );
+        assert!(second.is_err());
+        assert!(path.with_extension("transaction.lock").exists());
+    }
+
+    #[test]
+    fn promotion_requires_unchanged_candidate_file() {
+        let (_temp, path, mut tx) = transaction();
+        tx.propose().unwrap();
+        tx.begin_shadow().unwrap();
+        tx.complete_shadow(
+            &observation("active", 10.0, true),
+            &observation("candidate", 20.0, true),
+        )
+        .unwrap();
+        tx.begin_canary().unwrap();
+        tx.complete_canary(
+            &observation("active", 10.0, true),
+            &observation("candidate", 20.0, true),
+        )
+        .unwrap();
+        fs::write(path, b"changed").unwrap();
+        assert!(tx.promote("operator").is_err());
     }
 }

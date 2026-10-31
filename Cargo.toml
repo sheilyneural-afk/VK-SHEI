@@ -76,6 +76,7 @@ path = "src/bin/mslim-certify.rs"
 [[bin]]
 name = "mslim-models"
 path = "src/bin/mslim-models.rs"
+required-features = ["model-bundle"]
 
 [[bin]]
 name = "mslim-import-model"

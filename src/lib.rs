@@ -9,6 +9,8 @@ pub mod adapter_catalog;
 pub mod adaptive_extent;
 pub mod attention_certificate;
 pub mod calibration_contract;
+pub mod calibration_predictor;
+pub mod calibration_profile;
 pub mod calibration_transaction;
 pub mod cold_store;
 pub mod conformance;
@@ -20,6 +22,8 @@ pub mod document_graph;
 pub mod engine;
 pub mod inference_worker;
 pub mod ipc_transport;
+#[cfg(feature = "accelerator-backend")]
+pub mod prefill_calibration;
 #[cfg(feature = "torch-backend")]
 pub mod prefill_tch;
 pub mod runtime_host;

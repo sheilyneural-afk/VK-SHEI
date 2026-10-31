@@ -1,5 +1,9 @@
 # Perfil adaptativo de prefill
 
+La ruta integrada de medición, predictor y promoción está documentada en
+[ADAPTIVE_CALIBRATION.md](ADAPTIVE_CALIBRATION.md). Lo descrito a continuación
+es el selector shell manual: su salida no autoriza la activación del runtime.
+
 `scripts/select-prefill-profile.sh` mide perfiles sin conocer el proveedor.
 
 Variables:

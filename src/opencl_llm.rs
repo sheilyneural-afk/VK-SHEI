@@ -487,6 +487,7 @@ struct GpuEngine {
     kernels: LlmKernels,
     pub name: String,
     pub reported_gpu_memory: u64,
+    calibration_device_key: String,
     pub max_gpu_allocation: u64,
     gemv_unroll4_enabled: AtomicBool,
     fused_decode_enabled: AtomicBool,
@@ -579,6 +580,7 @@ impl GpuEngine {
             kernels,
             name,
             reported_gpu_memory,
+            calibration_device_key: cache_key,
             max_gpu_allocation,
             gemv_unroll4_enabled: AtomicBool::new(false),
             fused_decode_enabled: AtomicBool::new(false),
@@ -1738,6 +1740,10 @@ pub struct OpenClLlm {
     pub model_digest: String,
     pub tokenizer_digest: String,
     pub architecture_digest: String,
+    calibrated_prefill: Option<(
+        crate::calibration_profile::PrefillProfileParameters,
+        crate::calibration_profile::PrefillSettings,
+    )>,
 }
 
 impl OpenClLlm {
@@ -1935,7 +1941,145 @@ impl OpenClLlm {
             model_digest,
             tokenizer_digest,
             architecture_digest,
+            calibrated_prefill: None,
         })
+    }
+
+    /// Snapshot only the actual non-tunable runtime settings. No guessed budgets.
+    pub fn prefill_execution_configuration(&self) -> serde_json::Value {
+        serde_json::json!({
+            "architecture": self.architecture_digest,
+            "max_context_tokens": self.max_tokens,
+            "weight_mode": format!("{:?}", self.mode),
+            "native_hip": self.native_hip_enabled(),
+            "kv": self.lod.as_ref().map(|v| serde_json::json!({
+                "epsilon": v.config().epsilon, "stage_tokens": v.config().stage_tokens,
+                "axis_policy": v.axis_policy(),
+            })),
+            "hot_v_tokens": self.exact_hot_v_capacity_tokens(),
+            "micro_hot_v_tokens": self.micro_hot_v_capacity_tokens(),
+            "prompt_replay_tokens": self.gpu_prompt_replay_max_tokens,
+            "shared_prefix": self.verified_prefix_replay_enabled,
+            "deferred_cold_commit": self.deferred_cold_enabled,
+            "decode_unroll4": self.decode_unroll4(),
+            "decode_fused": self.decode_fused_kernels(),
+            "exact_hot_fused": self.exact_hot_fused_attention_enabled(),
+            "prefill_fusion_mask": self.prefill_fusion_mask,
+            "prefill_register_unrolled": self.prefill_register_unrolled,
+            "prefill_virtual_lanes": self.prefill_virtual_lanes,
+        })
+    }
+
+    pub fn prefill_environment(&self) -> Result<crate::calibration_profile::PrefillEnvironment> {
+        use crate::calibration_profile::{
+            PrefillEnvironment, host_identity, implementation_digest, sha256,
+        };
+        let hardware = serde_json::json!({"host": host_identity(), "device_key": self.engine.calibration_device_key,
+            "memory": self.engine.reported_gpu_memory, "max_allocation": self.engine.max_gpu_allocation});
+        Ok(PrefillEnvironment {
+            model_digest: self.model_digest.clone(),
+            tokenizer_digest: self.tokenizer_digest.clone(),
+            backend: if self.native_hip_enabled() {
+                "native-hip"
+            } else {
+                "opencl"
+            }
+            .into(),
+            hardware_digest: sha256(&serde_json::to_vec(&hardware)?),
+            execution_digest: sha256(&serde_json::to_vec(
+                &self.prefill_execution_configuration(),
+            )?),
+            implementation_digest: implementation_digest().into(),
+        })
+    }
+
+    pub fn prefill_settings(&self) -> crate::calibration_profile::PrefillSettings {
+        crate::calibration_profile::PrefillSettings {
+            batch_tokens: self.batch_prefill_tokens,
+            weight_reuse_tokens: self.prefill_weight_reuse_tokens,
+        }
+    }
+
+    /// Atomic two-field change, only on an empty session; never changes fidelity.
+    pub fn set_calibration_prefill_settings(
+        &mut self,
+        settings: crate::calibration_profile::PrefillSettings,
+    ) -> Result<()> {
+        settings.validate()?;
+        ensure!(
+            !self.poisoned && self.position == 0,
+            "prefill tuning requires a healthy, empty session"
+        );
+        ensure!(
+            !self.prefill_register_unrolled || [8, 16].contains(&settings.weight_reuse_tokens),
+            "profile conflicts with register-unrolled prefill"
+        );
+        ensure!(
+            self.prefill_virtual_lanes == 128
+                || (settings.weight_reuse_tokens == 8 && !self.prefill_register_unrolled),
+            "profile conflicts with virtual-lane prefill"
+        );
+        ensure!(
+            self.prefill_fusion_mask == 0
+                || (settings.weight_reuse_tokens == 8
+                    && !self.prefill_register_unrolled
+                    && self.prefill_virtual_lanes == 128),
+            "profile conflicts with fused prefill kernels"
+        );
+        self.batch_prefill_tokens = settings.batch_tokens;
+        self.prefill_weight_reuse_tokens = settings.weight_reuse_tokens;
+        Ok(())
+    }
+
+    /// Explicit production opt-in, shared by CLI, worker and ModelAdapter.
+    pub fn apply_promoted_prefill_profile(&mut self, path: &Path) -> Result<()> {
+        ensure!(
+            self.calibrated_prefill.is_none(),
+            "a prefill profile is already attached"
+        );
+        let environment = self.prefill_environment()?;
+        let params = crate::calibration_profile::read_promoted_profile(path, &environment)?;
+        let original = self.prefill_settings();
+        self.set_calibration_prefill_settings(params.settings)?;
+        self.calibrated_prefill = Some((params, original));
+        Ok(())
+    }
+
+    pub fn calibrated_prefill_profile(&self) -> Option<serde_json::Value> {
+        self.calibrated_prefill.as_ref().map(|(p, original)| serde_json::json!({
+            "profile_id": p.settings.id(), "validated_context_tokens": p.validated_context_tokens,
+            "fallback": original, "effective": self.prefill_settings(),
+            "coverage": "measured token lengths only; not a universal quality guarantee",
+        }))
+    }
+
+    fn select_calibrated_prefill(&mut self, prompt_tokens: usize) -> Result<()> {
+        if let Some((params, original)) = self.calibrated_prefill.clone() {
+            // A later manual change of a non-tunable option cannot silently reuse evidence.
+            let execution = crate::calibration_profile::sha256(&serde_json::to_vec(
+                &self.prefill_execution_configuration(),
+            )?);
+            ensure!(
+                execution == params.environment.execution_digest,
+                "runtime changed after prefill profile activation"
+            );
+            let settings = if params.validated_context_tokens.contains(&prompt_tokens) {
+                params.settings
+            } else {
+                original
+            };
+            if self.position == 0 {
+                self.set_calibration_prefill_settings(settings)?;
+            } else {
+                // Replaying an identical prefix may keep a live session. Never
+                // reconfigure it; a different setting requires the usual reset.
+                ensure!(
+                    self.prefill_settings() == settings,
+                    "prefill profile change requires a fresh session"
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn eos_token_ids(&self) -> &[u32] {
@@ -3665,6 +3809,7 @@ impl OpenClLlm {
         cancel: &AtomicBool,
     ) -> Result<(GpuStep, f64)> {
         ensure!(!prompt_ids.is_empty(), "GPU prompt IDs empty");
+        self.select_calibrated_prefill(prompt_ids.len())?;
         ensure!(
             prompt_ids.len() < self.max_tokens,
             "GPU context capacity not large enough for prompt"
@@ -3763,6 +3908,7 @@ impl OpenClLlm {
                 .is_some_and(|n| n <= self.max_tokens),
             "GPU context capacity not large enough for prompt + generation"
         );
+        self.select_calibrated_prefill(prompt_ids.len())?;
         let started = Instant::now();
         self.last_prompt_replay_hit = false;
         self.last_verified_prefix_reused_tokens = 0;
