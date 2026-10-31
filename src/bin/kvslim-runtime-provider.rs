@@ -23,6 +23,30 @@ fn load(
     weight_mode: &str,
     cold_dir: &std::path::Path,
 ) -> Result<Box<dyn RuntimeSession>> {
+    let selected_mode = if weight_mode == "auto" {
+        let model_bytes = fs::read_dir(model)?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|meta| meta.len())
+            .sum::<u64>();
+        let available_bytes = fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find(|line| line.starts_with("MemAvailable:"))
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .unwrap_or(0)
+            .saturating_mul(1024);
+        if available_bytes >= model_bytes.saturating_mul(3) {
+            "resident"
+        } else {
+            "stream"
+        }
+    } else {
+        weight_mode
+    };
     let mut config: Value = serde_json::from_slice(&fs::read(model.join("config.json"))?)?;
     if config.get("max_context_tokens").is_none() {
         let max = config
@@ -32,7 +56,7 @@ fn load(
         config["max_context_tokens"] = max.into();
     }
     // Stream is the safe default; resident can be selected for high-memory hosts.
-    config["kvslim_weight_mode"] = Value::String(weight_mode.into());
+    config["kvslim_weight_mode"] = Value::String(selected_mode.into());
     config["kvslim_decode_fused_kernels"] = Value::Bool(true);
     config["kvslim_prefill_fuse_projections"] = Value::Bool(true);
     fs::create_dir_all(cold_dir)?;
@@ -83,8 +107,8 @@ fn main() -> Result<()> {
         .map(|w| w[1].as_str())
         .unwrap_or("stream");
     anyhow::ensure!(
-        matches!(weight_mode, "stream" | "resident"),
-        "--weight-mode must be stream or resident"
+        matches!(weight_mode, "auto" | "stream" | "resident"),
+        "--weight-mode must be auto, stream or resident"
     );
     let cold_dir = args
         .windows(2)
