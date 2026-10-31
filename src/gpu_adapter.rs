@@ -170,6 +170,19 @@ impl ModelAdapter for GpuModelAdapter {
                     .context("load exact canonical accelerator model adapter")?
             }
         };
+        if let Some(value) = config.get("mslim_attention_kernel") {
+            let settings = serde_json::from_value(value.clone())
+                .context("invalid attention kernel settings")?;
+            let allow = config
+                .get("mslim_allow_experimental_attention")
+                .map(|v| {
+                    v.as_bool()
+                        .context("experimental attention opt-in must be boolean")
+                })
+                .transpose()?
+                .unwrap_or(false);
+            runtime.set_attention_kernel(settings, allow)?;
+        }
         let prefill_batch = config
             .get("mslim_prefill_batch_tokens")
             .and_then(Value::as_u64)
@@ -373,6 +386,7 @@ impl ModelAdapter for GpuModelAdapter {
                 "model_dir": self.model_dir,
                 "tokens": runtime.session_token_ids(),
                 "authority": "logical-token-replay",
+                "attention_kernel": runtime.attention_kernel_config(),
                 "kv_mode": self.kv_mode.label(),
             }))
             .context("serialize dense GPU logical replay snapshot");
@@ -411,6 +425,7 @@ impl ModelAdapter for GpuModelAdapter {
             "authority": "canonical-bf16-coldstore",
             "kv_mode": self.kv_mode.label(),
             "last_logits": self.last_logits,
+            "attention_kernel": runtime.attention_kernel_config(),
         }))
         .context("serialize physical GPU ColdStore snapshot handle")
     }
@@ -419,6 +434,12 @@ impl ModelAdapter for GpuModelAdapter {
         if self.kv_mode == GpuKvMode::Dense {
             let envelope: Value = serde_json::from_slice(snapshot)
                 .context("parse dense GPU logical replay snapshot")?;
+            let settings = self
+                .runtime
+                .as_ref()
+                .context("GPU adapter is not loaded")?
+                .attention_kernel_config();
+            settings.check_snapshot(envelope.get("attention_kernel"))?;
             ensure!(
                 envelope.get("schema").and_then(Value::as_str)
                     == Some("mslim.runtime.replay-snapshot/v1"),
@@ -459,6 +480,12 @@ impl ModelAdapter for GpuModelAdapter {
         );
         let envelope: Value = serde_json::from_slice(snapshot)
             .context("parse physical GPU ColdStore snapshot handle")?;
+        let settings = self
+            .runtime
+            .as_ref()
+            .context("GPU adapter is not loaded")?
+            .attention_kernel_config();
+        settings.check_snapshot(envelope.get("attention_kernel"))?;
         ensure!(
             envelope.get("schema").and_then(Value::as_str)
                 == Some("mslim.runtime.physical-coldstore-snapshot/v1"),

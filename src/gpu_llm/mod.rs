@@ -31,6 +31,7 @@ use std::{
 mod gpu_resources;
 mod kernels;
 mod prefill;
+mod tiled_attention;
 
 #[cfg(feature = "hip-backend")]
 use crate::native_hip::{HipRuntime, HipWeight};
@@ -588,14 +589,81 @@ impl GpuLlm {
         })
     }
 
+    pub fn attention_kernel_config(&self) -> crate::attention_kernel::AttentionKernelConfig {
+        self.engine
+            .tiled_attention
+            .as_ref()
+            .map(|k| k.config)
+            .unwrap_or_default()
+    }
+    pub fn attention_kernel_diagnostics(&self) -> serde_json::Value {
+        self.engine.tiled_attention.as_ref().map(|k| k.diagnostics()).unwrap_or_else(||
+            serde_json::json!({"settings": self.attention_kernel_config(), "numeric_contract":"reference"}))
+    }
+    pub fn set_attention_kernel(
+        &mut self,
+        config: crate::attention_kernel::AttentionKernelConfig,
+        allow_experimental: bool,
+    ) -> Result<()> {
+        config.validate_activation(allow_experimental)?;
+        ensure!(
+            !self.poisoned && self.position == 0,
+            "attention tuning requires a healthy empty session"
+        );
+        ensure!(
+            self.calibrated_prefill.is_none(),
+            "cannot override an attached calibrated profile"
+        );
+        self.install_attention_kernel(config)
+    }
+    fn install_attention_kernel(
+        &mut self,
+        config: crate::attention_kernel::AttentionKernelConfig,
+    ) -> Result<()> {
+        use crate::attention_kernel::AttentionKernelMode;
+        if config == self.attention_kernel_config() {
+            return Ok(());
+        }
+        ensure!(
+            config.mode == AttentionKernelMode::Reference
+                || self
+                    .lod
+                    .as_ref()
+                    .is_none_or(|lod| lod.config().epsilon == 0.0),
+            "tiled full attention cannot replace a positive-epsilon LOD selector"
+        );
+        ensure!(
+            !self.native_hip_enabled(),
+            "tiled OpenCL attention is not validated with HIP"
+        );
+        let replacement = if config.mode == AttentionKernelMode::Reference {
+            None
+        } else {
+            Some(tiled_attention::TiledAttention::build(
+                &self.engine,
+                config,
+                self.spec.attention,
+            )?)
+        };
+        self.engine
+            .queue
+            .finish()
+            .context("barrier before replacing attention kernels")?;
+        self.engine.tiled_attention = replacement;
+        // Replay from another reduction scheme is never accepted as exact reuse.
+        self.gpu_prompt_replay = None;
+        Ok(())
+    }
+
     pub fn prefill_settings(&self) -> crate::calibration_profile::PrefillSettings {
         crate::calibration_profile::PrefillSettings {
             batch_tokens: self.batch_prefill_tokens,
             weight_reuse_tokens: self.prefill_weight_reuse_tokens,
+            attention: self.attention_kernel_config(),
         }
     }
 
-    /// Atomic two-field change, only on an empty session; never changes fidelity.
+    /// Atomic strict-contract tuning on an empty session; experiments are rejected.
     pub fn set_calibration_prefill_settings(
         &mut self,
         settings: crate::calibration_profile::PrefillSettings,
@@ -621,6 +689,7 @@ impl GpuLlm {
                     && self.prefill_virtual_lanes == 128),
             "profile conflicts with fused prefill kernels"
         );
+        self.install_attention_kernel(settings.attention)?;
         self.batch_prefill_tokens = settings.batch_tokens;
         self.prefill_weight_reuse_tokens = settings.weight_reuse_tokens;
         Ok(())
@@ -635,6 +704,7 @@ impl GpuLlm {
         let environment = self.prefill_environment()?;
         let params = crate::calibration_profile::read_promoted_profile(path, &environment)?;
         let original = self.prefill_settings();
+        original.validate()?; // Never install an exact profile over an experimental fallback.
         self.set_calibration_prefill_settings(params.settings)?;
         self.calibrated_prefill = Some((params, original));
         Ok(())

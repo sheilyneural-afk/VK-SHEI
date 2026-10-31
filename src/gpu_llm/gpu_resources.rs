@@ -47,6 +47,7 @@ pub(crate) struct GpuEngine {
     // Keep program loaded while kernels are in use.
     pub(crate) _program: Program,
     pub(crate) kernels: LlmKernels,
+    pub(crate) tiled_attention: Option<super::tiled_attention::TiledAttention>,
     pub name: String,
     pub reported_gpu_memory: u64,
     pub(crate) calibration_device_key: String,
@@ -139,6 +140,7 @@ impl GpuEngine {
             queue,
             _program: program,
             kernels,
+            tiled_attention: None,
             name,
             reported_gpu_memory,
             calibration_device_key: cache_key,
@@ -568,6 +570,19 @@ impl GpuEngine {
         tokens: u32,
         geometry: AttentionGeometry,
     ) -> Result<()> {
+        if let Some(tiled) = &self.tiled_attention {
+            ensure!(tokens > 0, "empty tiled decode");
+            return tiled.run(
+                self,
+                query,
+                kv.0,
+                kv.1,
+                output,
+                1,
+                tokens as usize - 1,
+                geometry,
+            );
+        }
         let (key, value) = kv;
         let qheads = u32::try_from(geometry.query_heads)?;
         let kvheads = u32::try_from(geometry.kv_heads)?;
@@ -740,6 +755,10 @@ impl GpuEngine {
         tokens: usize,
         geometry: AttentionGeometry,
     ) -> Result<()> {
+        if let Some(tiled) = &self.tiled_attention {
+            ensure!(tokens > 0, "empty tiled decode");
+            return tiled.run(self, query, key, value, output, 1, tokens - 1, geometry);
+        }
         ensure!(
             (1..=2048).contains(&tokens),
             "fused exact GPU attention supports up to 2048 BF16 KV tokens"

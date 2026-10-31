@@ -325,6 +325,7 @@ impl InferenceExecutor for GpuExecutor {
             .decode(&generated.tokens, true)
             .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
         let mut diagnostics = serde_json::to_value(&generated)?;
+        diagnostics["attention_kernel"] = self.model.attention_kernel_diagnostics();
         diagnostics["calibrated_prefill_profile"] = self
             .model
             .calibrated_prefill_profile()
