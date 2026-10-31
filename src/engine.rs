@@ -78,7 +78,7 @@ impl MslimEngine {
             .context("M-SLIM decode failed")
     }
 
-    pub fn snapshot_kv(&self) -> Result<Vec<u8>> {
+    pub fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
         ensure!(
             self.state == EngineState::Loaded,
             "M-SLIM engine is not loaded"
@@ -194,7 +194,7 @@ mod tests {
             Ok(())
         }
 
-        fn snapshot_kv(&self) -> Result<Vec<u8>> {
+        fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
             Ok(serde_json::to_vec(&self.tokens)?)
         }
 

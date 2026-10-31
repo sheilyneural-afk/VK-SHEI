@@ -99,7 +99,7 @@ impl ModelAdapter for TorchModelAdapter {
         Ok(self.last_logits.clone())
     }
 
-    fn snapshot_kv(&self) -> Result<Vec<u8>> {
+    fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
         self.runtime
             .as_ref()
             .context("Torch adapter is not loaded")?;

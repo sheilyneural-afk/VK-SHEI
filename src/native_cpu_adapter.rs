@@ -748,7 +748,7 @@ impl ModelAdapter for NativeCpuModelAdapter {
         ))
     }
 
-    fn snapshot_kv(&self) -> Result<Vec<u8>> {
+    fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
         let runtime = self.runtime.as_ref().context("CPU nativa no cargada")?;
         serde_json::to_vec(&json!({
             "schema": "mslim.runtime.replay-snapshot/v1",

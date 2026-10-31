@@ -1395,6 +1395,7 @@ impl GpuLlm {
                 config.cold_directory = Some(directory);
             }
             let policy = lod.axis_policy().clone();
+            self.lod = None;
             self.lod = Some(GpuRegionStore::new_with_axis_policy(
                 self.spec.attention,
                 self.spec.num_hidden_layers,
@@ -1439,7 +1440,7 @@ impl GpuLlm {
     /// End-of-turn commit is mandatory before returning a reply. Removes
     /// 48 tiny blocking GPU-to-CPU copies PER decoded token, replacing
     /// them with two contiguous verified readbacks per layer.
-    fn flush_deferred_cold(&mut self) -> Result<()> {
+    pub fn flush_deferred_cold(&mut self) -> Result<()> {
         if !self.deferred_cold_active {
             return Ok(());
         }
@@ -2537,7 +2538,7 @@ impl GpuLlm {
             model_weights_dtype: "BF16".to_owned(),
             gpu_compute: "FP32_accumulators_BF16_intermediate_storage".to_owned(),
             hip_bf16_gemm_active: self.native_hip_enabled(),
-            mslim_lod_active: false,
+            mslim_lod_active: self.lod.is_some(),
             gpu_region_components_active: self.lod.is_some(),
             gpu_region_stats: self.gpu_region_stats(),
             gpu_kv_capacity_bytes: self.gpu_region_gpu_kv_capacity_bytes(),

@@ -121,7 +121,7 @@ async fn ready(state: State<Arc<AppState>>) -> impl IntoResponse {
     )
 }
 
-async fn select_worker(state: &AppState) -> Result<String, GatewayError> {
+async fn select_worker(state: &AppState, model: Option<&str>) -> Result<String, GatewayError> {
     for (_, endpoint) in state.workers.iter() {
         let response = state
             .client
@@ -142,13 +142,23 @@ async fn select_worker(state: &AppState) -> Result<String, GatewayError> {
             Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
             _ => None,
         };
-        if worker_capabilities_are_valid(capabilities.as_ref()) {
+        let serves_model = model.is_none_or(|requested| {
+            capabilities
+                .as_ref()
+                .and_then(|value| value.get("model"))
+                .and_then(Value::as_str)
+                == Some(requested)
+        });
+        if worker_capabilities_are_valid(capabilities.as_ref()) && serves_model {
             return Ok(endpoint.clone());
         }
     }
     Err(GatewayError(
         StatusCode::SERVICE_UNAVAILABLE,
-        "no registered worker is ready".into(),
+        match model {
+            Some(requested) => format!("no registered worker serves model {requested}"),
+            None => "no registered worker is ready".into(),
+        },
     ))
 }
 
@@ -199,7 +209,7 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
 }
 
 async fn models(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError> {
-    let worker = select_worker(&state).await?;
+    let worker = select_worker(&state, None).await?;
     let response = state
         .client
         .get(format!("{worker}/v1/models"))
@@ -218,7 +228,7 @@ async fn models(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError
 }
 
 async fn capabilities(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError> {
-    let worker = select_worker(&state).await?;
+    let worker = select_worker(&state, None).await?;
     let body = state
         .client
         .get(format!("{worker}/v1/capabilities"))
@@ -239,7 +249,7 @@ async fn chat(
     state: State<Arc<AppState>>,
     Json(request): Json<Value>,
 ) -> Result<Json<Value>, GatewayError> {
-    let worker = select_worker(&state).await?;
+    let worker = select_worker(&state, request.get("model").and_then(Value::as_str)).await?;
     let response = state
         .client
         .post(format!("{worker}/v1/chat/completions"))

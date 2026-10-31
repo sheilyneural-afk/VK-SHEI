@@ -229,15 +229,29 @@ pub fn read_promoted_profile(
     let parent = path.parent().context("prefill profile has no parent")?;
     let receipts = verify_receipt_chain(parent.join("calibration-receipts.jsonl"))?;
     let digest = sha256(&bytes);
-    let last = receipts
-        .last()
+    let activation = receipts
+        .iter()
+        .rev()
+        .find(|receipt| {
+            matches!(
+                receipt.event.as_str(),
+                "promotion_committed" | "rollback_verified"
+            )
+        })
         .context("prefill profile has no activation evidence")?;
+    let authorized_digest = match activation.event.as_str() {
+        "promotion_committed" => activation
+            .details
+            .get("candidate_digest")
+            .and_then(Value::as_str),
+        _ => activation
+            .details
+            .get("restored_digest")
+            .and_then(Value::as_str),
+    };
     ensure!(
-        last.event == "promotion_committed"
-            && last.state == crate::calibration_transaction::CalibrationState::Promoted
-            && last.details.get("candidate_digest").and_then(Value::as_str)
-                == Some(digest.as_str()),
-        "prefill profile is not the last explicitly promoted candidate"
+        authorized_digest == Some(digest.as_str()),
+        "prefill profile is not the authorized activation"
     );
     // Recheck after reading the chain to reject a concurrently started activation.
     ensure!(

@@ -66,7 +66,7 @@ impl RuntimeSession for DeterministicSession {
             },
         })
     }
-    fn snapshot_kv(&self) -> Result<Vec<u8>> {
+    fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
         Ok(self.snapshot.clone())
     }
     fn restore_kv(&mut self, bytes: &[u8]) -> Result<()> {
@@ -75,7 +75,7 @@ impl RuntimeSession for DeterministicSession {
         }
         Ok(())
     }
-    fn snapshot_receipt(&self) -> Result<CacheReceipt> {
+    fn snapshot_receipt(&mut self) -> Result<CacheReceipt> {
         Ok(CacheReceipt {
             schema: "v1".into(),
             operation: "snapshot".into(),

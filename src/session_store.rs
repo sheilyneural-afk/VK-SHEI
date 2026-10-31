@@ -5,7 +5,10 @@
 //! a provider snapshot here only after validating its receipt and identity.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionGeneration {
@@ -61,11 +64,7 @@ impl SessionStore {
         if name.is_empty() {
             return Err(StoreError::Corrupt("empty CURRENT".into()));
         }
-        let bytes = fs::read(d.join(name)).map_err(ioe)?;
-        let g: SessionGeneration =
-            serde_json::from_slice(&bytes).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        verify(&g)?;
-        Ok(Some(g))
+        load_generation(&d.join(name), handle).map(Some)
     }
 
     pub fn prepare(
@@ -92,25 +91,68 @@ impl SessionStore {
             previous_hash,
         };
         verify(&g)?;
-        let name = format!("generation-{generation:020}.json");
+        let name = generation_file_name(generation);
+        let final_path = d.join(&name);
         let tmp = d.join(format!(".{name}.tmp"));
         let bytes =
             serde_json::to_vec_pretty(&g).map_err(|e| StoreError::Invalid(e.to_string()))?;
         fs::write(&tmp, bytes).map_err(ioe)?;
         let file = fs::OpenOptions::new().read(true).open(&tmp).map_err(ioe)?;
         file.sync_all().map_err(ioe)?;
-        fs::rename(&tmp, d.join(&name)).map_err(ioe)?;
-        Ok(g)
+        let linked = fs::hard_link(&tmp, &final_path);
+        let _ = fs::remove_file(&tmp);
+        match linked {
+            Ok(()) => Ok(g),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let existing = load_generation(&final_path, handle)?;
+                if existing == g {
+                    Ok(existing)
+                } else {
+                    Err(StoreError::Invalid(format!(
+                        "generation {generation} is already prepared with different state"
+                    )))
+                }
+            }
+            Err(error) => Err(ioe(error)),
+        }
     }
 
     pub fn commit(&self, handle: &str, generation: u64) -> Result<SessionGeneration, StoreError> {
         let d = self.dir(handle)?;
-        let name = format!("generation-{generation:020}.json");
-        let path = d.join(&name);
-        let bytes = fs::read(&path).map_err(ioe)?;
-        let g: SessionGeneration =
-            serde_json::from_slice(&bytes).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        verify(&g)?;
+        let name = generation_file_name(generation);
+        let candidate = load_generation(&d.join(&name), handle)?;
+        match self.latest(handle)? {
+            None => {
+                if candidate.generation != 0 || candidate.previous_hash.is_some() {
+                    return Err(StoreError::Invalid(
+                        "first commit must be generation 0 without a predecessor".into(),
+                    ));
+                }
+            }
+            Some(current) if candidate.generation == current.generation => {
+                if candidate == current {
+                    return Ok(candidate);
+                }
+                return Err(StoreError::Invalid(
+                    "generation conflicts with the committed state".into(),
+                ));
+            }
+            Some(current) if candidate.generation < current.generation => {
+                return Err(StoreError::Invalid(format!(
+                    "refusing to rewind committed generation {} to {}",
+                    current.generation, candidate.generation
+                )));
+            }
+            Some(current) => {
+                if candidate.generation != current.generation + 1
+                    || candidate.previous_hash.as_deref() != Some(current.state_hash.as_str())
+                {
+                    return Err(StoreError::Invalid(
+                        "generation does not extend the committed history".into(),
+                    ));
+                }
+            }
+        }
         let tmp = d.join(".CURRENT.tmp");
         fs::write(&tmp, format!("{name}\n")).map_err(ioe)?;
         let file = fs::OpenOptions::new().read(true).open(&tmp).map_err(ioe)?;
@@ -118,7 +160,7 @@ impl SessionStore {
         fs::rename(&tmp, d.join("CURRENT")).map_err(ioe)?;
         let dir = fs::File::open(&d).map_err(ioe)?;
         dir.sync_all().map_err(ioe)?;
-        Ok(g)
+        Ok(candidate)
     }
 
     pub fn prepare_and_commit(
@@ -130,6 +172,25 @@ impl SessionStore {
         self.prepare(handle, generation, state)?;
         self.commit(handle, generation)
     }
+}
+
+fn generation_file_name(generation: u64) -> String {
+    format!("generation-{generation:020}.json")
+}
+
+fn load_generation(path: &Path, handle: &str) -> Result<SessionGeneration, StoreError> {
+    let bytes = fs::read(path).map_err(ioe)?;
+    let g: SessionGeneration =
+        serde_json::from_slice(&bytes).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+    verify(&g)?;
+    if g.session_handle != handle {
+        return Err(StoreError::Corrupt("session identity mismatch".into()));
+    }
+    let expected_name = generation_file_name(g.generation);
+    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+        return Err(StoreError::Corrupt("generation file name mismatch".into()));
+    }
+    Ok(g)
 }
 
 fn validate_handle(h: &str) -> Result<(), StoreError> {

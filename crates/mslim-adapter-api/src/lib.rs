@@ -149,7 +149,7 @@ pub trait ModelAdapter: Send {
     fn kv_integrity_report(&mut self) -> Result<Option<Value>> {
         Ok(None)
     }
-    fn snapshot_kv(&self) -> Result<Vec<u8>>;
+    fn snapshot_kv(&mut self) -> Result<Vec<u8>>;
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()>;
 }
 
@@ -161,6 +161,8 @@ pub struct GenerationRequest {
     pub max_new_tokens: usize,
     pub temperature: Option<f32>,
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub stop_tokens: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -267,9 +269,14 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
             .max_by(|(_, left), (_, right)| left.total_cmp(right))
             .and_then(|(index, _)| u32::try_from(index).ok())
             .ok_or_else(|| anyhow::anyhow!("prefill logits are empty"))?;
+        let mut finish_reason = "length";
         for index in 0..request.max_new_tokens {
             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                 anyhow::bail!("runtime generation cancelled")
+            }
+            if request.stop_tokens.contains(&next) {
+                finish_reason = "stop";
+                break;
             }
             output.push(next);
             if index + 1 < request.max_new_tokens {
@@ -284,7 +291,7 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
         Ok(GenerationResult {
             output_tokens: output,
             prompt_tokens: request.input_tokens.len(),
-            finish_reason: "length".to_owned(),
+            finish_reason: finish_reason.to_owned(),
             stats: GenerationStats {
                 prefill_seconds: Some(prefill_seconds),
                 decode_seconds: Some(decode_seconds),
@@ -296,7 +303,7 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
         })
     }
 
-    fn snapshot_kv(&self) -> Result<Vec<u8>> {
+    fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
         self.adapter.snapshot_kv()
     }
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
@@ -309,7 +316,7 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
         Ok(())
     }
 
-    fn snapshot_receipt(&self) -> Result<CacheReceipt> {
+    fn snapshot_receipt(&mut self) -> Result<CacheReceipt> {
         let snapshot = self.adapter.snapshot_kv()?;
         let mut hasher = Sha256::new();
         hasher.update(snapshot);
@@ -367,7 +374,7 @@ pub trait RuntimeSession: Send {
     fn capabilities(&self) -> &AdapterCapabilities;
     fn identity(&self) -> &ModelIdentity;
     fn generate(&mut self, request: GenerationRequest) -> Result<GenerationResult>;
-    fn snapshot_kv(&self) -> Result<Vec<u8>>;
+    fn snapshot_kv(&mut self) -> Result<Vec<u8>>;
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()>;
 
     /// Clears only active causal KV/session state; model weights remain loaded.
@@ -387,11 +394,109 @@ pub trait RuntimeSession: Send {
 
     /// A receipt is deliberately explicit: the backend must populate identity,
     /// prefix and byte/token counts after a verified operation.
-    fn snapshot_receipt(&self) -> Result<CacheReceipt> {
+    fn snapshot_receipt(&mut self) -> Result<CacheReceipt> {
         anyhow::bail!("runtime session does not expose a verified snapshot receipt")
     }
 
     fn restore_receipt(&mut self, _receipt: &CacheReceipt, _snapshot: &[u8]) -> Result<()> {
         anyhow::bail!("runtime session does not expose a verified restore receipt")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    struct Scripted {
+        caps: AdapterCapabilities,
+        tokens: Vec<u32>,
+        cursor: usize,
+    }
+
+    impl ModelAdapter for Scripted {
+        fn capabilities(&self) -> &AdapterCapabilities {
+            &self.caps
+        }
+        fn inspect(&self, _: &Path, _: &Value) -> Result<()> {
+            Ok(())
+        }
+        fn load(&mut self, _: &Path, _: &Value) -> Result<()> {
+            Ok(())
+        }
+        fn prefill(&mut self, _: &[u32]) -> Result<Value> {
+            self.cursor = 0;
+            Ok(Value::Null)
+        }
+        fn decode(&mut self, _: u32) -> Result<u32> {
+            self.cursor += 1;
+            Ok(self.tokens[self.cursor])
+        }
+        fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
+            anyhow::bail!("scripted adapter has no KV state")
+        }
+        fn restore_kv(&mut self, _: &[u8]) -> Result<()> {
+            anyhow::bail!("scripted adapter has no KV state")
+        }
+        fn last_logits(&self) -> Result<Option<Vec<f32>>> {
+            let peak = self.tokens[self.cursor] as usize;
+            let mut logits = vec![0.0; 16];
+            logits[peak] = 1.0;
+            Ok(Some(logits))
+        }
+    }
+
+    fn session(tokens: Vec<u32>) -> ModelAdapterSession<Scripted> {
+        ModelAdapterSession::new(
+            Scripted {
+                caps: AdapterCapabilities {
+                    adapter_id: "scripted".into(),
+                    backend: "test".into(),
+                    supports_prefill: true,
+                    supports_decode: true,
+                    supports_kv_restore: false,
+                    supports_streaming: false,
+                },
+                tokens,
+                cursor: 0,
+            },
+            ModelIdentity {
+                model_digest: "m".into(),
+                tokenizer_digest: "t".into(),
+                architecture_digest: "a".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn generation_stops_at_stop_token_without_emitting_it() {
+        let mut s = session(vec![5, 9, 2, 7]);
+        let result = s
+            .generate(GenerationRequest {
+                input_tokens: vec![1],
+                max_new_tokens: 8,
+                temperature: None,
+                seed: None,
+                stop_tokens: vec![2],
+            })
+            .unwrap();
+        assert_eq!(result.output_tokens, vec![5, 9]);
+        assert_eq!(result.finish_reason, "stop");
+    }
+
+    #[test]
+    fn generation_without_stop_token_reports_length() {
+        let mut s = session(vec![5, 9, 4]);
+        let result = s
+            .generate(GenerationRequest {
+                input_tokens: vec![1],
+                max_new_tokens: 2,
+                temperature: None,
+                seed: None,
+                stop_tokens: vec![2],
+            })
+            .unwrap();
+        assert_eq!(result.output_tokens, vec![5, 9]);
+        assert_eq!(result.finish_reason, "length");
     }
 }

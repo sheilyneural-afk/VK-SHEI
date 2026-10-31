@@ -165,13 +165,13 @@ mod tests {
                 stats: GenerationStats::default(),
             })
         }
-        fn snapshot_kv(&self) -> Result<Vec<u8>> {
+        fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
             Ok(self.snap.clone())
         }
         fn restore_kv(&mut self, _: &[u8]) -> Result<()> {
             Ok(())
         }
-        fn snapshot_receipt(&self) -> Result<mslim_adapter_api::CacheReceipt> {
+        fn snapshot_receipt(&mut self) -> Result<mslim_adapter_api::CacheReceipt> {
             Ok(mslim_adapter_api::CacheReceipt {
                 schema: "v1".into(),
                 operation: "snapshot".into(),
@@ -263,6 +263,7 @@ mod tests {
                 max_new_tokens: 1,
                 temperature: None,
                 seed: None,
+                stop_tokens: vec![],
             })
             .unwrap(),
         });

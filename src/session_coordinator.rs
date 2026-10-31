@@ -47,7 +47,7 @@ impl SessionCoordinator {
             .map_err(|e| anyhow::anyhow!(e.to_string()))
     }
 
-    pub fn snapshot_physical_kv(&self) -> Result<Vec<u8>> {
+    pub fn snapshot_physical_kv(&mut self) -> Result<Vec<u8>> {
         ensure!(
             self.engine.state() == EngineState::Loaded,
             "engine is not loaded"

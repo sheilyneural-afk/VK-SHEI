@@ -288,7 +288,6 @@ struct GpuExecutor {
     model: GpuLlm,
     tokenizer: Tokenizer,
     chat_template: String,
-    last_prompt_ids: Vec<u32>,
 }
 
 impl InferenceExecutor for GpuExecutor {
@@ -313,16 +312,14 @@ impl InferenceExecutor for GpuExecutor {
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
         let ids = input.get_ids();
         ensure!(!ids.is_empty(), "empty tokenized prompt");
-        // Preserve the active causal state only for the exact same token prefix.
-        // A different prompt must reset; an identical prompt lets the runtime
-        // take its verified prompt-replay/shared-prefix path.
-        if self.model.position() != 0 && self.last_prompt_ids.as_slice() != ids {
+        // Replay and prefix reuse both require an empty position, and a reset
+        // clears the replay cache, so a non-empty session cannot be reused.
+        if self.model.position() != 0 {
             self.model.reset_session()?;
         }
         let generated = self
             .model
             .generate_cancellable(ids, max_tokens, false, cancel)?;
-        self.last_prompt_ids = ids.to_vec();
         let output = self
             .tokenizer
             .decode(&generated.tokens, true)
@@ -353,6 +350,7 @@ struct ExternalExecutor {
     session_store: SessionStore,
     active_conversation: Option<String>,
     active_history_tokens: Vec<u32>,
+    stop_tokens: Vec<u32>,
 }
 
 impl ExternalExecutor {
@@ -759,6 +757,7 @@ impl InferenceExecutor for ExternalExecutor {
                     max_new_tokens: max_tokens,
                     temperature: None,
                     seed: None,
+                    stop_tokens: self.stop_tokens.clone(),
                 };
                 let response = self.send(
                     "generate",
@@ -1426,6 +1425,7 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("open SessionStore: {e}"))?;
         let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+        let stop_tokens = ModelSpec::inspect(&model)?.eos_token_ids;
         let worker = InferenceWorker::spawn(
             RuntimeExecutor::External(Box::new(ExternalExecutor {
                 client,
@@ -1436,6 +1436,7 @@ async fn main() -> Result<()> {
                 session_store,
                 active_conversation: None,
                 active_history_tokens: Vec::new(),
+                stop_tokens,
             })),
             4,
         )?;
@@ -1523,7 +1524,6 @@ async fn main() -> Result<()> {
                 model: engine,
                 tokenizer,
                 chat_template: chat_template.clone(),
-                last_prompt_ids: Vec::new(),
             })),
             4,
         )?;

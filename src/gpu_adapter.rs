@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -267,6 +268,10 @@ impl ModelAdapter for GpuModelAdapter {
             .context("local accelerator runtime is not loaded")?;
 
         if self.cached_prompt == input && runtime.position() >= input.len() {
+            ensure!(
+                self.last_logits.is_some(),
+                "verified prefix reuse has no next-token logits; restore a snapshot that carries them"
+            );
             return Ok(json!({
                 "tokens": input.len(),
                 "position": runtime.position(),
@@ -360,7 +365,7 @@ impl ModelAdapter for GpuModelAdapter {
         })))
     }
 
-    fn snapshot_kv(&self) -> Result<Vec<u8>> {
+    fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
         if self.kv_mode == GpuKvMode::Dense {
             let runtime = self.runtime.as_ref().context("GPU adapter is not loaded")?;
             return serde_json::to_vec(&json!({
@@ -376,14 +381,36 @@ impl ModelAdapter for GpuModelAdapter {
             self.capabilities.supports_kv_restore,
             "physical GPU K/V snapshots require mslim_cold_directory"
         );
-        let runtime = self.runtime.as_ref().context("GPU adapter is not loaded")?;
+        let runtime = self.runtime.as_mut().context("GPU adapter is not loaded")?;
+        runtime.flush_deferred_cold()?;
+        let cold_directory = runtime
+            .active_cold_directory()
+            .context("physical GPU snapshot requires an active ColdStore namespace")?;
+        let tokens = runtime.session_token_ids().to_vec();
+        let kv_sha256 = runtime.canonical_kv_sha256()?;
+        let prefix_bytes = fs::metadata(cold_directory.join(COLD_PAGES_FILE))
+            .context("measure ColdStore prefix for physical GPU snapshot")?
+            .len();
+        let pin = json!({
+            "tokens": tokens,
+            "prefix_bytes": prefix_bytes,
+            "kv_sha256": kv_sha256,
+        });
+        fs::write(
+            cold_directory.join(snapshot_pin_name(&kv_sha256, prefix_bytes)),
+            serde_json::to_vec(&pin).context("serialize physical GPU snapshot pin")?,
+        )
+        .context("write physical GPU snapshot pin")?;
         serde_json::to_vec(&json!({
             "schema": "mslim.runtime.physical-coldstore-snapshot/v1",
             "model_dir": self.model_dir,
-            "cold_directory": runtime.active_cold_directory(),
-            "tokens": runtime.session_token_ids(),
+            "cold_directory": cold_directory,
+            "tokens": tokens,
+            "prefix_bytes": prefix_bytes,
+            "kv_sha256": kv_sha256,
             "authority": "canonical-bf16-coldstore",
             "kv_mode": self.kv_mode.label(),
+            "last_logits": self.last_logits,
         }))
         .context("serialize physical GPU ColdStore snapshot handle")
     }
@@ -470,6 +497,28 @@ impl ModelAdapter for GpuModelAdapter {
             .and_then(Value::as_str)
             .map(PathBuf::from)
             .context("physical GPU snapshot missing ColdStore namespace")?;
+        let prefix_bytes = envelope
+            .get("prefix_bytes")
+            .and_then(Value::as_u64)
+            .context("physical GPU snapshot missing ColdStore prefix length")?;
+        let kv_sha256 = envelope
+            .get("kv_sha256")
+            .and_then(Value::as_str)
+            .context("physical GPU snapshot missing KV digest")?
+            .to_owned();
+        if !tokens.is_empty() {
+            let pin: Value = serde_json::from_slice(
+                &fs::read(cold_directory.join(snapshot_pin_name(&kv_sha256, prefix_bytes)))
+                    .context("physical GPU snapshot pin is missing")?,
+            )
+            .context("parse physical GPU snapshot pin")?;
+            ensure!(
+                pin.get("prefix_bytes").and_then(Value::as_u64) == Some(prefix_bytes)
+                    && pin.get("kv_sha256").and_then(Value::as_str) == Some(kv_sha256.as_str())
+                    && pin.get("tokens") == Some(&json!(tokens)),
+                "physical GPU snapshot token history does not match its ColdStore pin"
+            );
+        }
         let runtime = self.runtime.as_mut().context("GPU adapter is not loaded")?;
         if tokens.is_empty() {
             // Empty snapshot: start in a fresh namespace so a previously-filled
@@ -478,14 +527,35 @@ impl ModelAdapter for GpuModelAdapter {
             // the same directory; each run must see an empty ColdStore.
             runtime.reset_session()?;
         } else {
-            runtime.reset_session_at(Some(cold_directory))?;
+            let live_bytes = fs::metadata(cold_directory.join(COLD_PAGES_FILE))
+                .context("measure live ColdStore for physical GPU restore")?
+                .len();
+            let in_place = runtime.active_cold_directory().as_deref()
+                == Some(cold_directory.as_path())
+                && live_bytes == prefix_bytes;
+            let target = if in_place {
+                cold_directory
+            } else {
+                fork_cold_prefix(&cold_directory, prefix_bytes)?
+            };
+            runtime.reset_session_at(Some(target))?;
             let receipt = runtime.restore_session(&tokens)?;
             ensure!(
                 receipt.tokens == tokens.len(),
                 "physical GPU restore returned an incomplete prefix"
             );
+            ensure!(
+                runtime.canonical_kv_sha256()? == kv_sha256,
+                "restored physical KV digest does not match the snapshot"
+            );
         }
-        self.last_logits = None;
+        self.last_logits = match envelope.get("last_logits") {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(
+                serde_json::from_value::<Vec<f32>>(value.clone())
+                    .context("invalid next-token logits in physical GPU snapshot")?,
+            ),
+        };
         self.cached_prompt = tokens;
         Ok(())
     }
@@ -497,7 +567,7 @@ mod tests {
 
     #[test]
     fn unloaded_adapter_does_not_claim_physical_restore() {
-        let adapter = GpuModelAdapter::default();
+        let mut adapter = GpuModelAdapter::default();
         assert!(!adapter.capabilities().supports_kv_restore);
         assert!(!adapter.capabilities().supports_streaming);
         assert!(adapter.snapshot_kv().is_err());
@@ -515,4 +585,30 @@ mod tests {
         );
         assert!(GpuKvMode::parse(&json!({"mslim_kv_mode": "automatic"})).is_err());
     }
+}
+
+const COLD_PAGES_FILE: &str = "pages-exact.kv";
+
+fn snapshot_pin_name(kv_sha256: &str, prefix_bytes: u64) -> String {
+    format!("snapshot-{prefix_bytes}-{kv_sha256}.json")
+}
+
+fn fork_cold_prefix(source_dir: &Path, prefix_bytes: u64) -> Result<PathBuf> {
+    let source = source_dir.join(COLD_PAGES_FILE);
+    let mut input = fs::File::open(&source).context("open ColdStore for physical GPU restore")?;
+    ensure!(
+        input.metadata()?.len() >= prefix_bytes,
+        "ColdStore no longer contains the physical GPU snapshot prefix"
+    );
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let target = source_dir.join(format!("restore-{prefix_bytes}-{nonce}"));
+    fs::create_dir_all(&target).context("create physical GPU restore namespace")?;
+    let mut output = fs::File::create(target.join(COLD_PAGES_FILE))
+        .context("create forked ColdStore for physical GPU restore")?;
+    std::io::copy(&mut (&mut input).take(prefix_bytes), &mut output)
+        .context("copy ColdStore prefix for physical GPU restore")?;
+    output.sync_all()?;
+    Ok(target)
 }
