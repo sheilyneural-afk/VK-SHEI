@@ -262,6 +262,7 @@ struct GpuExecutor {
     model: OpenClLlm,
     tokenizer: Tokenizer,
     chat_template: String,
+    last_prompt_ids: Vec<u32>,
 }
 
 impl InferenceExecutor for GpuExecutor {
@@ -270,14 +271,6 @@ impl InferenceExecutor for GpuExecutor {
     type Error = anyhow::Error;
 
     fn execute(&mut self, request: GpuJob, cancel: &AtomicBool) -> Result<GpuAnswer> {
-        // Keep the verified BF16 prompt snapshot across turns. Reset only the
-        // active execution state after a completed request; reset_session()
-        // deliberately preserves the bounded SHA-256 verified replay cache.
-        // On the first request the runtime is already fresh, so no reset or
-        // device barrier is necessary.
-        if self.model.position() != 0 {
-            self.model.reset_session()?;
-        }
         let text = render_prompt(
             &self.chat_template,
             &request.messages,
@@ -289,9 +282,16 @@ impl InferenceExecutor for GpuExecutor {
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
         let ids = input.get_ids();
         ensure!(!ids.is_empty(), "empty tokenized prompt");
+        // Preserve the active causal state only for the exact same token prefix.
+        // A different prompt must reset; an identical prompt lets the runtime
+        // take its verified prompt-replay/shared-prefix path.
+        if self.model.position() != 0 && self.last_prompt_ids.as_slice() != ids {
+            self.model.reset_session()?;
+        }
         let generated = self
             .model
             .generate_cancellable(ids, request.max_tokens, false, cancel)?;
+        self.last_prompt_ids = ids.to_vec();
         let output = self
             .tokenizer
             .decode(&generated.tokens, true)
@@ -906,6 +906,7 @@ async fn main() -> Result<()> {
             model: engine,
             tokenizer,
             chat_template,
+            last_prompt_ids: Vec::new(),
         },
         4,
     )?;
