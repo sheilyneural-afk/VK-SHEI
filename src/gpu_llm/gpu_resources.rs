@@ -242,7 +242,9 @@ impl GpuEngine {
                 .context("GPU logits BF16 readback failed")?;
         }
         Ok(bits
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|b| half::bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
             .collect())
     }

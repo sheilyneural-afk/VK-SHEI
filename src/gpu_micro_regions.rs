@@ -160,7 +160,9 @@ impl MicroKeyRegions {
         let mut parsed = Vec::with_capacity(count);
         for token_bytes in original_k_bf16.chunks_exact(token_bytes) {
             let values = token_bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
                 .collect::<Vec<_>>();
             ensure!(
@@ -352,7 +354,9 @@ impl MicroKeyRegions {
             "micro region query BF16 shape mismatch"
         );
         let query = query_bf16
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|x| bf16::from_bits(u16::from_le_bytes([x[0], x[1]])).to_f32())
             .collect::<Vec<_>>();
         ensure!(
