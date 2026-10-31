@@ -706,6 +706,14 @@ impl ModelAdapter for NativeCpuModelAdapter {
             .forward_token(token_id, true)
     }
 
+    fn reset_session(&mut self) -> Result<()> {
+        self.runtime
+            .as_mut()
+            .context("CPU nativa no cargada")?
+            .reset()
+            .context("reset CPU causal session")
+    }
+
     fn last_logits(&self) -> Result<Option<Vec<f32>>> {
         Ok(self.runtime.as_ref().and_then(|r| r.last_logits()))
     }

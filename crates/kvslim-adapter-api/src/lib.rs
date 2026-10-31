@@ -131,6 +131,11 @@ pub trait ModelAdapter: Send {
     fn load(&mut self, model_dir: &Path, config: &Value) -> Result<()>;
     fn prefill(&mut self, input: &[u32]) -> Result<Value>;
     fn decode(&mut self, token_id: u32) -> Result<u32>;
+    /// Discards only the active causal state while keeping model weights
+    /// resident. Runtimes that cannot do this safely fail closed.
+    fn reset_session(&mut self) -> Result<()> {
+        anyhow::bail!("runtime adapter does not expose a verified session reset")
+    }
     /// Returns the last full-vocabulary logits produced by this runtime when
     /// the adapter captured them. `None` is an explicit statement that this
     /// adapter did not capture logits; it is never treated as parity.
@@ -245,13 +250,24 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
         let prefill_seconds = started.elapsed().as_secs_f64();
         let decode_started = std::time::Instant::now();
         let mut output = Vec::with_capacity(request.max_new_tokens);
-        let mut previous = *request.input_tokens.last().unwrap_or(&0);
-        for _ in 0..request.max_new_tokens {
+        let logits = self
+            .adapter
+            .last_logits()?
+            .ok_or_else(|| anyhow::anyhow!("prefill produced no next-token logits"))?;
+        let mut next = logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .and_then(|(index, _)| u32::try_from(index).ok())
+            .ok_or_else(|| anyhow::anyhow!("prefill logits are empty"))?;
+        for index in 0..request.max_new_tokens {
             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                 anyhow::bail!("runtime generation cancelled")
             }
-            previous = self.adapter.decode(previous)?;
-            output.push(previous);
+            output.push(next);
+            if index + 1 < request.max_new_tokens {
+                next = self.adapter.decode(next)?;
+            }
         }
         let decode_seconds = decode_started.elapsed().as_secs_f64();
         let total_seconds = started.elapsed().as_secs_f64();
@@ -278,6 +294,12 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
     }
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()> {
         self.adapter.restore_kv(snapshot)
+    }
+
+    fn reset_session(&mut self) -> Result<()> {
+        self.adapter.reset_session()?;
+        self.generation = self.generation.saturating_add(1);
+        Ok(())
     }
 
     fn snapshot_receipt(&self) -> Result<CacheReceipt> {
@@ -340,6 +362,11 @@ pub trait RuntimeSession: Send {
     fn generate(&mut self, request: GenerationRequest) -> Result<GenerationResult>;
     fn snapshot_kv(&self) -> Result<Vec<u8>>;
     fn restore_kv(&mut self, snapshot: &[u8]) -> Result<()>;
+
+    /// Clears only active causal KV/session state; model weights remain loaded.
+    fn reset_session(&mut self) -> Result<()> {
+        anyhow::bail!("runtime session does not expose a verified session reset")
+    }
 
     /// Backend-specific cancellation is optional and must be reported by the
     /// implementation. The default fails closed instead of pretending to cancel.

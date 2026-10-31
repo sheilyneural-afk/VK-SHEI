@@ -64,10 +64,13 @@ impl ModelAdapter for TorchModelAdapter {
 
     fn prefill(&mut self, input: &[u32]) -> Result<Value> {
         ensure!(!input.is_empty(), "Torch adapter prompt is empty");
-        self.runtime
+        let runtime = self
+            .runtime
             .as_ref()
             .context("Torch adapter is not loaded")?;
         self.session_tokens = input.iter().map(|&token| i64::from(token)).collect();
+        let generation = runtime.generate_token_ids_dense(&self.session_tokens, 1, 512)?;
+        self.last_logits = generation.step_logits.first().cloned();
         Ok(json!({ "tokens": input.len() }))
     }
 
@@ -84,6 +87,12 @@ impl ModelAdapter for TorchModelAdapter {
             .first()
             .copied()
             .context("Torch adapter produced no token")
+    }
+
+    fn reset_session(&mut self) -> Result<()> {
+        self.session_tokens.clear();
+        self.last_logits = None;
+        Ok(())
     }
 
     fn last_logits(&self) -> Result<Option<Vec<f32>>> {

@@ -165,6 +165,15 @@ mod tests {
             Ok(token_id)
         }
 
+        fn last_logits(&self) -> Result<Option<Vec<f32>>> {
+            Ok(Some(vec![1.0]))
+        }
+
+        fn reset_session(&mut self) -> Result<()> {
+            self.tokens.clear();
+            Ok(())
+        }
+
         fn snapshot_kv(&self) -> Result<Vec<u8>> {
             Ok(serde_json::to_vec(&self.tokens)?)
         }

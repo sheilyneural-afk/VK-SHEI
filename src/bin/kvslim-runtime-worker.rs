@@ -94,6 +94,10 @@ struct ChatRequest {
     document: Option<String>,
     #[serde(default)]
     user: Option<String>,
+    /// Stable conversation identity. When omitted, the worker uses the
+    /// process-local default conversation and still verifies token prefixes.
+    #[serde(default)]
+    conversation_id: Option<String>,
     /// Optional provider-neutral continuity capability. The worker validates it
     /// fail-closed; physical resume/snapshot is routed only through an attached
     /// external runtime session.
@@ -260,6 +264,7 @@ enum GpuOperation {
         messages: Vec<ChatMessage>,
         max_tokens: usize,
         enable_thinking: bool,
+        conversation_id: String,
     },
     Continuity(ContinuityRequest),
 }
@@ -295,6 +300,7 @@ impl InferenceExecutor for GpuExecutor {
             messages,
             max_tokens,
             enable_thinking,
+            ..
         } = request.operation
         else {
             bail!("physical continuity requires an external runtime session");
@@ -340,6 +346,8 @@ struct ExternalExecutor {
     session_id: String,
     request_sequence: u64,
     session_store: SessionStore,
+    active_conversation: Option<String>,
+    active_history_tokens: Vec<u32>,
 }
 
 impl ExternalExecutor {
@@ -375,6 +383,142 @@ impl ExternalExecutor {
             "external runtime {label} returned an unexpected session_id"
         );
         Ok(response)
+    }
+
+    fn reset_runtime(&mut self) -> Result<()> {
+        self.send("reset", IpcOperation::ResetSession, Value::Null)?;
+        self.active_conversation = None;
+        self.active_history_tokens.clear();
+        Ok(())
+    }
+
+    fn prepare_conversation(&mut self, conversation_id: &str, input: &[u32]) -> Result<()> {
+        ensure!(
+            !conversation_id.is_empty(),
+            "conversation_id must not be empty"
+        );
+        let active_prefix_matches = self.active_conversation.as_deref() == Some(conversation_id)
+            && !self.active_history_tokens.is_empty()
+            && input.starts_with(&self.active_history_tokens);
+        if active_prefix_matches {
+            return Ok(());
+        }
+
+        if self.active_conversation.is_some() {
+            self.reset_runtime()?;
+        }
+
+        let stored = self
+            .session_store
+            .latest(conversation_id)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if let Some(generation) = stored {
+            let history: Vec<u32> = serde_json::from_value(
+                generation
+                    .state
+                    .get("history_tokens")
+                    .cloned()
+                    .context("stored conversation snapshot has no history_tokens")?,
+            )?;
+            if input.starts_with(&history) {
+                let snapshot_bytes: Vec<u8> = serde_json::from_value(
+                    generation
+                        .state
+                        .get("snapshot_bytes")
+                        .cloned()
+                        .context("stored conversation snapshot has no bytes")?,
+                )?;
+                let receipt: RuntimeCacheReceipt = serde_json::from_value(
+                    generation
+                        .state
+                        .get("runtime_receipt")
+                        .cloned()
+                        .context("stored conversation snapshot has no receipt")?,
+                )?;
+                self.send(
+                    "restore",
+                    IpcOperation::RestoreKv,
+                    json!({
+                        "snapshot_bytes": snapshot_bytes,
+                        "receipt": receipt,
+                    }),
+                )?;
+                self.active_conversation = Some(conversation_id.to_owned());
+                self.active_history_tokens = history;
+            }
+        }
+        if self.active_conversation.is_none() {
+            self.active_conversation = Some(conversation_id.to_owned());
+        }
+        Ok(())
+    }
+
+    fn persist_snapshot(
+        &mut self,
+        conversation_id: &str,
+        input_tokens: &[u32],
+        output_tokens: &[u32],
+    ) -> Result<Vec<u32>> {
+        let response = self.send("snapshot", IpcOperation::SnapshotKv, Value::Null)?;
+        let snapshot_bytes: Vec<u8> = serde_json::from_value(
+            response
+                .payload
+                .get("snapshot_bytes")
+                .cloned()
+                .context("snapshot response has no bytes")?,
+        )?;
+        let runtime_receipt: RuntimeCacheReceipt = serde_json::from_value(
+            response
+                .payload
+                .get("receipt")
+                .cloned()
+                .context("snapshot response has no receipt")?,
+        )?;
+        let envelope: Value =
+            serde_json::from_slice(&snapshot_bytes).context("decode physical snapshot envelope")?;
+        let physical_tokens: Vec<u32> = serde_json::from_value(
+            envelope
+                .get("tokens")
+                .cloned()
+                .context("physical snapshot has no token history")?,
+        )?;
+
+        // The final generated token is represented by the returned logits but has
+        // not yet been appended to the physical KV. It becomes part of the
+        // physical prefix on the next turn when it is supplied as input.
+        let committed_output_len = output_tokens.len().saturating_sub(1);
+        let mut expected_physical = input_tokens.to_vec();
+        expected_physical.extend_from_slice(&output_tokens[..committed_output_len]);
+        ensure!(
+            physical_tokens == expected_physical,
+            "runtime snapshot token history diverges from generated physical prefix"
+        );
+
+        let previous = self
+            .session_store
+            .latest(conversation_id)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let generation = previous
+            .as_ref()
+            .map(|generation| generation.generation + 1)
+            .unwrap_or(0);
+        let model_digest = runtime_receipt.model_digest.clone();
+        let tokenizer_digest = runtime_receipt.tokenizer_digest.clone();
+        self.session_store
+            .prepare_and_commit(
+                conversation_id,
+                generation,
+                json!({
+                    "conversation_id": conversation_id,
+                    "history_tokens": physical_tokens,
+                    "snapshot_bytes": snapshot_bytes,
+                    "runtime_receipt": runtime_receipt,
+                    "model_digest": model_digest,
+                    "tokenizer_digest": tokenizer_digest,
+                }),
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        Ok(physical_tokens)
     }
 
     fn continuity_answer(payload: Value) -> GpuAnswer {
@@ -592,6 +736,7 @@ impl InferenceExecutor for ExternalExecutor {
                 messages,
                 max_tokens,
                 enable_thinking,
+                conversation_id,
             } => {
                 ensure!(
                     !cancel.load(std::sync::atomic::Ordering::Acquire),
@@ -602,8 +747,10 @@ impl InferenceExecutor for ExternalExecutor {
                     .tokenizer
                     .encode(text.as_str(), false)
                     .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+                let input_tokens = input.get_ids().to_vec();
+                self.prepare_conversation(&conversation_id, &input_tokens)?;
                 let generation_request = GenerationRequest {
-                    input_tokens: input.get_ids().to_vec(),
+                    input_tokens: input_tokens.clone(),
                     max_new_tokens: max_tokens,
                     temperature: None,
                     seed: None,
@@ -623,6 +770,13 @@ impl InferenceExecutor for ExternalExecutor {
                     .tokenizer
                     .decode(&generation.output_tokens, true)
                     .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
+                let physical_history = self.persist_snapshot(
+                    &conversation_id,
+                    &input_tokens,
+                    &generation.output_tokens,
+                )?;
+                self.active_conversation = Some(conversation_id);
+                self.active_history_tokens = physical_history;
                 let diagnostics = serde_json::to_value(&generation)?;
                 Ok(GpuAnswer {
                     text: output,
@@ -828,6 +982,10 @@ async fn chat(
     } else {
         validate(&request, &state.model_id)?
     };
+    let conversation_id = request
+        .conversation_id
+        .clone()
+        .unwrap_or_else(|| "default".to_owned());
     let operation = if let Some(continuity) = request.continuity.clone() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -842,6 +1000,7 @@ async fn chat(
             messages: request.messages,
             max_tokens,
             enable_thinking: request.enable_thinking,
+            conversation_id,
         }
     };
     let response = state
@@ -1137,6 +1296,7 @@ async fn main() -> Result<()> {
         let required = [
             Capability::Prefill,
             Capability::Decode,
+            Capability::ResetSession,
             Capability::SnapshotKv,
             Capability::RestoreKv,
         ];
@@ -1225,6 +1385,8 @@ async fn main() -> Result<()> {
                 session_id,
                 request_sequence: 0,
                 session_store,
+                active_conversation: None,
+                active_history_tokens: Vec::new(),
             }),
             4,
         )?;

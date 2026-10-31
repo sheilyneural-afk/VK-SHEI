@@ -90,6 +90,14 @@ impl RuntimeHost {
                     Vec::new(),
                 ))
             }
+            IpcOperation::ResetSession => {
+                self.session.reset_session()?;
+                Ok((
+                    Some(self.session_id.clone()),
+                    json!({"reset": true}),
+                    Vec::new(),
+                ))
+            }
             IpcOperation::SnapshotKv => {
                 let bytes = self.session.snapshot_kv()?;
                 let receipt = self.session.snapshot_receipt()?;

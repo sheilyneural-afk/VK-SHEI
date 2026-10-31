@@ -1,6 +1,10 @@
 //! Concrete accelerator implementation behind the universal adapter boundary.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, ensure};
 use kvslim_adapter_api::{AdapterCapabilities, ModelAdapter};
@@ -79,13 +83,25 @@ impl ModelAdapter for OpenClModelAdapter {
             .transpose()
             .context("kvslim_stage_tokens fuera de rango")?
             .unwrap_or(64);
-        let cold_directory = config
+        let cold_directory_root = config
             .get("kvslim_cold_directory")
             .or_else(|| config.get("kvslim_cold_dir"))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
+        let cold_directory = if let Some(root) = cold_directory_root {
+            fs::create_dir_all(&root).context("create canonical ColdStore root")?;
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("ColdStore clock")?
+                .as_nanos();
+            let active = root.join(format!("session-{}-{nonce}", std::process::id()));
+            fs::create_dir_all(&active).context("create active canonical ColdStore namespace")?;
+            Some(active)
+        } else {
+            None
+        };
         let physical_restore = cold_directory.is_some();
         let lod = CanonicalGpuLodConfig {
             epsilon,
@@ -178,43 +194,59 @@ impl ModelAdapter for OpenClModelAdapter {
     }
 
     fn prefill(&mut self, input: &[u32]) -> Result<Value> {
+        ensure!(!input.is_empty(), "accelerator prefill vacío");
         let runtime = self
             .runtime
             .as_mut()
-            .context("local accelerator adapter is not loaded")?;
-        ensure!(!input.is_empty(), "accelerator prefill vacío");
+            .context("local accelerator runtime is not loaded")?;
+
         if self.cached_prompt == input && runtime.position() >= input.len() {
-            return Ok(
-                json!({"tokens": input.len(), "position": runtime.position(), "mode": "verified-prefix-reuse", "reused_tokens": input.len()}),
-            );
-        }
-        if runtime.position() != 0 {
-            runtime.reset_session()?;
-        }
-        if runtime.position() == 0 {
-            let generation = runtime.generate(input, 1, true)?;
-            self.last_logits = generation.steps.last().and_then(|step| step.logits.clone());
-            self.cached_prompt = input.to_vec();
-            Ok(json!({
+            return Ok(json!({
                 "tokens": input.len(),
                 "position": runtime.position(),
-                "mode": "batched-causal",
-                "batch_tokens": generation.gpu_prefill_batch_tokens,
-                "prefill_seconds": generation.prefill_seconds,
-            }))
-        } else {
-            for (index, &token) in input.iter().enumerate() {
-                let step = runtime.forward_token(token, index + 1 == input.len())?;
-                if let Some(step) = step.logits {
-                    self.last_logits = Some(step);
+                "mode": "verified-prefix-reuse",
+                "reused_tokens": input.len(),
+            }));
+        }
+
+        if runtime.position() != 0
+            && runtime.position() == self.cached_prompt.len()
+            && input.starts_with(&self.cached_prompt)
+        {
+            let suffix = &input[self.cached_prompt.len()..];
+            let mut last_logits = None;
+            for (index, &token) in suffix.iter().enumerate() {
+                let step = runtime.forward_token(token, index + 1 == suffix.len())?;
+                if step.logits.is_some() {
+                    last_logits = step.logits;
                 }
             }
-            Ok(json!({
+            self.last_logits = last_logits;
+            self.cached_prompt = input.to_vec();
+            return Ok(json!({
                 "tokens": input.len(),
                 "position": runtime.position(),
-                "mode": "incremental-dense",
-            }))
+                "mode": "verified-shared-prefix",
+                "reused_tokens": input.len() - suffix.len(),
+            }));
         }
+
+        if runtime.position() != 0 {
+            runtime
+                .reset_session()
+                .context("reset accelerator causal session before unrelated prompt")?;
+        }
+        let (step, prefill_seconds) = runtime
+            .prefill_only(input, true, &std::sync::atomic::AtomicBool::new(false))
+            .context("prefill prompt without decoding")?;
+        self.last_logits = step.logits;
+        self.cached_prompt = input.to_vec();
+        Ok(json!({
+            "tokens": input.len(),
+            "position": runtime.position(),
+            "mode": "batched-causal-prefill-only",
+            "prefill_seconds": prefill_seconds,
+        }))
     }
 
     fn decode(&mut self, token_id: u32) -> Result<u32> {
@@ -224,7 +256,21 @@ impl ModelAdapter for OpenClModelAdapter {
             .context("local accelerator adapter is not loaded")?;
         let step = runtime.forward_token(token_id, true)?;
         self.last_logits = step.logits;
+        // The runtime appends the token supplied to forward_token; the returned
+        // argmax is only the prediction for the following position.
+        self.cached_prompt.push(token_id);
         Ok(step.argmax_token)
+    }
+
+    fn reset_session(&mut self) -> Result<()> {
+        self.runtime
+            .as_mut()
+            .context("local accelerator adapter is not loaded")?
+            .reset_session()
+            .context("reset accelerator causal session")?;
+        self.cached_prompt.clear();
+        self.last_logits = None;
+        Ok(())
     }
 
     fn last_logits(&self) -> Result<Option<Vec<f32>>> {
@@ -243,6 +289,7 @@ impl ModelAdapter for OpenClModelAdapter {
         serde_json::to_vec(&json!({
             "schema": "kvslim.runtime.physical-coldstore-snapshot/v1",
             "model_dir": self.model_dir,
+            "cold_directory": runtime.active_cold_directory(),
             "tokens": runtime.session_token_ids(),
             "authority": "canonical-bf16-coldstore",
         }))
@@ -289,13 +336,16 @@ impl ModelAdapter for OpenClModelAdapter {
                     .context("invalid token in physical OpenCL snapshot")
             })
             .collect::<Result<Vec<_>>>()?;
+        let cold_directory = envelope
+            .get("cold_directory")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .context("physical OpenCL snapshot missing ColdStore namespace")?;
         let runtime = self
             .runtime
             .as_mut()
             .context("OpenCL adapter is not loaded")?;
-        if runtime.position() != 0 {
-            runtime.reset_session()?;
-        }
+        runtime.reset_session_at(Some(cold_directory))?;
         if !tokens.is_empty() {
             let receipt = runtime.restore_canonical_session(&tokens)?;
             ensure!(
@@ -304,7 +354,7 @@ impl ModelAdapter for OpenClModelAdapter {
             );
         }
         self.last_logits = None;
-        self.cached_prompt.clear();
+        self.cached_prompt = tokens;
         Ok(())
     }
 }

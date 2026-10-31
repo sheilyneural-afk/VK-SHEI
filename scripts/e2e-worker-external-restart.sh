@@ -51,7 +51,7 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump({
         "schema": "kvslim.runtime.manifest/v1",
         "id": "real-runtime-provider",
-        "capabilities": ["prefill", "decode", "snapshot_kv", "restore_kv"],
+        "capabilities": ["prefill", "decode", "reset_session", "snapshot_kv", "restore_kv"],
         "priority": 100,
         "protocol": "kvslim.runtime.ipc/v1",
         "endpoint": endpoint,

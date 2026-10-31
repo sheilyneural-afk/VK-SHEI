@@ -33,10 +33,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs::{self, File},
-    path::Path,
+    path::{Path, PathBuf},
     ptr,
     sync::atomic::{AtomicBool, Ordering},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 mod prefill;
@@ -2715,19 +2715,49 @@ impl OpenClLlm {
     /// Reuse the loaded BF16 weights for an independent chat request.
     /// All new KV positions overwrite the previous session's prefix.
     /// A poisoned driver context is never silently reused.
+    pub fn active_cold_directory(&self) -> Option<PathBuf> {
+        self.lod
+            .as_ref()
+            .and_then(|lod| lod.config().cold_directory.clone())
+    }
+
+    /// Reset only the active causal session. The resident model weights survive.
+    /// A fresh physical ColdStore namespace prevents old conversation pages from
+    /// being reopened as if they belonged to the new conversation.
     pub fn reset_session(&mut self) -> Result<()> {
+        let next_directory = self.active_cold_directory().map(|current| {
+            let root = current.parent().unwrap_or(current.as_path());
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            root.join(format!("session-{}-{nonce}", std::process::id()))
+        });
+        self.reset_session_at(next_directory)
+    }
+
+    /// Reset into a specific ColdStore namespace. Restore uses this to reopen
+    /// the verified namespace belonging to the snapshot being restored.
+    pub fn reset_session_at(&mut self, cold_directory: Option<PathBuf>) -> Result<()> {
         ensure!(!self.poisoned, "GPU runtime poisoned; restart the worker");
         self.engine
             .queue
             .finish()
             .context("GPU previous-session barrier")?;
         if self.deferred_cold_active {
-            // Finalize cancelled/error turn before discarding any
-            // in-flight BF16 K/V. If sealing fails, reset fails closed.
             self.flush_deferred_cold()?;
         }
         if let Some(lod) = self.lod.as_ref() {
-            let config = lod.config().clone();
+            let mut config = lod.config().clone();
+            if let Some(directory) = cold_directory {
+                fs::create_dir_all(&directory).with_context(|| {
+                    format!(
+                        "create canonical ColdStore namespace {}",
+                        directory.display()
+                    )
+                })?;
+                config.cold_directory = Some(directory);
+            }
             let policy = lod.axis_policy().clone();
             self.lod = Some(CanonicalGpuLod::new_with_axis_policy(
                 self.spec.attention,
@@ -2738,6 +2768,7 @@ impl OpenClLlm {
         }
         self.position = 0;
         self.session_tokens.clear();
+        self.gpu_prompt_replay = None;
         if let Some(hot) = self.hot_values.as_mut() {
             hot.valid_prefix_tokens = 0;
             hot.attention_calls = 0;
@@ -2751,10 +2782,6 @@ impl OpenClLlm {
                 cache.reuse_hits = 0;
             }
         }
-        // The GPU model weights and the single verified BF16 snapshot
-        // deliberately survive an independent request reset. A cache
-        // HIT is still impossible until all original ColdStore pages
-        // and GPU BF16 K/V are restored from verified bytes.
         self.last_verified_prefix_reused_tokens = 0;
         self.last_verified_prefix_restored_bytes = 0;
         self.last_prompt_replay_hit = false;
@@ -3614,6 +3641,79 @@ impl OpenClLlm {
             self.session_tokens.push(token_id);
         }
         response
+    }
+
+    /// Prefill only: computes logits for the final prompt token without
+    /// generating or appending a first output token. The returned state
+    /// therefore represents exactly the prompt and nothing else.
+    pub fn prefill_only(
+        &mut self,
+        prompt_ids: &[u32],
+        capture_logits: bool,
+        cancel: &AtomicBool,
+    ) -> Result<(GpuStep, f64)> {
+        ensure!(!prompt_ids.is_empty(), "GPU prompt IDs empty");
+        ensure!(
+            prompt_ids.len() < self.max_tokens,
+            "GPU context capacity not large enough for prompt"
+        );
+        let started = Instant::now();
+        self.last_prompt_replay_hit = false;
+        self.last_verified_prefix_reused_tokens = 0;
+        self.last_verified_prefix_restored_bytes = 0;
+        self.last_prompt_replay_rehydrated_bytes = 0;
+        self.last_prompt_replay_sha_verified = false;
+        let restored = if self.gpu_prompt_replay_max_tokens > 0 {
+            let result = self.restore_verified_gpu_prompt_replay(prompt_ids, capture_logits);
+            if result.is_err() {
+                self.poisoned = true;
+            }
+            result?
+        } else {
+            None
+        };
+        let shared_prefix = if restored.is_none() && self.verified_prefix_replay_enabled {
+            let result = self.restore_verified_gpu_shared_prefix(prompt_ids);
+            if result.is_err() {
+                self.poisoned = true;
+            }
+            result?
+        } else {
+            0
+        };
+        let last = if let Some(step) = restored {
+            self.session_tokens.clear();
+            self.session_tokens.extend_from_slice(prompt_ids);
+            step
+        } else if let Some(batch_size) = self.batch_prefill_tokens {
+            let result = self.prefill_batched(
+                prompt_ids,
+                shared_prefix,
+                batch_size,
+                capture_logits,
+                cancel,
+            );
+            if result.is_err() {
+                self.poisoned = true;
+            }
+            let step = result?;
+            self.session_tokens.clear();
+            self.session_tokens.extend_from_slice(prompt_ids);
+            step
+        } else {
+            let mut last = None;
+            for (index, &id) in prompt_ids.iter().enumerate() {
+                ensure!(!cancel.load(Ordering::Relaxed), "GPU prefill cancelled");
+                last = self.forward_token_internal(
+                    id,
+                    capture_logits && index + 1 == prompt_ids.len(),
+                    index + 1 == prompt_ids.len(),
+                )?;
+            }
+            last.context("no GPU prompt logits")?
+        };
+        self.deferred_cold_active = false;
+        Ok((last, started.elapsed().as_secs_f64()))
     }
 
     pub fn generate(
