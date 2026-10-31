@@ -1776,7 +1776,7 @@ impl OpenClLlm {
             spec.storage_format == Some(crate::portable::FloatFormat::Bf16),
             "GPU LLM currently supports BF16 model weights only"
         );
-        let config_text = std::fs::read_to_string(model_dir.as_ref().join("config.json"))?;
+        let config_text = std::fs::read_to_string(model_dir.join("config.json"))?;
         let config: serde_json::Value = serde_json::from_str(&config_text)?;
         if config
             .get("rope_scaling")
