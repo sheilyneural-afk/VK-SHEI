@@ -90,9 +90,17 @@ impl ModelAdapter for OpenClModelAdapter {
             stage_tokens,
             cold_directory,
         };
-        let mut runtime =
-            OpenClLlm::load_with_canonical_lod(model_dir, max_tokens, WeightMode::Resident, lod)
-                .context("load exact canonical accelerator model adapter")?;
+        let mode = match config
+            .get("kvslim_weight_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("stream")
+        {
+            "resident" => WeightMode::Resident,
+            "stream" => WeightMode::Stream,
+            other => anyhow::bail!("unsupported kvslim_weight_mode: {other}"),
+        };
+        let mut runtime = OpenClLlm::load_with_canonical_lod(model_dir, max_tokens, mode, lod)
+            .context("load exact canonical accelerator model adapter")?;
         let prefill_batch = config
             .get("kvslim_prefill_batch_tokens")
             .and_then(Value::as_u64)
@@ -116,7 +124,11 @@ impl ModelAdapter for OpenClModelAdapter {
             .map(usize::try_from)
             .transpose()
             .context("kvslim_prompt_replay_tokens fuera de rango")?
-            .unwrap_or(hot_tokens)
+            .unwrap_or(if mode == WeightMode::Resident {
+                hot_tokens
+            } else {
+                0
+            })
             .min(hot_tokens);
         runtime.set_verified_gpu_prompt_replay(replay_tokens)?;
         let shared_prefix = config
@@ -129,7 +141,7 @@ impl ModelAdapter for OpenClModelAdapter {
             config
                 .get("kvslim_deferred_cold_commit")
                 .and_then(Value::as_bool)
-                .unwrap_or(true),
+                .unwrap_or(mode == WeightMode::Resident),
         )?;
         runtime.set_exact_hot_fused_attention(
             config

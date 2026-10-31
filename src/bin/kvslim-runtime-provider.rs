@@ -27,6 +27,8 @@ fn load(model: &std::path::Path) -> Result<Box<dyn RuntimeSession>> {
             .context("model context missing")?;
         config["max_context_tokens"] = max.into();
     }
+    // Stream weights by default: do not upload the complete 15 GB bundle at startup.
+    config["kvslim_weight_mode"] = Value::String("stream".into());
     let mut adapter = OpenClModelAdapter::default();
     adapter.load(model, &config)?;
     let identity = ModelIdentity {

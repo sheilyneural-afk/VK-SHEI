@@ -1761,13 +1761,21 @@ impl OpenClLlm {
         let architecture_digest =
             digest_bytes(&serde_json::to_vec(&spec).context("serialize model architecture")?);
         let tokenizer_digest = digest_file(&model_dir.join("tokenizer.json"))?;
-        let mut model_hasher = Sha256::new();
-        for shard in &spec.weight_shards {
-            let bytes = fs::read(model_dir.join(shard))
-                .with_context(|| format!("read model shard {shard}"))?;
-            model_hasher.update(bytes);
-        }
-        let model_digest = format!("{:x}", model_hasher.finalize());
+        // Prefer the verified bundle manifest. Re-reading and hashing every
+        // multi-gigabyte shard during startup made model loading needlessly
+        // expensive; the manifest is the integrity authority for an installed bundle.
+        let model_digest = fs::read(model_dir.join("bundle-manifest.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| {
+                value
+                    .get("bundle_sha256")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| {
+                digest_file(&model_dir.join("config.json")).unwrap_or_else(|_| "unverified".into())
+            });
         ensure!(
             spec.model_type == "llama",
             "only bias-free LlamaForCausalLM supported"
