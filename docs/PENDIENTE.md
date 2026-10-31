@@ -5,13 +5,10 @@ resuelto en el árbol actual.
 
 ## Partir los archivos gigantes
 
-`src/gpu_llm/mod.rs` (unas 5.200 líneas) y `src/torch_runtime/kv_cache.rs`
-(unas 4.700) concentran gran parte del código y del `unsafe`. Partirlos por
-responsabilidades facilitaría la revisión.
-
-Motivo del aplazamiento: `gpu_llm/mod.rs` tiene cambios sin commit de otra
-sesión de trabajo, y una refactorización chocaría con ellos. Hacerlo cuando ese
-archivo esté confirmado y sin cambios pendientes.
+`src/gpu_llm/mod.rs` (unas 5.400 líneas) y `src/torch_runtime/kv_cache.rs`
+(unas 4.700) siguen concentrando gran parte del código y del `unsafe`.
+`gpu_llm` ya se separó parcialmente en `prefill.rs` y `gpu_resources.rs`;
+queda partir el resto por responsabilidades para facilitar la revisión.
 
 ## Elegir el camino único hasta producción
 
@@ -22,9 +19,10 @@ que el primero esté cerrado.
 
 ## Proteger `main` con pull requests obligatorios
 
-Es una configuración del repositorio en GitHub, no de código. Debe exigir que
-pase el job `core` del CI (que ejecuta `scripts/check.sh`) antes de fusionar.
-Hasta entonces, el hook local `scripts/install-hooks.sh` es la única barrera.
+`main` ya rechaza empujes directos: los cambios entran por pull request. Falta
+confirmar en la configuración de GitHub que se exige el job `core` del CI (que
+ejecuta `scripts/check.sh`) antes de fusionar. El hook local
+`scripts/install-hooks.sh` sigue siendo una barrera adicional.
 
 ## Canal de sinónimos en la recuperación documental
 
