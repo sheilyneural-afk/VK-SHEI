@@ -1,0 +1,61 @@
+name: Trabajo técnico verificable
+description: Proponga un defecto, deuda, mejora o decisión con condiciones observables de cierre.
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describa hechos comprobables. La presencia de código, un manifest o una prueba focal no demuestra por sí sola comportamiento productivo.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Tipo de trabajo
+      options:
+        - Defecto confirmado
+        - Deuda técnica
+        - Mejora
+        - Decisión de producto o arquitectura
+        - Operación de producción
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema o decisión
+      description: Explique el comportamiento actual, el contrato esperado y el impacto.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidencia y reproducción
+      description: Incluya entrypoint, configuración efectiva, comandos, recibos o rutas relevantes.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Alcance y exclusiones
+      description: Enumere qué debe cambiar y qué debe conservarse.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Condiciones observables de aceptación
+      description: Use una lista de comprobaciones que permitan cerrar el issue sin interpretación subjetiva.
+      placeholder: |
+        - [ ] La reproducción original deja de fallar por la causa correcta.
+        - [ ] Existe una prueba de regresión.
+        - [ ] Los gates aplicables pasan.
+        - [ ] Se verificó el comportamiento real o se documentó lo no medido.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Riesgos, persistencia y compatibilidad
+      description: Indique contratos, consumidores, migraciones, concurrencia, reinicio o rollback afectados.
+    validations:
+      required: true

@@ -922,7 +922,7 @@ fn digest_serializable(value: &impl Serialize) -> CalibrationResult<String> {
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// A pending marker is a denial of production activation, not an authorization.

@@ -1,54 +1,17 @@
 {
   "schema": "mslim.dependency_advisory_baseline/v1",
   "captured_from": {
-    "source_commit": "e6ec873ba5e8663801f8f22ee880a6446d7b53df",
-    "cargo_lock_sha256": "db93ced29a314becbbbfa3ef08f0c15dbbdfea1cdaef0ac9af54529518d85f57",
+    "source_commit": "e0f0ded4767079b8fbe7f7fb17e5a43e8f40a0d0",
+    "cargo_lock_sha256": "64902acdf4c2c7cee7f4fc0228ad58fb12ee4e0dc70f6df8b8bb7df7addde738",
     "cargo_audit_version": "0.22.2",
     "advisory_database_commit": "2295466c4e9df26647fd67d8fa1c705ac2fc7f81",
     "advisory_database_updated_at": "2026-10-30T12:12:39+01:00",
-    "captured_at": "2026-11-01T21:28:23+01:00"
+    "captured_at": "2026-11-01T23:28:21+01:00"
   },
   "policy": {
     "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34",
     "delta_gate": "Fail on an unregistered advisory, package/version/kind drift, or a Cargo.lock digest that no longer matches this review.",
     "known_findings": "A registered finding remains an observed risk signal; registration is not acceptance, dismissal, or proof of non-exploitability. Its disposition records source remediation that may still await an upstream rescan."
   },
-  "known_advisories": [
-    {
-      "source": "dependabot",
-      "id": "GHSA-8hxf-qr8p-62x4",
-      "kind": "vulnerability",
-      "package": "zip",
-      "version": "0.6.6",
-      "dependency_path": "Dependabot alert for prior lock: mslim -> tch 0.18.1 -> zip 0.6.6; source e6ec873 pins zip 9.0.5",
-      "feature_surface": "stale GitHub alert for the optional torch-backend graph",
-      "reachability": "Source e6ec873 removes zip 0.6.6 from Cargo.lock; the alert was still open in GitHub while its dependency graph awaited rescan.",
-      "disposition": "source-remediated-awaiting-dependabot-rescan",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/32"
-    },
-    {
-      "source": "dependabot",
-      "id": "GHSA-m665-v7pm-7grj",
-      "kind": "vulnerability",
-      "package": "zip",
-      "version": "0.6.6",
-      "dependency_path": "Dependabot alert for prior lock: mslim -> tch 0.18.1 -> zip 0.6.6; source e6ec873 pins zip 9.0.5",
-      "feature_surface": "stale GitHub alert for the optional torch-backend graph",
-      "reachability": "Source e6ec873 removes zip 0.6.6 from Cargo.lock; the alert was still open in GitHub while its dependency graph awaited rescan.",
-      "disposition": "source-remediated-awaiting-dependabot-rescan",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/32"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2024-0436",
-      "kind": "unmaintained",
-      "package": "paste",
-      "version": "1.0.15",
-      "dependency_path": "mslim -> tokenizers 0.22.2 -> paste 1.0.15",
-      "feature_surface": "model-bundle; default native-cpu-backend build",
-      "reachability": "Compile-time procedural macro dependency; this is a maintenance warning, not a reported runtime vulnerability.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    }
-  ]
+  "known_advisories": []
 }

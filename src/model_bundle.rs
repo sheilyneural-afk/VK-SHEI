@@ -179,12 +179,12 @@ impl ModelBundle {
             for name in tensors.names() {
                 let tensor = tensors.tensor(name)?;
                 ensure!(
-                    tensor_names.insert(name.clone()),
+                    tensor_names.insert(name.to_owned()),
                     "tensor duplicado entre shards: {name}"
                 );
-                tensor_shapes.insert(name.clone(), tensor.shape().to_vec());
-                tensor_dtypes.insert(name.clone(), format!("{:?}", tensor.dtype()));
-                tensor_payload_bytes.insert(name.clone(), tensor.data().len());
+                tensor_shapes.insert(name.to_owned(), tensor.shape().to_vec());
+                tensor_dtypes.insert(name.to_owned(), format!("{:?}", tensor.dtype()));
+                tensor_payload_bytes.insert(name.to_owned(), tensor.data().len());
             }
         }
         ensure!(!tensor_names.is_empty(), "el bundle no contiene tensores");

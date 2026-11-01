@@ -11,6 +11,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdapterCapabilities {
     pub adapter_id: String,
@@ -347,9 +354,7 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
 
     fn snapshot_receipt(&mut self) -> Result<RuntimeCacheReceipt> {
         let snapshot = self.adapter.snapshot_kv()?;
-        let mut hasher = Sha256::new();
-        hasher.update(snapshot);
-        let prefix_digest = format!("{:x}", hasher.finalize());
+        let prefix_digest = sha256_hex(&snapshot);
         Ok(RuntimeCacheReceipt {
             project: "KV-SHEI".to_owned(),
             product: "M-SLIM".to_owned(),
@@ -394,10 +399,8 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
             receipt.architecture_digest == self.identity.architecture_digest,
             "architecture identity mismatch"
         );
-        let mut hasher = Sha256::new();
-        hasher.update(snapshot);
         anyhow::ensure!(
-            format!("{:x}", hasher.finalize()) == receipt.prefix_digest,
+            sha256_hex(snapshot) == receipt.prefix_digest,
             "cache receipt digest mismatch"
         );
         self.adapter.restore_kv(snapshot)?;
@@ -445,6 +448,14 @@ pub trait RuntimeSession: Send {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn sha256_hex_is_stable_across_digest_output_types() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     struct Scripted {
         caps: AdapterCapabilities,

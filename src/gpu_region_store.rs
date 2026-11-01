@@ -367,7 +367,7 @@ impl GpuRegionStore {
                 }
             }
         }
-        Ok(format!("{:x}", hash.finalize()))
+        Ok(hex::encode(hash.finalize()))
     }
 
     /// Single-token decode uses the exact same canonical ColdStore page

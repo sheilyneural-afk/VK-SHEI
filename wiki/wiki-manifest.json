@@ -27,8 +27,10 @@
     "_Footer.md"
   ],
   "editorial_replacements": {
-    "actions/checkout@v5": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
-    "checkout@v5": "checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+    "actions/checkout@v5": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "checkout@v5": "checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "checkout@d23441a48e516b6c34aea4fa41551a30e30af803": "checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
   },
   "historical_identifiers": [
     "OpenClLlm",

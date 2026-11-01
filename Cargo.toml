@@ -12,9 +12,9 @@ resolver = "3"
 # Security-maintained fork of tch 0.18.1. The immutable revision upgrades both
 # tch and torch-sys from vulnerable zip 0.6.6 to zip 9.0.5.
 tch = { git = "https://github.com/sheilyneural-afk/KV-SHEI-tch-rs.git", rev = "acaf9df5a07a3146da30ce74eebcf9aebd333692" }
-# Security-maintained fork of tokenizers 0.23.2. The immutable revision
+# Security-maintained fork of tokenizers 0.22.2. The immutable revision
 # replaces the unmaintained paste procedural macro with pastey.
-tokenizers = { git = "https://github.com/sheilyneural-afk/KV-SHEI-tokenizers.git", rev = "05eb9baaf444654b77d4a41a15cdbe86f2ffd459" }
+tokenizers = { git = "https://github.com/sheilyneural-afk/KV-SHEI-tokenizador-rust.git", rev = "05eb9baaf444654b77d4a41a15cdbe86f2ffd459" }
 
 [lib]
 name = "mslim"
@@ -192,8 +192,8 @@ memmap2 = "0.9"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-sha2 = "0.10"
-safetensors = { version = "0.3.3", optional = true }
+sha2 = "0.11"
+safetensors = { version = "0.8.0", optional = true }
 tokenizers = { version = "0.22", optional = true }
 minijinja = { version = "2", optional = true }
 tempfile = "3"
@@ -201,7 +201,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 mslim-adapter-api = { path = "crates/mslim-adapter-api" }
 tch = { version = "0.18", optional = true }
 opencl3 = { version = "0.12.4", optional = true }
-libloading = {version = "0.8.9", optional = true}
+libloading = {version = "0.9.0", optional = true}
 reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
 hex = "0.4"
 
