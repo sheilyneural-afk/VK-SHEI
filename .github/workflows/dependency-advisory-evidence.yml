@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   advisory-delta:
-    name: Advisory delta (known findings remain open)
+    name: Advisory delta
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the analyzed source
