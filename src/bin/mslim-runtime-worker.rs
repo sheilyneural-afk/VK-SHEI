@@ -1041,6 +1041,7 @@ struct AppState {
     gpu_device: String,
     load_seconds: f64,
     max_context_tokens: usize,
+    model_declared_context_tokens: Option<usize>,
     weight_mode: &'static str,
     lod_epsilon: Option<f64>,
     lod_stage: Option<usize>,
@@ -1270,6 +1271,9 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
             "exact-device-kv-with-cold-store-authority"
         } else {"dense-device-kv"},
         "max_context_tokens":state.max_context_tokens,
+        "model_declared_context_tokens":state.model_declared_context_tokens,
+        "configured_context_exceeds_model_declaration":state.model_declared_context_tokens
+            .is_some_and(|declared| state.max_context_tokens > declared),
         "no_libtorch":true,
         "exact_dense_logits_parity_proven":exact_dense_logits_parity_proven,
         "validation_matrix":validation
@@ -1370,8 +1374,12 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "validation_matrix":validation,
         "runtime_backend":backend,
         "max_context_tokens":state.max_context_tokens,
+        "model_declared_context_tokens":state.model_declared_context_tokens,
+        "configured_context_exceeds_model_declaration":state.model_declared_context_tokens
+            .is_some_and(|declared| state.max_context_tokens > declared),
         "max_output_tokens":Value::Null,
         "output_limit":"prompt tokens plus requested output must fit within max_context_tokens",
+        "context_policy":"continuity, exact K/V snapshots and ColdStore extend session lifetime and avoid keeping all K/V hot; they do not make one causal model inference unbounded",
         "API":{"OpenAI_compatible_subset":true,"stream":false,
                "tools":false,"sampling":false,"temperature":0}
     }))
@@ -1736,6 +1744,8 @@ async fn main() -> Result<()> {
         "--prefill-profile is supported by the local accelerator only; external runtimes must not silently ignore it"
     );
     let chat_template = validate_model_bundle(&model)?;
+    let model_spec = ModelSpec::inspect(&model)?;
+    let model_declared_context_tokens = model_spec.declared_context_limit();
     let model_id = model
         .file_name()
         .and_then(|value| value.to_str())
@@ -1833,7 +1843,7 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("open SessionStore: {e}"))?;
         let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
-        let stop_tokens = ModelSpec::inspect(&model)?.eos_token_ids;
+        let stop_tokens = model_spec.eos_token_ids.clone();
         let worker = InferenceWorker::spawn(
             RuntimeExecutor::External(Box::new(ExternalExecutor {
                 client,
@@ -1985,6 +1995,7 @@ async fn main() -> Result<()> {
         gpu_device,
         load_seconds,
         max_context_tokens: max_context,
+        model_declared_context_tokens,
         weight_mode: weight_mode_label,
         lod_epsilon,
         lod_stage,
@@ -2357,7 +2368,8 @@ mod tests {
         assert!(!CHAT_HTML.contains("stream: true"));
         assert!(!CHAT_HTML.contains("max=\"512\""));
         assert!(!CHAT_HTML.contains("1–512"));
-        assert!(CHAT_HTML.contains("no limita la longitud total"));
+        assert!(CHAT_HTML.contains("La memoria de sesión puede continuar"));
+        assert!(CHAT_HTML.contains("cada inferencia debe caber en la ventana activa"));
     }
 
     #[test]
