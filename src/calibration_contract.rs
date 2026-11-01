@@ -226,6 +226,11 @@ pub fn validate_calibration_receipt(receipt: &Value, expected_bundle: &str) -> R
             .is_some_and(is_sha256),
         "calibration identity digest is invalid"
     );
+    ensure!(
+        receipt.get("implementation_digest").and_then(Value::as_str)
+            == Some(crate::calibration_profile::implementation_digest()),
+        "calibration receipt belongs to another runtime implementation"
+    );
     let adapter = receipt
         .get("adapter")
         .and_then(Value::as_str)
@@ -414,8 +419,9 @@ pub fn validate_calibration_receipt(receipt: &Value, expected_bundle: &str) -> R
     // first so malformed evidence is diagnosed (and unit-tested) precisely
     // even while the developer tree used to compile tests is dirty.
     ensure!(
-        crate::build_info::is_current_clean_source_revision(receipt.get("source_revision")),
-        "calibration receipt belongs to another or dirty source revision"
+        crate::build_info::current_build_is_clean()
+            && crate::build_info::is_clean_source_revision(receipt.get("source_revision")),
+        "calibration receipt or current runtime comes from a dirty source revision"
     );
     Ok(())
 }
@@ -533,6 +539,7 @@ mod tests {
             },
             "adapter": "accelerator-runtime",
             "identity_digest": "b".repeat(64),
+            "implementation_digest": crate::calibration_profile::implementation_digest(),
             "calibration_environment": {
                 "schema": CALIBRATION_ENVIRONMENT_SCHEMA,
                 "backend": "accelerator-runtime",
@@ -608,7 +615,12 @@ mod tests {
         assert!(validate_calibration_receipt(&value, &bundle).is_err());
         value["source_revision"]["tracked_files_modified_at_build"] = json!(false);
         value["source_revision"]["commit"] = json!("0".repeat(40));
+        if crate::build_info::current_build_is_clean() {
+            assert!(validate_calibration_receipt(&value, &bundle).is_ok());
+        }
+        value["implementation_digest"] = Value::Null;
         assert!(validate_calibration_receipt(&value, &bundle).is_err());
+        value["implementation_digest"] = json!(crate::calibration_profile::implementation_digest());
         value["source_revision"]["commit"] = json!(crate::build_info::SOURCE_COMMIT);
         value["context_samples"] = json!([]);
         assert!(validate_calibration_receipt(&value, &bundle).is_err());

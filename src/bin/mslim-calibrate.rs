@@ -26,6 +26,7 @@ struct SustainedCalibrationReceipt {
     technical_namespace: &'static str,
     schema: &'static str,
     source_revision: Value,
+    implementation_digest: &'static str,
     bundle: String,
     adapter: String,
     identity_digest: String,
@@ -199,7 +200,7 @@ fn main() -> Result<()> {
             Value::String("temporary-calibration-namespace".into());
     }
     let identity_input = serde_json::json!({
-        "source_revision": mslim::build_info::source_revision(),
+        "implementation_digest": mslim::calibration_profile::implementation_digest(),
         "model_digest": digest,
         "config": identity_config,
         "adapter": selection,
@@ -320,6 +321,7 @@ fn main() -> Result<()> {
         technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE,
         schema: CALIBRATION_RECEIPT_SCHEMA,
         source_revision: mslim::build_info::source_revision(),
+        implementation_digest: mslim::calibration_profile::implementation_digest(),
         bundle: digest.to_owned(),
         adapter: selection.adapter_id,
         identity_digest,
@@ -462,8 +464,11 @@ fn require_passing_validation_matrix_if_accelerated(
         "la matriz de validación pertenece a otro bundle"
     );
     ensure!(
-        mslim::build_info::is_current_clean_source_revision(receipt.get("source_revision")),
-        "la matriz de validación pertenece a otra revisión o a un build sucio"
+        mslim::build_info::current_build_is_clean()
+            && mslim::build_info::is_clean_source_revision(receipt.get("source_revision"))
+            && receipt.get("implementation_digest").and_then(Value::as_str)
+                == Some(mslim::calibration_profile::implementation_digest()),
+        "la matriz de validación pertenece a otra implementación o a un build sucio"
     );
     ensure!(
         receipt.get("calibration_environment") == Some(expected_environment),
@@ -777,6 +782,7 @@ mod tests {
                 "commit": mslim::build_info::SOURCE_COMMIT,
                 "tracked_files_modified_at_build": false
             },
+            "implementation_digest": mslim::calibration_profile::implementation_digest(),
             "bundle_sha256": digest,
             "calibration_environment": environment,
             "determinism": {"all_passed": true},
