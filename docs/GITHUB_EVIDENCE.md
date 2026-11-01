@@ -63,8 +63,8 @@ no coincide con el hash revisado. Un gate verde significa **sin deriva nueva**;
 no significa “sin vulnerabilidades”. Los hallazgos conocidos continúan
 figurando como `known_findings_open` hasta desaparecer de las fuentes.
 
-La revisión del commit `8648ff2` descompone los 15 identificadores agregados
-por Scorecard de esta forma:
+La revisión inicial del commit `8648ff2` descompuso los 15 identificadores
+agregados por Scorecard de esta forma:
 
 | Grupo | Cantidad | Cadena / superficie | Alcanzabilidad observada | Estado |
 |---|---:|---|---|---|
@@ -72,6 +72,15 @@ por Scorecard de esta forma:
 | `zip` / GHSA | 2 | Misma cadena opcional | No se encontró extracción streaming ni lectura AES con contraseña; esto reduce la alcanzabilidad observada, no corrige el paquete | Riesgo transitivo abierto; #32 |
 | `zstd-safe` | 9 | `tch → zip → zstd 0.11.2 → zstd-safe 5.0.2`; `torch-backend` | `zip` activa Zstandard, pero las funciones de bajo nivel señaladas no aparecen en la ruta observada; `RUSTSEC-2026-0403` afecta el decoder de escritura y `zip` usa decoder de lectura / encoder de escritura | Riesgo transitivo abierto; #34 |
 | `paste` sin mantenimiento | 1 | `tokenizers 0.22.2 → paste 1.0.15`; `model-bundle`, incluido el build por defecto | Macro de procedimiento usada al compilar; el aviso es de mantenimiento, no una vulnerabilidad runtime declarada | Sustitución pendiente; #34 |
+
+El commit `e6ec873` sustituyó la cadena opcional por un fork de `tch` fijado a
+SHA que usa `zip 9.0.5`. Sobre su `Cargo.lock`, `cargo audit 0.22.2` observa
+cero vulnerabilidades y solo el aviso de mantenimiento de `paste`. La API de
+Dependabot aún devolvía las dos alertas de `zip 0.6.6` durante la revisión, por
+lo que permanecen registradas con la disposición
+`source-remediated-awaiting-dependabot-rescan` hasta que GitHub recalcule el
+grafo. Esto distingue la fuente remediada del estado todavía visible en el
+servicio, en vez de declarar prematuramente que las alertas ya están cerradas.
 
 La clasificación “no se encontró una llamada” está limitada a la fuente y a
 las dependencias inspeccionadas en esa revisión. No equivale a una prueba
