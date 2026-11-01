@@ -191,7 +191,7 @@ minijinja = { version = "2", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"], optional = true }
 mslim-adapter-api = { path = "crates/mslim-adapter-api" }
-tch = { version = "0.18", optional = true }
+tch = { version = "0.26", optional = true }
 opencl3 = { version = "0.12.4", optional = true }
 libloading = {version = "0.8.9", optional = true}
 reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }

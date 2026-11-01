@@ -1175,14 +1175,16 @@ dependencies = [
 
 [[package]]
 name = "ndarray"
-version = "0.15.6"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adb12d4e967ec485a5f71c6311fe28158e9d6f4bc4a447b474184d0f91a8fa32"
+checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
 dependencies = [
  "matrixmultiply",
  "num-complex",
  "num-integer",
  "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
  "rawpointer",
 ]
 
@@ -1334,6 +1336,15 @@ name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "potential_utf"
@@ -1938,9 +1949,9 @@ dependencies = [
 
 [[package]]
 name = "tch"
-version = "0.18.1"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb3500c87ef72447c23b33ed6f15fac45a616b09bcac53e62e0e4386bddb3b9d"
+checksum = "975b1fb3b612ba925f03dd08b56e5c9452bb7102891d5d9f58c19b49a0b2ec1e"
 dependencies = [
  "half",
  "lazy_static",
@@ -2114,9 +2125,9 @@ dependencies = [
 
 [[package]]
 name = "torch-sys"
-version = "0.18.1"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61b87ed41261d4278060c3ba3e735c224687cf312403e4565f2ca75310279d73"
+checksum = "5ae60ab95333c42adcc1a9e74057357e4324a1f344c403e48712a144ab731019"
 dependencies = [
  "anyhow",
  "cc",
