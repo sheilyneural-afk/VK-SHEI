@@ -675,7 +675,7 @@ impl GpuEngine {
         // Reuse or grow the cached device buffer. Growing invalidates the old
         // buffer (it is dropped), and the new one is stored for later calls.
         let mut cache = self.micro_indices_cache.borrow_mut();
-        let needs_realloc = cache.as_ref().map_or(true, |(_, cap)| *cap < ids.len());
+        let needs_realloc = cache.as_ref().is_none_or(|(_, cap)| *cap < ids.len());
         if needs_realloc {
             let cap = ids.len().max(64);
             *cache = Some((self.alloc_indices(cap)?, cap));
