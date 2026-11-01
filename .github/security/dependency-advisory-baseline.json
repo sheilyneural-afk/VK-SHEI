@@ -1,12 +1,12 @@
 {
   "schema": "mslim.dependency_advisory_baseline/v1",
   "captured_from": {
-    "source_commit": "b1569fe1ef42724ff86275698c971e5c358562e1",
-    "cargo_lock_sha256": "05393564bdfb11c0d3ba6eef524d46dcf741e8a4ec68a943349f035b21def79f",
+    "source_commit": "e0f0ded4767079b8fbe7f7fb17e5a43e8f40a0d0",
+    "cargo_lock_sha256": "64902acdf4c2c7cee7f4fc0228ad58fb12ee4e0dc70f6df8b8bb7df7addde738",
     "cargo_audit_version": "0.22.2",
     "advisory_database_commit": "2295466c4e9df26647fd67d8fa1c705ac2fc7f81",
     "advisory_database_updated_at": "2026-10-30T12:12:39+01:00",
-    "captured_at": "2026-11-01T22:42:27+01:00"
+    "captured_at": "2026-11-01T23:28:21+01:00"
   },
   "policy": {
     "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34",
