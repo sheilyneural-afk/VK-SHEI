@@ -18,6 +18,8 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
+      - name: Create project-local temporary directory
+        run: mkdir -p deploy/local-production/runtime/tmp
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --lib
       - run: cargo test --locked --bin mslim-calibrate
