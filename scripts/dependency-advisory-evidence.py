@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
-import tempfile
 from typing import Any
+
+from evidence_io import atomic_json_write, file_sha256
 
 
 BASELINE_SCHEMA = "mslim.dependency_advisory_baseline/v1"
@@ -30,27 +30,6 @@ EVIDENCE_SCHEMA = "mslim.dependency_advisory_evidence/v1"
 
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def atomic_json_write(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = json.dumps(value, indent=2, sort_keys=True) + "\n"
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=path.parent, delete=False
-    ) as temporary:
-        temporary.write(rendered)
-        temporary.flush()
-        os.fsync(temporary.fileno())
-        temporary_path = Path(temporary.name)
-    temporary_path.replace(path)
 
 
 def command_output(command: list[str], root: Path) -> str | None:
@@ -303,7 +282,7 @@ def build(arguments: argparse.Namespace) -> int:
 
     detected = cargo_findings(cargo_document) + dependabot_findings(dependabot_document)
     comparison = compare(detected, baseline)
-    lockfile_sha = sha256(lockfile_path)
+    lockfile_sha = file_sha256(lockfile_path)
     expected_lockfile_sha = baseline["captured_from"]["cargo_lock_sha256"]
     lockfile_matches = lockfile_sha == expected_lockfile_sha
     delta_passed = (
@@ -328,16 +307,16 @@ def build(arguments: argparse.Namespace) -> int:
         "inputs": {
             "baseline": {
                 "path": baseline_path.relative_to(root).as_posix(),
-                "sha256": sha256(baseline_path),
+                "sha256": file_sha256(baseline_path),
             },
             "cargo_audit": {
                 "path": cargo_path.name,
-                "sha256": sha256(cargo_path),
+                "sha256": file_sha256(cargo_path),
                 "database": cargo_document.get("database"),
             },
             "dependabot": {
                 "path": dependabot_path.name,
-                "sha256": sha256(dependabot_path),
+                "sha256": file_sha256(dependabot_path),
             },
             "cargo_lock": {
                 "path": lockfile_path.relative_to(root).as_posix(),

@@ -9,6 +9,7 @@ on:
       - .github/security/dependency-advisory-baseline.json
       - .github/workflows/dependency-advisory-evidence.yml
       - scripts/dependency-advisory-evidence.py
+      - scripts/evidence_io.py
   schedule:
     - cron: "41 4 * * 4"
   workflow_dispatch:
