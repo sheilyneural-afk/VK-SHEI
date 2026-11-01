@@ -8,6 +8,11 @@ autobins = false
 members = ["crates/mslim-adapter-api"]
 resolver = "3"
 
+[patch.crates-io]
+# Security-maintained fork of tch 0.18.1. The immutable revision upgrades both
+# tch and torch-sys from vulnerable zip 0.6.6 to zip 9.0.5.
+tch = { git = "https://github.com/sheilyneural-afk/KV-SHEI-tch-rs.git", rev = "acaf9df5a07a3146da30ce74eebcf9aebd333692" }
+
 [lib]
 name = "mslim"
 path = "src/lib.rs"
