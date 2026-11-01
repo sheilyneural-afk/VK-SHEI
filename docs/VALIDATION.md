@@ -118,6 +118,9 @@ comprobar la ruta densa frente a la exacta dentro del mismo backend.
 - las dos comparaciones same-backend exactas;
 - snapshot físico válido en la ruta GPU exacta.
 
+Si falta cualquiera de las tres condiciones, el recibo registra
+`status = failed` y `activation = blocked-by-same-backend-or-integrity-gate`.
+
 `activation = eligible-for-reviewed-activation` no arranca servicios, no instala
 binarios y no aprueba otra configuración. Indica únicamente que la ejecución
 incluida en el recibo superó esos gates.

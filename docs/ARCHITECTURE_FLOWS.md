@@ -10,7 +10,7 @@ son locales, mutables e ignorados por Git.
 ```mermaid
 flowchart LR
     S[Árbol fuente limpio] -->|build.rs| B[Binarios]
-    S -->|source_revision + build_input_digest| M[Manifest de release v2]
+    S -->|source_revision + build_input_digest| M[Manifest de release v3]
     B --> M
     M -->|verify-release.sh| V{Release íntegra}
     V -->|no| X[Rechazo cerrado]
@@ -133,7 +133,7 @@ flowchart TB
     GC --> A
     PS --> A
     A -->|pasan| OK[eligible-for-reviewed-activation]
-    A -->|falla alguno| KO[rejected]
+    A -->|falla alguno| KO[status failed / blocked-by-same-backend-or-integrity-gate]
 ```
 
 Cada ruta debe ser determinista frente a su repetición. El gate de integridad

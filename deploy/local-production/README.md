@@ -58,18 +58,29 @@ deploy/local-production/
 ├── runtime/
 │   ├── bin/                      # binarios instalados; puede estar vacío
 │   ├── models/<digest>/          # bundles importados
-│   ├── coldstore/                # páginas K/V persistentes
-│   ├── sessions/                 # SessionStore
-│   ├── calibration/              # recibos de calibración
-│   ├── validation/               # matrices y E2E
-│   ├── receipts/
+│   ├── coldstore/default/        # páginas K/V persistentes
+│   ├── state/                    # informes de setup del runtime
 │   ├── logs/
+│   ├── receipts/
+│   ├── sessions/                 # SessionStore del worker con runtime externo
+│   ├── calibration/              # recibos de calibración
+│   ├── validation/               # matrices, recibos de bundle y E2E
+│   ├── tmp/                      # temporales de Cargo, calibración e instaladores
 │   ├── cargo-home/               # registro y caché local de Cargo
-│   └── build-target/             # artefactos de compilación
+│   ├── build-target/             # artefactos de compilación
+│   ├── tool-bin/                 # sccache y cargo-sweep locales (opcionales)
+│   └── sccache-cache/            # caché de objetos de sccache (máx. 5 GB)
 └── scripts/
 ```
 
-`install-layout.sh` crea los directorios. No instala drivers ni una release.
+`install-layout.sh` crea `bin/`, `models/`, `coldstore/default/`, `state/`,
+`logs/` y `receipts/` con permisos `0750`. El resto los crean las herramientas
+que los usan: `cargo-local.sh` (`cargo-home/`, `build-target/`, `tmp/`,
+`tool-bin/`, `sccache-cache/`), el worker (`sessions/`, salvo que
+`MSLIM_SESSION_STORE` indique otra ruta), `mslim-adapter-parity`
+(`validation/`) y `mslim-calibrate` (`validation/`, `tmp/` y el directorio de
+`--output`, que en los ejemplos cuelga de `calibration/`). Ningún script
+instala drivers ni una release.
 
 ## Modelo local
 
@@ -146,7 +157,24 @@ deploy/local-production/scripts/cargo-local.sh test \
 ```
 
 No es necesario borrar `runtime/cargo-home` ni `runtime/build-target` para una
-compilación normal. Son cachés recuperables y permiten compilación incremental.
+compilación normal. Son cachés recuperables y permiten compilación incremental
+en los perfiles de desarrollo y test; las compilaciones `--release` se hacen
+sin estado incremental (`.cargo/config.toml` y `CARGO_INCREMENTAL=0`).
+
+Herramientas opcionales para contener el tamaño de la caché, instaladas dentro
+del proyecto en `runtime/tool-bin/`:
+
+```bash
+deploy/local-production/scripts/install-tools.sh        # sccache y cargo-sweep
+deploy/local-production/scripts/cargo-local.sh sweep    # poda artefactos sin uso en 7 días
+deploy/local-production/scripts/cargo-trim.sh --days 3  # poda manual con informe de tamaño
+```
+
+Con `sccache` instalado, `cargo-local.sh` lo usa como `RUSTC_WRAPPER` (caché en
+`runtime/sccache-cache/`, máximo 5 GB). Con `cargo-sweep` instalado, cada
+comando que produce artefactos lanza en segundo plano la poda de los que no se
+han usado en 7 días. `cargo-trim.sh --reset-sccache` vacía la caché de objetos y
+`--full` borra `build-target/` tras pedir confirmación.
 
 ## Configuración
 

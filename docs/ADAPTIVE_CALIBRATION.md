@@ -20,9 +20,9 @@ almacén de memoria, sistema de sesiones ni autoridad de activación.
 |---|---|
 | `calibration_predictor.rs` | Estimación RLS del tiempo de prefill y orden de candidatos; sin autoridad. |
 | `calibration_profile.rs` | Contrato estricto de ajustes, identidad y lectura de perfiles promovidos. |
-| `prefill_calibration.rs` | Mediciones físicas mediante `OpenClModelAdapter` y uso de la transacción existente. |
+| `prefill_calibration.rs` | Mediciones físicas mediante `GpuModelAdapter` y uso de la transacción existente. |
 | `calibration_transaction.rs` | Propuesta, shadow, canary, promoción explícita, recibos y reversión de archivos. |
-| `OpenClLlm` | Aplicación de los dos ajustes sobre el motor real, antes del prefill. |
+| `GpuLlm` (`src/gpu_llm/mod.rs`) | Aplicación de los ajustes del perfil sobre el motor real, con la sesión vacía. |
 
 El predictor es una implementación propia y pequeña de mínimos cuadrados
 recursivos, sin dependencias externas al crate ni servicios o datos de otros
@@ -30,11 +30,27 @@ proyectos.
 
 ## Qué puede cambiar
 
-Solo `batch_tokens` (1..512 o el modo secuencial ya existente) y
-`weight_reuse_tokens` (1, 8, 16 o 32). El runtime conserva sus restricciones de
-fusión, registros y virtual lanes. Las combinaciones incompatibles se rechazan
-antes de medir. Un perfil no puede cambiar pesos, precisión, tokenizer, modelo,
-backend, epsilon, selección de atención, KV canónico, documentos ni prompts.
+Un perfil (`PrefillSettings`) contiene exactamente tres campos:
+
+| Campo | Valores admitidos |
+|---|---|
+| `batch_tokens` | 1..512, o el modo secuencial ya existente |
+| `weight_reuse_tokens` | 1, 8, 16 o 32 |
+| `attention` | configuración del kernel de atención (`AttentionKernelConfig`); por defecto `reference` |
+
+En `attention`, un perfil solo admite modos con contrato bit a bit: `reference`
+(sin parámetros) o `strict_tiled` con `block_queries` 1, 2 o 4, `block_keys`
+32, 64 o 128, `work_group` 32, 64 o 128 y `splits` 1. Los modos
+`online_experimental` y `split_kv_experimental` se rechazan siempre en perfiles
+(`validate_activation(false)`). El kernel elegido sustituye al de atención del
+motor completo, no solo durante el prefill, y no puede combinarse con
+`epsilon > 0` ni con el puente HIP. Véase
+[TILED_ATTENTION.md](TILED_ATTENTION.md).
+
+El runtime conserva sus restricciones de fusión, registros y virtual lanes. Las
+combinaciones incompatibles se rechazan antes de medir. Un perfil no puede
+cambiar pesos, precisión, tokenizer, modelo, backend, epsilon, la selección de
+qué K/V se atiende (LOD), el KV canónico, documentos ni prompts.
 
 La implementación física usa GPU BF16 exacto (backend detectado en runtime). La
 biblioteca del predictor y los contratos compilan sin GPU. La ruta de CPU no
@@ -102,6 +118,20 @@ solicitar la promoción en el directorio aislado de la campaña:
 El valor de autoridad documenta una petición explícita del operador; NO es una
 firma criptográfica ni acredita su identidad frente a un atacante local.
 
+`--candidates batch:reuse,...` genera candidatos con la atención `reference`.
+Para medir también configuraciones de atención se usa
+`--kernel-candidates-json` con un array JSON de `PrefillSettings` (como máximo
+32 KiB). Ambas opciones escriben la misma lista de candidatos: si se pasan las
+dos, prevalece la última.
+
+```bash
+"$BIN/mslim-calibrate" "$MODEL" --tune-prefill --contexts 8,16,24 \
+  --kernel-candidates-json '[{"batch_tokens":16,"weight_reuse_tokens":8,
+    "attention":{"mode":"strict_tiled","block_queries":2,"block_keys":64,
+                 "work_group":64,"splits":1}}]' \
+  --output deploy/local-production/runtime/calibration/mi-campana-atencion
+```
+
 `--history INFORME.json` permite reconstruir el predictor de una campaña
 anterior. Se verifica la integridad del informe y la identidad completa. Un
 entorno incompatible se registra como ignorado. Un informe corrupto se rechaza.
@@ -167,7 +197,7 @@ juntos; el archivo solo no basta.
 - Worker local: la misma opción, después de elegir ajustes compatibles.
 - ModelAdapter: `"mslim_prefill_profile": "/ruta/campana/active.json"`.
 
-Todos llaman al mismo método de `OpenClLlm`; no hay tres implementaciones de
+Todos llaman al mismo método, `GpuLlm::apply_promoted_prefill_profile`; no hay tres implementaciones de
 activación. La opción del worker se rechaza en modo de runtime externo por IPC,
 en lugar de ignorarse silenciosamente.
 
@@ -232,4 +262,6 @@ Las campañas físicas y la carga del perfil en CLI se registran por separado.
 El selector shell histórico sigue siendo una utilidad manual de benchmark.
 Su JSON no es un perfil promovido y no puede entrar por esta ruta de activación.
 No se han implementado nuevos presupuestos automáticos de RAM/VRAM, selección
-de modelos, control distribuido ni adaptación de la atención.
+de modelos, control distribuido ni selección adaptativa de qué K/V se atiende.
+La atención solo puede cambiar de kernel entre los modos bit a bit descritos
+arriba.

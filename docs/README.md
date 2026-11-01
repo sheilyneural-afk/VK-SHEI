@@ -17,6 +17,8 @@ necesite.
   medición física y activación transaccional del prefill.
 - [ADAPTIVE_CALIBRATION_VALIDATION.md](ADAPTIVE_CALIBRATION_VALIDATION.md):
   evidencia histórica fechada; no describe el estado actual del runtime.
+- [TILED_ATTENTION.md](TILED_ATTENTION.md): kernels opcionales de atención por
+  teselas, contrato numérico, activación y evidencia registrada.
 - [CONTINUITY_LIFECYCLE.md](CONTINUITY_LIFECYCLE.md): propiedad, generaciones,
   restore, release y reinicio total.
 - [RETRIEVAL_EVALUATION.md](RETRIEVAL_EVALUATION.md): medición de la

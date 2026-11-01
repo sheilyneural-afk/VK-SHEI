@@ -19,13 +19,15 @@ parte que todavía carece de contrato o evidencia.
 
 ## Partir los archivos gigantes
 
-`src/gpu_llm/mod.rs` (unas 5.200 líneas) y `src/torch_runtime/kv_cache.rs`
-(unas 4.700) concentran gran parte del código y del `unsafe`. Partirlos por
-responsabilidades facilitaría la revisión.
+`src/gpu_llm/mod.rs` (unas 5.600 líneas) y `src/torch_runtime/kv_cache.rs`
+(unas 4.700) concentran gran parte del código. Partirlos por
+responsabilidades facilitaría la revisión. El `unsafe` está más repartido: los
+archivos con más bloques son `src/gpu_llm/gpu_resources.rs`, `src/native_hip.rs`,
+`src/gpu_llm/mod.rs`, `src/gpu_llm/prefill.rs` y `src/gpu_backend.rs`.
 
-Motivo del aplazamiento: `gpu_llm/mod.rs` tiene cambios sin commit de otra
-sesión de trabajo, y una refactorización chocaría con ellos. Hacerlo cuando ese
-archivo esté confirmado y sin cambios pendientes.
+Motivo del aplazamiento: la refactorización debe hacerse sobre un árbol sin
+cambios pendientes en esos archivos y volver a pasar la matriz física de
+paridad, porque `gpu_llm/mod.rs` contiene la ruta de inferencia validada.
 
 ## Elegir el camino único hasta producción
 

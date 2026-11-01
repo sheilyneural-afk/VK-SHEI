@@ -1,6 +1,7 @@
 //! Narrow prefill profiles layered on CalibrationProfile/CalibrationTransaction.
-//! No second registry or activation state machine. Only two prefill settings
-//! are tunable; identity, fidelity and measured coverage remain immutable.
+//! No second registry or activation state machine. Only batch size, weight
+//! reuse and a bit-exact attention kernel configuration are tunable; identity,
+//! fidelity and measured coverage remain immutable.
 
 use crate::calibration_transaction::{
     CalibrationProfile, pending_profile_path, verify_receipt_chain,
