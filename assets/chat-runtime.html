@@ -72,8 +72,9 @@
       <dl id="engine"></dl>
       <label for="system">Sistema (vacío = ninguno)</label>
       <textarea id="system"></textarea>
-      <label for="max">max_tokens (1–512)</label>
-      <input id="max" type="number" min="1" max="512" value="128" />
+      <label for="max">Tokens objetivo de esta respuesta</label>
+      <input id="max" type="number" min="1" step="1" value="128" />
+      <small>Controla cada tramo de generación; no limita la longitud total del proyecto o la sesión.</small>
       <label class="check" for="history">
         <input id="history" type="checkbox" checked />
         Enviar historial
@@ -142,8 +143,8 @@
         const text = input.value.trim();
         if (!text || send.disabled) return;
         const max = Number(maxTokens.value);
-        if (!(max >= 1 && max <= 512)) {
-          addBubble("assistant", "max_tokens debe estar entre 1 y 512.", true);
+        if (!Number.isSafeInteger(max) || max < 1) {
+          addBubble("assistant", "max_tokens debe ser un entero positivo.", true);
           return;
         }
         turns.push({ role: "user", content: text });

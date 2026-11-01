@@ -174,10 +174,10 @@ fn validate(request: &ChatRequest, served_model: &str) -> Result<usize, ApiError
         .max_tokens
         .or(request.max_completion_tokens)
         .unwrap_or(64);
-    if !(1..=512).contains(&max_tokens) {
+    if max_tokens == 0 {
         return Err(invalid(
             StatusCode::BAD_REQUEST,
-            "max_tokens must be in 1..=512",
+            "max_tokens must be a positive integer",
         ));
     }
     let mut unsupported = Vec::new();
@@ -1370,7 +1370,8 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "validation_matrix":validation,
         "runtime_backend":backend,
         "max_context_tokens":state.max_context_tokens,
-        "max_output_tokens":512,
+        "max_output_tokens":Value::Null,
+        "output_limit":"prompt tokens plus requested output must fit within max_context_tokens",
         "API":{"OpenAI_compatible_subset":true,"stream":false,
                "tools":false,"sampling":false,"temperature":0}
     }))
@@ -2343,6 +2344,10 @@ mod tests {
             "messages":[{"role":"user","content":"Hola"}],
             "temperature":0,"stream":false,"max_tokens":2}));
         assert_eq!(validate(&req, "model-a").unwrap(), 2);
+        let long = parse(json!({"model":"model-a",
+            "messages":[{"role":"user","content":"Hola"}],
+            "temperature":0,"stream":false,"max_tokens":1024}));
+        assert_eq!(validate(&long, "model-a").unwrap(), 1024);
     }
 
     #[test]
@@ -2350,6 +2355,9 @@ mod tests {
         assert!(CHAT_HTML.contains("/v1/chat/completions"));
         assert!(!CHAT_HTML.contains("native: true"));
         assert!(!CHAT_HTML.contains("stream: true"));
+        assert!(!CHAT_HTML.contains("max=\"512\""));
+        assert!(!CHAT_HTML.contains("1–512"));
+        assert!(CHAT_HTML.contains("no limita la longitud total"));
     }
 
     #[test]

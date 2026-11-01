@@ -2592,10 +2592,7 @@ impl GpuLlm {
         cancel: &AtomicBool,
     ) -> Result<GpuGeneration> {
         ensure!(!prompt_ids.is_empty(), "GPU prompt IDs empty");
-        ensure!(
-            (1..=512).contains(&max_new_tokens),
-            "max_new_tokens must be 1..=512"
-        );
+        ensure!(max_new_tokens > 0, "max_new_tokens must be positive");
         ensure!(
             prompt_ids
                 .len()
