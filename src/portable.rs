@@ -543,7 +543,7 @@ impl ExactKvFrames {
                 hasher.update(tensor.as_le_bytes());
             }
         }
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Single-step causal decode (query attends to all tokens already in KV).

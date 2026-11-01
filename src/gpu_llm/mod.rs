@@ -156,7 +156,7 @@ pub struct ForgetReceipt {
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn digest_file(path: &Path) -> Result<String> {
@@ -3523,7 +3523,7 @@ mod tests {
                     let values = lod.read_values(layer, &positions).unwrap();
                     hasher.update(values);
                 }
-                format!("{:x}", hasher.finalize())
+                hex::encode(hasher.finalize())
             };
             let mut legacy = make();
             let previous = legacy.generate(&ids, 16, true).unwrap();
@@ -3661,7 +3661,7 @@ mod tests {
                     let value = gpu.lod.as_mut().unwrap().read_values(layer, &all).unwrap();
                     sha.update(value);
                 }
-                format!("{:x}", sha.finalize())
+                hex::encode(sha.finalize())
             };
             let mut baseline = create(false);
             let expected = baseline.generate(&ids, 16, true).unwrap();
@@ -4489,7 +4489,7 @@ mod tests {
                         .unwrap();
                     hash.update(cold);
                 }
-                format!("{:x}", hash.finalize())
+                hex::encode(hash.finalize())
             };
             let mut original = build(false);
             let before = original.generate(&prompt, 16, true).unwrap();
@@ -4840,7 +4840,7 @@ mod tests {
                         .unwrap();
                     sha.update(cold);
                 }
-                format!("{:x}", sha.finalize())
+                hex::encode(sha.finalize())
             };
             // First request: real BF16 GPU transformer prefill and 16-step
             // generation. A small exact RAM-only snapshot is captured from
@@ -5008,7 +5008,7 @@ mod tests {
                     digest.update(keys);
                     digest.update(cold);
                 }
-                format!("{:x}", digest.finalize())
+                hex::encode(digest.finalize())
             };
             let original_a = gpu.generate(&ids_a, 16, true).unwrap();
             assert_eq!(original_a.gpu_verified_prefix_reused_tokens, 0);
@@ -5315,7 +5315,7 @@ mod tests {
                         .unwrap();
                     sha.update(&cold);
                 }
-                format!("{:x}", sha.finalize())
+                hex::encode(sha.finalize())
             };
             let reference = gpu.generate(&ids, 16, true).unwrap();
             assert!(!reference.gpu_prefill_fused_projections);
@@ -5504,7 +5504,7 @@ mod tests {
                             .unwrap(),
                     );
                 }
-                format!("{:x}", h.finalize())
+                hex::encode(h.finalize())
             };
             let original = model.generate(&ids, 16, true).unwrap();
             let original_sha = sha(&mut model);
