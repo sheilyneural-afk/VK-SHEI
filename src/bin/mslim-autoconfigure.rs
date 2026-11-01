@@ -247,6 +247,7 @@ mod tests {
             "bundle": bundle,
             "adapter": "accelerator-runtime",
             "identity_digest": "b".repeat(64),
+            "implementation_digest": mslim::calibration_profile::implementation_digest(),
             "calibration_environment": {
                 "schema": mslim::calibration_contract::CALIBRATION_ENVIRONMENT_SCHEMA,
                 "backend": "accelerator-runtime",

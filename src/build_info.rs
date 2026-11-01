@@ -43,6 +43,22 @@ pub fn is_current_clean_source_revision(value: Option<&Value>) -> bool {
             == Some(false)
 }
 
+pub fn is_clean_source_revision(value: Option<&Value>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    value
+        .get("commit")
+        .and_then(Value::as_str)
+        .is_some_and(|commit| {
+            commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && value
+            .get("tracked_files_modified_at_build")
+            .and_then(Value::as_bool)
+            == Some(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

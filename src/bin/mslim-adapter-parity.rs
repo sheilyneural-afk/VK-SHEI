@@ -358,6 +358,7 @@ fn main() -> Result<()> {
         "schema": mslim::project_identity::VALIDATION_MATRIX_SCHEMA,
         "status": if passed { "passed" } else { "failed" },
         "source_revision": mslim::build_info::source_revision(),
+        "implementation_digest": mslim::calibration_profile::implementation_digest(),
         "bundle_sha256": bundle_id,
         "calibration_environment": calibration_environment,
         "model": model,
