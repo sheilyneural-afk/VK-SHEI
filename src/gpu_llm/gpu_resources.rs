@@ -41,6 +41,48 @@ use sha2::{Digest, Sha256};
 
 const LOCAL_WORK_SIZE: usize = 128;
 const BYTES_PER_BF16: usize = 2;
+const GPU_BUILD_OPTIONS: &str = "-cl-std=CL1.2";
+const GPU_SHADER: &str = include_str!("../../assets/gpu_llm.cl");
+
+fn selected_gpu_device() -> Result<Device> {
+    let filter = std::env::var("MSLIM_GPU_DEVICE")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let devices = get_all_devices(CL_DEVICE_TYPE_GPU).context("no GPU devices available")?;
+    let device = devices
+        .into_iter()
+        .map(Device::new)
+        .find(|device| {
+            let name = device.name().unwrap_or_default().to_lowercase();
+            let vendor = device.vendor().unwrap_or_default().to_lowercase();
+            filter.is_empty() || name.contains(&filter) || vendor.contains(&filter)
+        })
+        .context("no matching GPU found")?;
+    ensure!(
+        device.dev_type()? & CL_DEVICE_TYPE_GPU != 0,
+        "selected device is not a physical GPU"
+    );
+    ensure!(
+        device.endian_little()?,
+        "GPU must be little-endian for BF16"
+    );
+    Ok(device)
+}
+
+fn calibration_device_key(device: &Device) -> Result<String> {
+    let mut key_hasher = Sha256::new();
+    key_hasher.update(GPU_SHADER.as_bytes());
+    key_hasher.update(GPU_BUILD_OPTIONS.as_bytes());
+    key_hasher.update(device.name()?.as_bytes());
+    key_hasher.update(device.vendor()?.as_bytes());
+    key_hasher.update(device.driver_version()?.as_bytes());
+    key_hasher.update(device.version()?.as_bytes());
+    Ok(hex::encode(key_hasher.finalize()))
+}
+
+pub(super) fn probed_calibration_device_key() -> Result<String> {
+    calibration_device_key(&selected_gpu_device()?)
+}
 
 pub(crate) struct GpuEngine {
     pub(crate) context: ClContext,
@@ -73,42 +115,13 @@ impl GpuEngine {
         } else {
             None
         };
-        let filter = std::env::var("MSLIM_GPU_DEVICE")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let devices = get_all_devices(CL_DEVICE_TYPE_GPU).context("no GPU devices available")?;
-        let device = devices
-            .into_iter()
-            .map(Device::new)
-            .find(|device| {
-                let name = device.name().unwrap_or_default().to_lowercase();
-                let vendor = device.vendor().unwrap_or_default().to_lowercase();
-                filter.is_empty() || name.contains(&filter) || vendor.contains(&filter)
-            })
-            .context("no matching GPU found")?;
-        ensure!(
-            device.dev_type()? & CL_DEVICE_TYPE_GPU != 0,
-            "selected device is not a physical GPU"
-        );
-        ensure!(
-            device.endian_little()?,
-            "GPU must be little-endian for BF16"
-        );
+        let device = selected_gpu_device()?;
         let name = device.name()?;
         let reported_gpu_memory = device.global_mem_size()?;
         let max_gpu_allocation = device.max_mem_alloc_size()?;
         let context = ClContext::from_device(&device)?;
         let queue = CommandQueue::create_default(&context, CL_QUEUE_PROFILING_ENABLE)?;
-        let shader = include_str!("../../assets/gpu_llm.cl");
-        let build_options = "-cl-std=CL1.2";
-        let mut key_hasher = Sha256::new();
-        key_hasher.update(shader.as_bytes());
-        key_hasher.update(build_options.as_bytes());
-        key_hasher.update(name.as_bytes());
-        key_hasher.update(device.vendor()?.as_bytes());
-        key_hasher.update(device.driver_version()?.as_bytes());
-        key_hasher.update(device.version()?.as_bytes());
-        let cache_key = hex::encode(key_hasher.finalize());
+        let cache_key = calibration_device_key(&device)?;
         let cache_root = std::env::var_os("MSLIM_GPU_CACHE_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
@@ -117,16 +130,17 @@ impl GpuEngine {
         let cache_path = cache_root.join(format!("{cache_key}.bin"));
         let program = if let Ok(binary) = fs::read(&cache_path) {
             let binaries: [&[u8]; 1] = [&binary];
-            Program::create_and_build_from_binary(&context, &binaries, build_options)
+            Program::create_and_build_from_binary(&context, &binaries, GPU_BUILD_OPTIONS)
                 .or_else(|_| {
-                    Program::create_and_build_from_source(&context, shader, build_options)
+                    Program::create_and_build_from_source(&context, GPU_SHADER, GPU_BUILD_OPTIONS)
                         .map_err(anyhow::Error::msg)
                 })
                 .context("load or compile cached GPU program")?
         } else {
-            let program = Program::create_and_build_from_source(&context, shader, build_options)
-                .map_err(anyhow::Error::msg)
-                .context("GPU full-LLM shader compilation failed")?;
+            let program =
+                Program::create_and_build_from_source(&context, GPU_SHADER, GPU_BUILD_OPTIONS)
+                    .map_err(anyhow::Error::msg)
+                    .context("GPU full-LLM shader compilation failed")?;
             if let Ok(binaries) = program.get_binaries()
                 && let Some(binary) = binaries.first()
             {

@@ -49,6 +49,7 @@ pub struct GpuModelAdapter {
     model_dir: Option<PathBuf>,
     runtime: Option<GpuLlm>,
     last_logits: Option<Vec<f32>>,
+    last_argmax: Option<u32>,
     cached_prompt: Vec<u32>,
     kv_mode: GpuKvMode,
 }
@@ -67,6 +68,7 @@ impl Default for GpuModelAdapter {
             model_dir: None,
             runtime: None,
             last_logits: None,
+            last_argmax: None,
             cached_prompt: Vec::new(),
             kv_mode: GpuKvMode::ExactColdStore,
         }
@@ -77,11 +79,117 @@ impl GpuModelAdapter {
     pub(crate) fn calibration_runtime_mut(&mut self) -> Result<&mut GpuLlm> {
         self.runtime.as_mut().context("accelerator is not loaded")
     }
+
+    fn prefill_with_output(&mut self, input: &[u32], capture_logits: bool) -> Result<(Value, u32)> {
+        ensure!(!input.is_empty(), "accelerator prefill vacío");
+        let runtime = self
+            .runtime
+            .as_mut()
+            .context("local accelerator runtime is not loaded")?;
+
+        if self.cached_prompt == input && runtime.position() >= input.len() {
+            let next = self.last_argmax.context(
+                "verified prefix reuse has no authoritative next-token argmax; restore a snapshot that carries continuation state",
+            )?;
+            if capture_logits {
+                ensure!(
+                    self.last_logits.is_some(),
+                    "verified prefix reuse has no next-token logits; use token-only prefill or restore a snapshot that carries them"
+                );
+            } else {
+                self.last_logits = None;
+            }
+            return Ok((
+                json!({
+                    "tokens": input.len(),
+                    "position": runtime.position(),
+                    "mode": "verified-prefix-reuse",
+                    "reused_tokens": input.len(),
+                    "full_vocabulary_logits_captured": capture_logits,
+                }),
+                next,
+            ));
+        }
+
+        if runtime.position() != 0
+            && runtime.position() == self.cached_prompt.len()
+            && input.starts_with(&self.cached_prompt)
+        {
+            let suffix = &input[self.cached_prompt.len()..];
+            // From this point the causal state may advance. Invalidate the
+            // previous continuation before doing fallible device work so an
+            // error can never leave stale output attached to the new state.
+            self.last_logits = None;
+            self.last_argmax = None;
+            let mut last_logits = None;
+            let mut last_argmax = None;
+            for (index, &token) in suffix.iter().enumerate() {
+                let is_last = index + 1 == suffix.len();
+                let step = runtime.forward_token(token, capture_logits && is_last)?;
+                last_argmax = Some(step.argmax_token);
+                if step.logits.is_some() {
+                    last_logits = step.logits;
+                }
+            }
+            let next = last_argmax.context("shared-prefix prefill produced no continuation")?;
+            self.last_logits = last_logits;
+            self.last_argmax = Some(next);
+            self.cached_prompt = input.to_vec();
+            return Ok((
+                json!({
+                    "tokens": input.len(),
+                    "position": runtime.position(),
+                    "mode": "verified-shared-prefix",
+                    "reused_tokens": input.len() - suffix.len(),
+                    "full_vocabulary_logits_captured": capture_logits,
+                }),
+                next,
+            ));
+        }
+
+        self.last_logits = None;
+        self.last_argmax = None;
+        self.cached_prompt.clear();
+        if runtime.position() != 0 {
+            runtime
+                .reset_session()
+                .context("reset accelerator causal session before unrelated prompt")?;
+        }
+        let (step, prefill_seconds) = runtime
+            .prefill_only(
+                input,
+                capture_logits,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .context("prefill prompt without decoding")?;
+        let next = step.argmax_token;
+        self.last_logits = step.logits;
+        self.last_argmax = Some(next);
+        self.cached_prompt = input.to_vec();
+        Ok((
+            json!({
+                "tokens": input.len(),
+                "position": runtime.position(),
+                "mode": "batched-causal-prefill-only",
+                "prefill_seconds": prefill_seconds,
+                "full_vocabulary_logits_captured": capture_logits,
+            }),
+            next,
+        ))
+    }
 }
 
 impl ModelAdapter for GpuModelAdapter {
     fn capabilities(&self) -> &AdapterCapabilities {
         &self.capabilities
+    }
+
+    fn calibration_environment(&self) -> Result<Option<Value>> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .context("accelerator calibration environment requested before load")?;
+        Ok(Some(runtime.calibration_environment()))
     }
 
     fn inspect(&self, model_dir: &Path, config: &Value) -> Result<()> {
@@ -269,76 +377,29 @@ impl ModelAdapter for GpuModelAdapter {
         self.model_dir = Some(model_dir.to_owned());
         self.runtime = Some(runtime);
         self.last_logits = None;
+        self.last_argmax = None;
         self.cached_prompt.clear();
         Ok(())
     }
 
     fn prefill(&mut self, input: &[u32]) -> Result<Value> {
-        ensure!(!input.is_empty(), "accelerator prefill vacío");
-        let runtime = self
-            .runtime
-            .as_mut()
-            .context("local accelerator runtime is not loaded")?;
+        self.prefill_with_output(input, true)
+            .map(|(metadata, _)| metadata)
+    }
 
-        if self.cached_prompt == input && runtime.position() >= input.len() {
-            ensure!(
-                self.last_logits.is_some(),
-                "verified prefix reuse has no next-token logits; restore a snapshot that carries them"
-            );
-            return Ok(json!({
-                "tokens": input.len(),
-                "position": runtime.position(),
-                "mode": "verified-prefix-reuse",
-                "reused_tokens": input.len(),
-            }));
-        }
-
-        if runtime.position() != 0
-            && runtime.position() == self.cached_prompt.len()
-            && input.starts_with(&self.cached_prompt)
-        {
-            let suffix = &input[self.cached_prompt.len()..];
-            let mut last_logits = None;
-            for (index, &token) in suffix.iter().enumerate() {
-                let step = runtime.forward_token(token, index + 1 == suffix.len())?;
-                if step.logits.is_some() {
-                    last_logits = step.logits;
-                }
-            }
-            self.last_logits = last_logits;
-            self.cached_prompt = input.to_vec();
-            return Ok(json!({
-                "tokens": input.len(),
-                "position": runtime.position(),
-                "mode": "verified-shared-prefix",
-                "reused_tokens": input.len() - suffix.len(),
-            }));
-        }
-
-        if runtime.position() != 0 {
-            runtime
-                .reset_session()
-                .context("reset accelerator causal session before unrelated prompt")?;
-        }
-        let (step, prefill_seconds) = runtime
-            .prefill_only(input, true, &std::sync::atomic::AtomicBool::new(false))
-            .context("prefill prompt without decoding")?;
-        self.last_logits = step.logits;
-        self.cached_prompt = input.to_vec();
-        Ok(json!({
-            "tokens": input.len(),
-            "position": runtime.position(),
-            "mode": "batched-causal-prefill-only",
-            "prefill_seconds": prefill_seconds,
-        }))
+    fn prefill_token_only(&mut self, input: &[u32]) -> Result<(Value, u32)> {
+        self.prefill_with_output(input, false)
     }
 
     fn decode(&mut self, token_id: u32) -> Result<u32> {
+        self.last_logits = None;
+        self.last_argmax = None;
         let runtime = self
             .runtime
             .as_mut()
             .context("local accelerator adapter is not loaded")?;
         let step = runtime.forward_token(token_id, true)?;
+        self.last_argmax = Some(step.argmax_token);
         self.last_logits = step.logits;
         // The runtime appends the token supplied to forward_token; the returned
         // argmax is only the prediction for the following position.
@@ -346,14 +407,32 @@ impl ModelAdapter for GpuModelAdapter {
         Ok(step.argmax_token)
     }
 
+    fn decode_token_only(&mut self, token_id: u32) -> Result<u32> {
+        // Token-only execution invalidates both diagnostic logits and the
+        // previous continuation before fallible device work begins.
+        self.last_logits = None;
+        self.last_argmax = None;
+        let runtime = self
+            .runtime
+            .as_mut()
+            .context("local accelerator adapter is not loaded")?;
+        let step = runtime.forward_token(token_id, false)?;
+        self.last_argmax = Some(step.argmax_token);
+        // The runtime appends the supplied token; the returned argmax predicts
+        // the following position without copying the full vocabulary to host.
+        self.cached_prompt.push(token_id);
+        Ok(step.argmax_token)
+    }
+
     fn reset_session(&mut self) -> Result<()> {
+        self.cached_prompt.clear();
+        self.last_logits = None;
+        self.last_argmax = None;
         self.runtime
             .as_mut()
             .context("local accelerator adapter is not loaded")?
             .reset_session()
             .context("reset accelerator causal session")?;
-        self.cached_prompt.clear();
-        self.last_logits = None;
         Ok(())
     }
 
@@ -425,6 +504,7 @@ impl ModelAdapter for GpuModelAdapter {
             "authority": "canonical-bf16-coldstore",
             "kv_mode": self.kv_mode.label(),
             "last_logits": self.last_logits,
+            "last_argmax": self.last_argmax,
             "attention_kernel": runtime.attention_kernel_config(),
         }))
         .context("serialize physical GPU ColdStore snapshot handle")
@@ -467,10 +547,12 @@ impl ModelAdapter for GpuModelAdapter {
                 .collect::<Result<Vec<_>>>()?;
             let runtime = self.runtime.as_mut().context("GPU adapter is not loaded")?;
             runtime.reset_session()?;
+            let mut last_argmax = None;
             for &token in &tokens {
-                runtime.forward_token(token, false)?;
+                last_argmax = Some(runtime.forward_token(token, false)?.argmax_token);
             }
             self.last_logits = None;
+            self.last_argmax = last_argmax;
             self.cached_prompt = tokens;
             return Ok(());
         }
@@ -583,9 +665,51 @@ impl ModelAdapter for GpuModelAdapter {
                     .context("invalid next-token logits in physical GPU snapshot")?,
             ),
         };
+        let vocab_size = self
+            .runtime
+            .as_ref()
+            .context("GPU adapter is not loaded")?
+            .spec()
+            .vocab_size
+            .context("GPU model has no vocabulary size")?;
+        self.last_argmax = snapshot_argmax(
+            envelope.get("last_argmax"),
+            self.last_logits.as_deref(),
+            vocab_size,
+        )?;
         self.cached_prompt = tokens;
         Ok(())
     }
+}
+
+fn snapshot_argmax(
+    serialized: Option<&Value>,
+    legacy_logits: Option<&[f32]>,
+    vocab_size: usize,
+) -> Result<Option<u32>> {
+    let token = match serialized {
+        Some(Value::Null) | None => legacy_logits
+            .map(|logits| {
+                logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                    .and_then(|(index, _)| u32::try_from(index).ok())
+                    .context("physical GPU snapshot contains empty next-token logits")
+            })
+            .transpose()?,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|token| u32::try_from(token).ok())
+                .context("invalid next-token argmax in physical GPU snapshot")?,
+        ),
+    };
+    ensure!(
+        token.is_none_or(|token| (token as usize) < vocab_size),
+        "physical GPU snapshot next-token argmax exceeds the model vocabulary"
+    );
+    Ok(token)
 }
 
 const COLD_PAGES_FILE: &str = "pages-exact.kv";
@@ -637,5 +761,19 @@ mod tests {
             GpuKvMode::ExactColdStore
         );
         assert!(GpuKvMode::parse(&json!({"mslim_kv_mode": "automatic"})).is_err());
+    }
+
+    #[test]
+    fn physical_snapshot_continuation_is_backward_compatible_and_bounded() {
+        assert_eq!(
+            snapshot_argmax(None, Some(&[0.0, 3.0, 1.0]), 3).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot_argmax(Some(&json!(2)), Some(&[9.0, 0.0, 0.0]), 3).unwrap(),
+            Some(2)
+        );
+        assert!(snapshot_argmax(Some(&json!(3)), None, 3).is_err());
+        assert!(snapshot_argmax(None, Some(&[]), 3).is_err());
     }
 }

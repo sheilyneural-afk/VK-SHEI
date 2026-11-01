@@ -130,7 +130,36 @@ pub trait ModelAdapter: Send {
     fn inspect(&self, model_dir: &Path, config: &Value) -> Result<()>;
     fn load(&mut self, model_dir: &Path, config: &Value) -> Result<()>;
     fn prefill(&mut self, input: &[u32]) -> Result<Value>;
+    /// Advances the complete prompt and returns its metadata plus only the
+    /// next-token argmax.
+    ///
+    /// Adapters with a device-side argmax should override this method so
+    /// product generation does not need to capture or transfer the complete
+    /// vocabulary after prefill. The default preserves compatibility with
+    /// diagnostic adapters whose only authoritative output is `last_logits`.
+    fn prefill_token_only(&mut self, input: &[u32]) -> Result<(Value, u32)> {
+        let metadata = self.prefill(input)?;
+        let logits = self
+            .last_logits()?
+            .ok_or_else(|| anyhow::anyhow!("prefill produced no next-token logits"))?;
+        let next = logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .and_then(|(index, _)| u32::try_from(index).ok())
+            .ok_or_else(|| anyhow::anyhow!("prefill logits are empty"))?;
+        Ok((metadata, next))
+    }
     fn decode(&mut self, token_id: u32) -> Result<u32>;
+    /// Advances one causal token and returns only the next-token argmax.
+    ///
+    /// Unlike [`ModelAdapter::decode`], callers of this method do not require
+    /// full-vocabulary logits. Adapters may therefore avoid diagnostic logits
+    /// capture and host readback. The default preserves compatibility for
+    /// adapters that do not expose a more efficient token-only path.
+    fn decode_token_only(&mut self, token_id: u32) -> Result<u32> {
+        self.decode(token_id)
+    }
     /// Discards only the active causal state while keeping model weights
     /// resident. Runtimes that cannot do this safely fail closed.
     fn reset_session(&mut self) -> Result<()> {
@@ -147,6 +176,13 @@ pub trait ModelAdapter: Send {
     /// `None` when they cannot prove that contract. This is deliberately
     /// separate from the opaque lifecycle snapshot.
     fn kv_integrity_report(&mut self) -> Result<Option<Value>> {
+        Ok(None)
+    }
+    /// Returns the stable physical execution environment of the loaded
+    /// backend when that backend exposes one. Consumers must not substitute a
+    /// fresh hardware probe for this value: it belongs to the executor that
+    /// actually owns the model session.
+    fn calibration_environment(&self) -> Result<Option<Value>> {
         Ok(None)
     }
     fn snapshot_kv(&mut self) -> Result<Vec<u8>>;
@@ -258,20 +294,10 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<GenerationResult> {
         let started = std::time::Instant::now();
-        self.adapter.prefill(&request.input_tokens)?;
+        let (_, mut next) = self.adapter.prefill_token_only(&request.input_tokens)?;
         let prefill_seconds = started.elapsed().as_secs_f64();
         let decode_started = std::time::Instant::now();
         let mut output = Vec::with_capacity(request.max_new_tokens);
-        let logits = self
-            .adapter
-            .last_logits()?
-            .ok_or_else(|| anyhow::anyhow!("prefill produced no next-token logits"))?;
-        let mut next = logits
-            .iter()
-            .enumerate()
-            .max_by(|(_, left), (_, right)| left.total_cmp(right))
-            .and_then(|(index, _)| u32::try_from(index).ok())
-            .ok_or_else(|| anyhow::anyhow!("prefill logits are empty"))?;
         let mut finish_reason = "length";
         for index in 0..request.max_new_tokens {
             if cancel.load(std::sync::atomic::Ordering::Acquire) {
@@ -283,7 +309,7 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
             }
             output.push(next);
             if index + 1 < request.max_new_tokens {
-                next = self.adapter.decode(next)?;
+                next = self.adapter.decode_token_only(next)?;
             }
         }
         let decode_seconds = decode_started.elapsed().as_secs_f64();
@@ -424,6 +450,10 @@ mod tests {
         caps: AdapterCapabilities,
         tokens: Vec<u32>,
         cursor: usize,
+        diagnostic_prefill_calls: usize,
+        token_only_prefill_calls: usize,
+        diagnostic_decode_calls: usize,
+        token_only_decode_calls: usize,
     }
 
     impl ModelAdapter for Scripted {
@@ -437,10 +467,20 @@ mod tests {
             Ok(())
         }
         fn prefill(&mut self, _: &[u32]) -> Result<Value> {
+            self.diagnostic_prefill_calls += 1;
+            anyhow::bail!("generation must not request diagnostic full-logit prefill")
+        }
+        fn prefill_token_only(&mut self, _: &[u32]) -> Result<(Value, u32)> {
+            self.token_only_prefill_calls += 1;
             self.cursor = 0;
-            Ok(Value::Null)
+            Ok((Value::Null, self.tokens[0]))
         }
         fn decode(&mut self, _: u32) -> Result<u32> {
+            self.diagnostic_decode_calls += 1;
+            anyhow::bail!("generation must not use diagnostic full-logit decode")
+        }
+        fn decode_token_only(&mut self, _: u32) -> Result<u32> {
+            self.token_only_decode_calls += 1;
             self.cursor += 1;
             Ok(self.tokens[self.cursor])
         }
@@ -471,6 +511,10 @@ mod tests {
                 },
                 tokens,
                 cursor: 0,
+                diagnostic_prefill_calls: 0,
+                token_only_prefill_calls: 0,
+                diagnostic_decode_calls: 0,
+                token_only_decode_calls: 0,
             },
             ModelIdentity {
                 model_digest: "m".into(),
@@ -494,6 +538,10 @@ mod tests {
             .unwrap();
         assert_eq!(result.output_tokens, vec![5, 9]);
         assert_eq!(result.finish_reason, "stop");
+        assert_eq!(s.adapter().diagnostic_prefill_calls, 0);
+        assert_eq!(s.adapter().token_only_prefill_calls, 1);
+        assert_eq!(s.adapter().diagnostic_decode_calls, 0);
+        assert_eq!(s.adapter().token_only_decode_calls, 2);
     }
 
     #[test]
@@ -510,5 +558,9 @@ mod tests {
             .unwrap();
         assert_eq!(result.output_tokens, vec![5, 9]);
         assert_eq!(result.finish_reason, "length");
+        assert_eq!(s.adapter().diagnostic_prefill_calls, 0);
+        assert_eq!(s.adapter().token_only_prefill_calls, 1);
+        assert_eq!(s.adapter().diagnostic_decode_calls, 0);
+        assert_eq!(s.adapter().token_only_decode_calls, 1);
     }
 }

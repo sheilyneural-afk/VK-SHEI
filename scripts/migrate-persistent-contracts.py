@@ -28,10 +28,11 @@ SCHEMAS = {
     "mslim.model_bundle/v1": "mslim.model_bundle/v2",
     "mslim.validation_receipt/v1": "mslim.validation_receipt/v2",
     "mslim.validation-matrix/v1": "mslim.validation-matrix/v2",
-    "mslim.calibration_receipt/v3": "mslim.calibration_receipt/v4",
 }
 
-CANONICAL = frozenset(SCHEMAS.values())
+# Calibration v3/v4 timings cannot be migrated into v5: v5 measures a
+# different, token-only execution boundary and must be regenerated physically.
+CANONICAL = frozenset((*SCHEMAS.values(), "mslim.calibration_receipt/v5"))
 MIGRATION_SCHEMA = "mslim.contract_migration/v1"
 
 

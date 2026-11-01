@@ -86,7 +86,13 @@ jobs:
       - name: Sustained calibration after parity
         env:
           MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
-        run: cargo run --locked --release --features accelerator-backend --bin mslim-calibrate -- "$MSLIM_PHYSICAL_MODEL" --force --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048
+          MSLIM_MAX_CONTEXT_TOKENS: ${{ vars.MSLIM_MAX_CONTEXT_TOKENS }}
+        run: |
+          max_context="${MSLIM_MAX_CONTEXT_TOKENS:-8192}"
+          cargo run --locked --release --features accelerator-backend --bin mslim-calibrate -- \
+            "$MSLIM_PHYSICAL_MODEL" --force --resident \
+            --max-context-tokens "$max_context" \
+            --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048
 
   load:
     runs-on: ubuntu-latest

@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -40,6 +41,16 @@ struct ValidatedBundle {
     adapter: String,
     status: &'static str,
     calibration: &'static str,
+    calibrated_runtime_configuration: Option<Value>,
+    calibration_environment: Option<Value>,
+    validation_matrix_sha256: Option<String>,
+}
+
+struct CalibrationEvidence {
+    status: &'static str,
+    frozen_runtime_configuration: Option<Value>,
+    calibration_environment: Option<Value>,
+    validation_matrix_sha256: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -86,15 +97,15 @@ fn main() -> Result<()> {
         kv_hot_budget_bytes,
         cold_context_budget_bytes,
         calibration_status: if calibration_ready {
-            "available-and-reusable-until-identity-changes"
+            "available-for-recorded-runtime-configuration"
         } else {
-            "required-before-automatic-activation"
+            "required-before-configuration-readback"
         },
         accelerator_memory_budgets,
         activation: if calibration_ready {
-            "automatic-activation-allowed-with-cached-certification"
+            "requires-worker-configuration-readback-match"
         } else {
-            "requires-calibration-before-automatic-activation"
+            "requires-calibration-and-worker-configuration-readback"
         },
         validated_bundles,
     };
@@ -162,40 +173,64 @@ fn validated_bundles(
         }) {
             continue;
         }
+        let calibration = calibration_evidence(&calibration, &entry.file_name());
         bundles.push(ValidatedBundle {
             digest,
             path: format!("runtime/models/{}", entry.file_name().to_string_lossy()),
             adapter: adapter.to_owned(),
             status: "validated-for-local-execution",
-            calibration: calibration_receipt_is_reusable(&calibration, &entry.file_name()),
+            calibration: calibration.status,
+            calibrated_runtime_configuration: calibration.frozen_runtime_configuration,
+            calibration_environment: calibration.calibration_environment,
+            validation_matrix_sha256: calibration.validation_matrix_sha256,
         });
     }
     bundles.sort_by(|left, right| left.digest.cmp(&right.digest));
     Ok(bundles)
 }
 
-fn calibration_receipt_is_reusable(
-    calibration_root: &Path,
-    digest: &std::ffi::OsStr,
-) -> &'static str {
+fn calibration_evidence(calibration_root: &Path, digest: &std::ffi::OsStr) -> CalibrationEvidence {
     let path = calibration_root.join(format!("{}.json", digest.to_string_lossy()));
     let Ok(bytes) = fs::read(path) else {
-        return "missing";
+        return CalibrationEvidence {
+            status: "missing",
+            frozen_runtime_configuration: None,
+            calibration_environment: None,
+            validation_matrix_sha256: None,
+        };
     };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return "invalid";
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return CalibrationEvidence {
+            status: "invalid",
+            frozen_runtime_configuration: None,
+            calibration_environment: None,
+            validation_matrix_sha256: None,
+        };
     };
     let expected_bundle = digest.to_string_lossy();
     if mslim::calibration_contract::validate_calibration_receipt(&value, &expected_bundle).is_ok() {
-        "available"
+        CalibrationEvidence {
+            status: "available",
+            frozen_runtime_configuration: value.get("frozen_runtime_configuration").cloned(),
+            calibration_environment: value.get("calibration_environment").cloned(),
+            validation_matrix_sha256: value
+                .get("validation_matrix_sha256")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }
     } else {
-        "invalid"
+        CalibrationEvidence {
+            status: "invalid",
+            frozen_runtime_configuration: None,
+            calibration_environment: None,
+            validation_matrix_sha256: None,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::calibration_receipt_is_reusable;
+    use super::calibration_evidence;
     use serde_json::json;
     use std::fs;
 
@@ -212,15 +247,51 @@ mod tests {
             "bundle": bundle,
             "adapter": "accelerator-runtime",
             "identity_digest": "b".repeat(64),
+            "calibration_environment": {
+                "schema": mslim::calibration_contract::CALIBRATION_ENVIRONMENT_SCHEMA,
+                "backend": "accelerator-runtime",
+                "device_key": "d".repeat(64)
+            },
             "started_unix_seconds": 1,
             "warmup_runs": 1,
             "measured_runs": 3,
             "decode_tokens_per_run": 8,
+            "frozen_runtime_configuration": {
+                "kv_mode": "exact-coldstore",
+                "weight_mode": "resident",
+                "max_context_tokens": 8192,
+                "lod_epsilon": 0.0,
+                "stage_tokens": 64,
+                "prefill_batch_tokens": 128,
+                "prefill_weight_reuse_tokens": 8,
+                "hot_v_tokens": 512,
+                "prompt_replay_tokens": 0,
+                "shared_prefix": false,
+                "micro_hot_v_tokens": 0,
+                "deferred_cold_commit": false,
+                "exact_hot_fused_attention": true,
+                "decode_unroll4": false,
+                "decode_fused_kernels": true,
+                "prefill_fuse_projections": true,
+                "prefill_profile_id": null
+            },
+            "prefill_execution_contract": {
+                "kind": mslim::calibration_contract::TOKEN_ONLY_PREFILL_KIND,
+                "adapter_path": mslim::calibration_contract::ACCELERATOR_TOKEN_ONLY_PREFILL_PATH,
+                "diagnostic_full_vocabulary_logits_captured": false
+            },
+            "decode_execution_contract": {
+                "kind": mslim::calibration_contract::TOKEN_ONLY_DECODE_KIND,
+                "adapter_path": mslim::calibration_contract::ACCELERATOR_TOKEN_ONLY_PATH,
+                "diagnostic_full_vocabulary_logits_captured": false
+            },
             "context_samples": [{
                 "prompt_tokens": 1,
                 "prefill_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                "prefill_tokens_per_second_median": 1000000.0,
                 "decode_tokens": 8,
                 "decode_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                "decode_tokens_per_second_median": 8000000.0,
                 "status": "measured"
             }],
             "snapshot_contract": {
@@ -229,6 +300,7 @@ mod tests {
                 "restore_latency_measured_as_physical_kv_hydration": false
             },
             "validation_matrix_gate": "same-backend-and-kv-integrity-passed",
+            "validation_matrix_sha256": "f".repeat(64),
             "status": "measured-sustained-execution"
         })
     }
@@ -243,19 +315,24 @@ mod tests {
             serde_json::to_vec(&canonical_receipt(&bundle)).unwrap(),
         )
         .unwrap();
+        let evidence = calibration_evidence(root.path(), std::ffi::OsStr::new(&bundle));
         assert_eq!(
-            calibration_receipt_is_reusable(root.path(), std::ffi::OsStr::new(&bundle)),
+            evidence.status,
             if mslim::build_info::current_build_is_clean() {
                 "available"
             } else {
                 "invalid"
             }
         );
+        assert_eq!(
+            evidence.frozen_runtime_configuration.is_some(),
+            mslim::build_info::current_build_is_clean()
+        );
         let mut legacy = canonical_receipt(&bundle);
         legacy["schema"] = json!("kvslim.calibration_receipt/v2");
         fs::write(path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         assert_eq!(
-            calibration_receipt_is_reusable(root.path(), std::ffi::OsStr::new(&bundle)),
+            calibration_evidence(root.path(), std::ffi::OsStr::new(&bundle)).status,
             "invalid"
         );
     }

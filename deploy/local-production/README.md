@@ -34,7 +34,7 @@ existencia no demuestra el estado del commit ni el de un proceso residente.
 - `verify-release.sh` demuestra estructura, rutas, permisos y coincidencia de
   hashes de fuente, binarios y bundle en el instante de la comprobación.
 - `mslim.validation_receipt/v2`, `mslim.validation-matrix/v2` y
-  `mslim.calibration_receipt/v4` demuestran aspectos distintos del modelo; no
+  `mslim.calibration_receipt/v5` demuestran aspectos distintos del modelo; no
   son intercambiables.
 - `/health` demuestra vida del proceso. `/ready` exige modelo, matriz y
   calibración compatibles con la configuración efectiva.
@@ -220,6 +220,16 @@ replay, prefijo compartido, commit diferido, unroll4 y fusiones. Ante cualquier
 ausencia o diferencia, `/health` puede responder que el proceso vive, pero
 `/ready` responde 503.
 
+El recibo v5 también contiene `calibration_environment.device_key`, una huella
+sin datos personales que liga GPU, driver/runtime OpenCL, shader y opciones de
+compilación. Worker y gateway la comparan con el dispositivo efectivo; mover el
+JSON desde otra máquina o actualizar el driver obliga a recalibrar.
+La huella del worker y de las rutas de matriz procede del `GpuEngine` cargado,
+no de volver a enumerar dispositivos después de ejecutar el modelo.
+La matriz de validación v2 publica la misma huella. El recibo de calibración
+guarda además `validation_matrix_sha256`; worker y gateway recalculan/comparan
+ese digest para impedir que una matriz distinta se introduzca después.
+
 `MSLIM_ENABLE_LOD=true` con `MSLIM_LOD_EPSILON=0` crea la ruta exacta sin
 descarte. Un valor positivo no está autorizado por la matriz actual.
 
@@ -278,20 +288,29 @@ La ruta usa un único contrato en el código actual:
 
 | Componente | Contrato aceptado |
 |---|---|
-| `mslim-calibrate` | genera `mslim.calibration_receipt/v4`, estado `measured-sustained-execution` |
-| Worker | valida `/v4` mediante `calibration_contract` |
-| Gateway | valida `/v4` mediante `calibration_contract` |
-| `mslim-autoconfigure` | valida `/v4` mediante `calibration_contract` |
-| Recibo local | cuando se genera debe ser `/v4`; una migración puede enlazar el `/v3` original por SHA-256, pero no cuenta como una medición nueva |
+| `mslim-calibrate` | genera `mslim.calibration_receipt/v5`, estado `measured-sustained-execution` |
+| Worker | valida `/v5` mediante `calibration_contract` |
+| Gateway | valida `/v5` mediante `calibration_contract` |
+| `mslim-autoconfigure` | valida `/v5` mediante `calibration_contract` |
+| Recibo local | cuando se genera debe ser `/v5`; los `/v3` y `/v4` se conservan solo como historia y deben regenerarse físicamente |
 
-La calibración v4 incluye la revisión fuente en su identidad. Productores y
-consumidores rechazan una revisión distinta o un árbol que estuviera sucio al
-compilar; una medición anterior del mismo bundle no autoriza el binario actual.
+La calibración v5 incluye la revisión fuente en su identidad y mide rutas
+token-only de argmax para prefill y decode. En el acelerador ninguna lee el
+vocabulario completo de logits al host; `prefill()` y `decode()` conservan la
+captura diagnóstica para las pruebas de paridad. El recibo conserva además la
+configuración efectiva completa usada para medir: ColdStore exacto, modo de
+pesos, contexto máximo, prefill, hot V, replay y kernels, junto con la huella
+del dispositivo/driver que ejecutó la medición. Productores y consumidores
+rechazan una revisión distinta, un árbol que estuviera sucio al compilar o
+cualquier diferencia entre esa configuración, ese entorno y el worker. Una
+medición anterior del mismo bundle no autoriza el binario actual.
 
 El gateway rechaza un worker cuyo recibo o contrato de capacidades no cumpla
-los contratos compartidos. Para certificar un arranque hay que regenerar la
-evidencia desde la fuente actual, instalar los binarios y ejecutar un E2E
-público por el gateway.
+los contratos compartidos. `mslim-autoconfigure` transporta en su perfil la
+configuración exacta del recibo, pero no declara activación automática: exige
+que el readback del worker coincida. Para certificar un arranque hay que
+regenerar la evidencia desde la fuente actual, instalar los binarios y ejecutar
+un E2E público por el gateway.
 
 ### Recibo general del bundle
 
@@ -325,6 +344,21 @@ El recibo queda en `runtime/validation/validation-matrix-<digest>.json`. El gate
 depende de determinismo, exactitud densa/ColdStore dentro de cada backend y
 snapshot físico GPU. CPU/GPU se conserva como diagnóstico. Consulte
 [`../../docs/VALIDATION.md`](../../docs/VALIDATION.md).
+
+La calibración posterior debe declarar el mismo límite que usará el worker.
+Para el perfil de producción incluido en este árbol:
+
+```bash
+deploy/local-production/scripts/cargo-local.sh run --locked --release \
+  --features accelerator-backend --bin mslim-calibrate -- \
+  deploy/local-production/runtime/models/<digest> \
+  --force --resident --max-context-tokens 32768 \
+  --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048
+```
+
+Cambiar `--resident` por `--stream-weights` o cambiar el contexto produce otra
+identidad de calibración y exige un recibo nuevo. El calibrador hereda de la
+matriz todos los demás parámetros certificados; no los sustituye por defaults.
 
 ## E2E con proveedor externo
 

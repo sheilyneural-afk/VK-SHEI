@@ -68,10 +68,41 @@ impl ModelAdapter for TorchModelAdapter {
             .runtime
             .as_ref()
             .context("Torch adapter is not loaded")?;
-        self.session_tokens = input.iter().map(|&token| i64::from(token)).collect();
-        let generation = runtime.generate_token_ids_dense(&self.session_tokens, 1, 512)?;
-        self.last_logits = generation.step_logits.first().cloned();
+        let session_tokens = input
+            .iter()
+            .map(|&token| i64::from(token))
+            .collect::<Vec<_>>();
+        let generation = runtime.generate_token_ids_dense(&session_tokens, 1, 512)?;
+        let logits = generation
+            .step_logits
+            .into_iter()
+            .next()
+            .context("Torch adapter prefill produced no logits")?;
+        self.session_tokens = session_tokens;
+        self.last_logits = Some(logits);
         Ok(json!({ "tokens": input.len() }))
+    }
+
+    fn prefill_token_only(&mut self, input: &[u32]) -> Result<(Value, u32)> {
+        ensure!(!input.is_empty(), "Torch adapter prompt is empty");
+        let runtime = self
+            .runtime
+            .as_ref()
+            .context("Torch adapter is not loaded")?;
+        let session_tokens = input
+            .iter()
+            .map(|&token| i64::from(token))
+            .collect::<Vec<_>>();
+        let next = runtime.next_token_id_dense(&session_tokens, 512)?;
+        self.session_tokens = session_tokens;
+        self.last_logits = None;
+        Ok((
+            json!({
+                "tokens": input.len(),
+                "full_vocabulary_logits_captured": false,
+            }),
+            next,
+        ))
     }
 
     fn decode(&mut self, token_id: u32) -> Result<u32> {
@@ -80,13 +111,50 @@ impl ModelAdapter for TorchModelAdapter {
             .as_ref()
             .context("Torch adapter is not loaded")?;
         self.session_tokens.push(i64::from(token_id));
-        let generation = runtime.generate_token_ids_dense(&self.session_tokens, 1, 512)?;
-        self.last_logits = generation.step_logits.first().cloned();
-        generation
-            .token_ids
-            .first()
-            .copied()
-            .context("Torch adapter produced no token")
+        let result = runtime
+            .generate_token_ids_dense(&self.session_tokens, 1, 512)
+            .and_then(|generation| {
+                let logits = generation
+                    .step_logits
+                    .into_iter()
+                    .next()
+                    .context("Torch adapter decode produced no logits")?;
+                let next = logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                    .and_then(|(index, _)| u32::try_from(index).ok())
+                    .context("Torch adapter decode logits are empty")?;
+                Ok((logits, next))
+            });
+        match result {
+            Ok((logits, next)) => {
+                self.last_logits = Some(logits);
+                Ok(next)
+            }
+            Err(error) => {
+                self.session_tokens.pop();
+                Err(error)
+            }
+        }
+    }
+
+    fn decode_token_only(&mut self, token_id: u32) -> Result<u32> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .context("Torch adapter is not loaded")?;
+        self.session_tokens.push(i64::from(token_id));
+        match runtime.next_token_id_dense(&self.session_tokens, 512) {
+            Ok(next) => {
+                self.last_logits = None;
+                Ok(next)
+            }
+            Err(error) => {
+                self.session_tokens.pop();
+                Err(error)
+            }
+        }
     }
 
     fn reset_session(&mut self) -> Result<()> {

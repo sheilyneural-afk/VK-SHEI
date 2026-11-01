@@ -2160,6 +2160,36 @@ impl TorchModelRuntime {
         })
     }
 
+    /// Returns only the greedy next-token id for an exact dense prompt.
+    ///
+    /// This is the product execution boundary used by the adapter. It keeps
+    /// logits in LibTorch and transfers only the scalar argmax to the host;
+    /// `generate_token_ids_dense` remains the diagnostic route that captures
+    /// the complete last-token vocabulary for parity analysis.
+    pub fn next_token_id_dense(&self, prompt_ids: &[i64], chunk_size: usize) -> Result<u32> {
+        ensure!(!prompt_ids.is_empty(), "prompt sin tokens");
+        ensure!(chunk_size > 0, "chunk_size debe ser positivo");
+        ensure!(
+            prompt_ids.len() < self.model.declared_context_limit,
+            "prompt excede el límite declarado de {} tokens",
+            self.model.declared_context_limit
+        );
+        let mut cache = DenseKvCache::with_layers(self.model.layers.len());
+        let token = tch::no_grad(|| -> Result<i64> {
+            let mut chunks = prompt_ids.chunks(chunk_size).peekable();
+            let logits = loop {
+                let chunk = chunks.next().context("prompt sin tokens")?;
+                let output = self.model.forward_with_cache(chunk, &mut cache)?;
+                if chunks.peek().is_none() {
+                    break output;
+                }
+            };
+            let last = logits.select(1, logits.size()[1] - 1);
+            Ok(last.argmax(-1, false).int64_value(&[0]))
+        })?;
+        u32::try_from(token).context("LibTorch produjo un token fuera del rango u32")
+    }
+
     /// Same prompt token ids, greedy argmax, M-SLIM KV vs dense BF16 KV.
     /// If greedy tokens diverge, inspect logits and KV hashes at the first step.
     pub fn compare_native_inference(

@@ -68,6 +68,19 @@ impl MslimEngine {
         self.adapter.prefill(input).context("M-SLIM prefill failed")
     }
 
+    /// Runs prefill while requesting only the authoritative next-token
+    /// argmax. Product generation and calibration use this boundary to avoid
+    /// turning diagnostic full-logit capture into hidden runtime work.
+    pub fn prefill_token_only(&mut self, input: &[u32]) -> Result<(Value, u32)> {
+        ensure!(
+            self.state == EngineState::Loaded,
+            "M-SLIM engine is not loaded"
+        );
+        self.adapter
+            .prefill_token_only(input)
+            .context("M-SLIM token-only prefill failed")
+    }
+
     pub fn decode(&mut self, token_id: u32) -> Result<u32> {
         ensure!(
             self.state == EngineState::Loaded,
@@ -76,6 +89,19 @@ impl MslimEngine {
         self.adapter
             .decode(token_id)
             .context("M-SLIM decode failed")
+    }
+
+    /// Advances the causal state while requesting only the next-token argmax.
+    /// Calibration uses this boundary so diagnostic full-logit capture is not
+    /// silently included in product-path decode throughput.
+    pub fn decode_token_only(&mut self, token_id: u32) -> Result<u32> {
+        ensure!(
+            self.state == EngineState::Loaded,
+            "M-SLIM engine is not loaded"
+        );
+        self.adapter
+            .decode_token_only(token_id)
+            .context("M-SLIM token-only decode failed")
     }
 
     pub fn snapshot_kv(&mut self) -> Result<Vec<u8>> {
@@ -106,6 +132,16 @@ impl MslimEngine {
         self.adapter
             .kv_integrity_report()
             .context("M-SLIM KV integrity report failed")
+    }
+
+    pub fn calibration_environment(&self) -> Result<Option<Value>> {
+        ensure!(
+            self.state == EngineState::Loaded,
+            "M-SLIM engine is not loaded"
+        );
+        self.adapter
+            .calibration_environment()
+            .context("M-SLIM calibration environment unavailable")
     }
 
     pub fn reset_session(&mut self) -> Result<()> {
@@ -179,14 +215,32 @@ mod tests {
             Ok(json!({"tokens": input.len()}))
         }
 
+        fn prefill_token_only(&mut self, input: &[u32]) -> Result<(Value, u32)> {
+            ensure!(self.loaded, "adapter is not loaded");
+            self.tokens.extend_from_slice(input);
+            let next = input.last().copied().unwrap_or_default() + 1_000;
+            Ok((json!({"tokens": input.len()}), next))
+        }
+
         fn decode(&mut self, token_id: u32) -> Result<u32> {
             ensure!(self.loaded, "adapter is not loaded");
             self.tokens.push(token_id);
             Ok(token_id)
         }
 
+        fn decode_token_only(&mut self, token_id: u32) -> Result<u32> {
+            ensure!(self.loaded, "adapter is not loaded");
+            self.tokens.push(token_id);
+            Ok(token_id + 1_000)
+        }
+
         fn last_logits(&self) -> Result<Option<Vec<f32>>> {
             Ok(Some(vec![1.0]))
+        }
+
+        fn calibration_environment(&self) -> Result<Option<Value>> {
+            ensure!(self.loaded, "adapter is not loaded");
+            Ok(Some(json!({"device_key": "loaded-executor"})))
         }
 
         fn reset_session(&mut self) -> Result<()> {
@@ -209,6 +263,7 @@ mod tests {
         let mut engine = MslimEngine::new(Box::new(ContractAdapter::new()));
         assert_eq!(engine.state(), EngineState::Created);
         assert!(engine.prefill(&[1]).is_err());
+        assert!(engine.calibration_environment().is_err());
 
         engine
             .inspect(Path::new("model"), &json!({"model": "runtime-neutral"}))
@@ -218,11 +273,22 @@ mod tests {
             .load(Path::new("model"), &json!({"model": "runtime-neutral"}))
             .unwrap();
         assert_eq!(engine.state(), EngineState::Loaded);
+        assert_eq!(
+            engine.calibration_environment().unwrap(),
+            Some(json!({"device_key": "loaded-executor"}))
+        );
         engine.prefill(&[1, 2, 3]).unwrap();
+        let (metadata, next) = engine.prefill_token_only(&[7, 8]).unwrap();
+        assert_eq!(metadata, json!({"tokens": 2}));
+        assert_eq!(next, 1_008);
         assert_eq!(engine.decode(4).unwrap(), 4);
 
+        // The token-only boundary must dispatch to the adapter specialization,
+        // not silently fall back to the diagnostic decode method.
+        assert_eq!(engine.decode_token_only(5).unwrap(), 1_005);
+
         let snapshot = engine.snapshot_kv().unwrap();
-        engine.decode(5).unwrap();
+        engine.decode(6).unwrap();
         engine.restore_kv(&snapshot).unwrap();
         let restored = engine.snapshot_kv().unwrap();
         assert_eq!(snapshot, restored);

@@ -50,6 +50,18 @@ pub(crate) use kernels::{
     VerifiedGpuPromptReplay, Workspace,
 };
 
+/// Stable, privacy-preserving identity of the selected physical accelerator
+/// and the exact OpenCL program input. The device key binds the device name,
+/// vendor, driver/runtime version, shader source, and compiler options without
+/// publishing a hostname, user name, or machine identifier.
+pub fn probed_calibration_environment() -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "schema": crate::calibration_contract::CALIBRATION_ENVIRONMENT_SCHEMA,
+        "backend": "accelerator-runtime",
+        "device_key": gpu_resources::probed_calibration_device_key()?,
+    }))
+}
+
 const LOCAL_WORK_SIZE: usize = 128;
 const BYTES_PER_BF16: usize = 2;
 
@@ -677,6 +689,13 @@ impl GpuLlm {
 
     pub fn device_name(&self) -> &str {
         &self.engine.name
+    }
+    pub fn calibration_environment(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": crate::calibration_contract::CALIBRATION_ENVIRONMENT_SCHEMA,
+            "backend": "accelerator-runtime",
+            "device_key": self.engine.calibration_device_key,
+        })
     }
     pub fn native_hip_enabled(&self) -> bool {
         #[cfg(feature = "hip-backend")]
