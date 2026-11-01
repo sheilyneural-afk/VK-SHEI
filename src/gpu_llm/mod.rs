@@ -2945,7 +2945,11 @@ mod tests {
             let lod_result = lod.generate(&ids, 16, true).unwrap();
             assert_eq!(dense_ids, lod_result.tokens);
             assert!(lod_result.gpu_region_components_active);
-            eprintln!("CAPACITY_PROBE bytes={} layers={}", lod_result.gpu_kv_capacity_bytes, lod.spec().num_hidden_layers);
+            eprintln!(
+                "CAPACITY_PROBE bytes={} layers={}",
+                lod_result.gpu_kv_capacity_bytes,
+                lod.spec().num_hidden_layers
+            );
             assert!(
                 lod_result.gpu_kv_capacity_bytes
                     < 64 * 2 * 2 * 128 * lod.spec().num_hidden_layers * 2
@@ -4293,7 +4297,8 @@ mod tests {
             let prompt = (1..=200)
                 .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
                 .map(|(filler, tail_words)| {
-                    tokenizer.encode(prompt_for(filler, tail_words), false)
+                    tokenizer
+                        .encode(prompt_for(filler, tail_words), false)
                         .unwrap()
                         .get_ids()
                         .to_vec()
@@ -4804,7 +4809,8 @@ mod tests {
                 .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
                 .find_map(|(filler, tail_words)| {
                     let document = "Dato verificable: TEST-CODE-001. ".to_owned()
-                        + &"El informe conserva documentos y códigos de referencia. ".repeat(filler)
+                        + &"El informe conserva documentos y códigos de referencia. "
+                            .repeat(filler)
                         + &"ref ".repeat(tail_words);
                     let ids = chat(&document, "Indica el código del dato verificable.");
                     (ids.len() == 375).then_some((document, ids))
