@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Trabajo pendiente para producción
+    url: https://github.com/sheilyneural-afk/KV-SHEI/blob/main/docs/PENDIENTE.md
+    about: Consulte el índice técnico canónico antes de abrir un issue duplicado.
