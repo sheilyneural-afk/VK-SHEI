@@ -368,9 +368,19 @@ def clang_entries(path: Path, language: str) -> list[dict[str, Any]]:
     if errors:
         raise RuntimeError(f"Clang AST failed for {path}: {'; '.join(errors)}")
     target = path.resolve()
-    accepted = {cindex.CursorKind.FUNCTION_DECL}
+    # Compare the stable CXCursorKind integer IDs instead of materializing
+    # CursorKind for every node.  A newer libclang can emit cursor kinds that
+    # older distro Python bindings do not enumerate; cursor.kind then raises
+    # ValueError and aborts the entire inventory even though an unknown node
+    # can be traversed safely.
+    accepted = {cindex.CursorKind.FUNCTION_DECL.value}
     if language == "cpp":
-        accepted |= {cindex.CursorKind.CXX_METHOD, cindex.CursorKind.DESTRUCTOR, cindex.CursorKind.FUNCTION_TEMPLATE}
+        accepted |= {
+            cindex.CursorKind.CXX_METHOD.value,
+            cindex.CursorKind.DESTRUCTOR.value,
+            cindex.CursorKind.FUNCTION_TEMPLATE.value,
+        }
+    call_expr = cindex.CursorKind.CALL_EXPR.value
     result: list[dict[str, Any]] = []
     definitions: dict[str, dict[str, Any]] = {}
     edges: list[tuple[dict[str, Any], str]] = []
@@ -378,7 +388,7 @@ def clang_entries(path: Path, language: str) -> list[dict[str, Any]]:
     def visit(cursor: Any, caller: dict[str, Any] | None = None) -> None:
         location_file = cursor.location.file
         if (
-            cursor.kind in accepted
+            cursor._kind_id in accepted
             and cursor.is_definition()
             and location_file is not None
             and Path(location_file.name).resolve() == target
@@ -410,7 +420,7 @@ def clang_entries(path: Path, language: str) -> list[dict[str, Any]]:
             if cursor.get_usr():
                 definitions[cursor.get_usr()] = record
             caller = record
-        if cursor.kind == cindex.CursorKind.CALL_EXPR and caller is not None:
+        if cursor._kind_id == call_expr and caller is not None:
             referenced = cursor.referenced
             if referenced is not None and referenced.get_usr():
                 edges.append((caller, referenced.get_usr()))
