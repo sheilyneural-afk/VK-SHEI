@@ -60,10 +60,16 @@ jobs:
         run: |
           set -euo pipefail
           output="$RUNNER_TEMP/rendered-wiki"
+          puppeteer_config="$RUNNER_TEMP/mermaid-puppeteer.json"
           mkdir -p "$output"
+          printf '%s\n' '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' >"$puppeteer_config"
           for source in "$RUNNER_TEMP/generated-wiki"/*.md; do
             if grep -q '^```mermaid$' "$source"; then
-              mmdc --input "$source" --output "$output/$(basename "$source")" --quiet
+              mmdc \
+                --puppeteerConfigFile "$puppeteer_config" \
+                --input "$source" \
+                --output "$output/$(basename "$source")" \
+                --quiet
             fi
           done
       - name: Record proposed changes
