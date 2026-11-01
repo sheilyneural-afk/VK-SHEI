@@ -1,0 +1,65 @@
+{
+  "schema": "mslim.wiki_claims/v1",
+  "claims": [
+    {
+      "id": "identity.repository",
+      "source": "docs/NAMING_STANDARD.md",
+      "pattern": "KV-SHEI",
+      "meaning": "KV-SHEI is the repository identity"
+    },
+    {
+      "id": "identity.product",
+      "source": "docs/NAMING_STANDARD.md",
+      "pattern": "M-SLIM",
+      "meaning": "M-SLIM is the visible product identity"
+    },
+    {
+      "id": "validation.matrix.v2",
+      "source": "src/project_identity.rs",
+      "pattern": "mslim.validation-matrix/v2",
+      "meaning": "the active validation matrix schema is defined by the product identity contract"
+    },
+    {
+      "id": "calibration.receipt.v4",
+      "source": "src/project_identity.rs",
+      "pattern": "mslim.calibration_receipt/v4",
+      "meaning": "the active calibration receipt schema is defined by the product identity contract"
+    },
+    {
+      "id": "calibration.kernel.selection",
+      "source": "docs/ADAPTIVE_CALIBRATION.md",
+      "pattern": "strict_tiled",
+      "meaning": "adaptive calibration documents attention-kernel selection"
+    },
+    {
+      "id": "attention.evidence",
+      "source": "docs/TILED_ATTENTION.md",
+      "pattern": "docs/validation/tiled-attention.json",
+      "meaning": "tiled-attention claims point to their recorded evidence"
+    },
+    {
+      "id": "continuity.restart",
+      "source": "docs/CONTINUITY_LIFECYCLE.md",
+      "pattern": "e2e-worker-external-restart.sh",
+      "meaning": "restart continuity points to the executable scenario"
+    },
+    {
+      "id": "runtime.readiness",
+      "source": "deploy/local-production/README.md",
+      "pattern": "/ready",
+      "meaning": "the local runtime documents its readiness boundary"
+    },
+    {
+      "id": "runtime.release.v3",
+      "source": "deploy/local-production/README.md",
+      "pattern": "mslim.local_release/v3",
+      "meaning": "the local release schema is documented"
+    },
+    {
+      "id": "approximation.disabled",
+      "source": "docs/VALIDATION.md",
+      "pattern": "epsilon > 0",
+      "meaning": "non-zero approximation remains explicitly bounded"
+    }
+  ]
+}

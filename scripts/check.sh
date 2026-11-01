@@ -69,4 +69,7 @@ python3 scripts/model-bundle-digest.py --self-test
 step "source inventory regression gates"
 scripts/check-source-inventory.sh
 
+step "wiki audit regression gates"
+python3 scripts/wiki_audit.py self-test
+
 printf '\nOK: all checks passed.\n'

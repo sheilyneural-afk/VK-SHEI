@@ -1,0 +1,34 @@
+{
+  "schema": "mslim.wiki_manifest/v1",
+  "repository": "https://github.com/sheilyneural-afk/KV-SHEI",
+  "wiki_repository": "https://github.com/sheilyneural-afk/KV-SHEI.wiki.git",
+  "derived_pages": [
+    {"source": "README.md", "target": "Vision-general.md"},
+    {"source": "docs/ARCHITECTURE_FLOWS.md", "target": "Arquitectura-y-flujos.md"},
+    {"source": "docs/VALIDATION.md", "target": "Validacion.md"},
+    {"source": "docs/CONTINUITY_LIFECYCLE.md", "target": "Continuidad-y-ciclo-de-vida.md"},
+    {"source": "docs/MODEL_ADAPTERS.md", "target": "Adaptadores-de-modelo.md"},
+    {"source": "docs/ADAPTIVE_CALIBRATION.md", "target": "Calibracion-adaptativa.md"},
+    {"source": "docs/ADAPTIVE_CALIBRATION_VALIDATION.md", "target": "Validacion-de-calibracion-2026-10-31.md"},
+    {"source": "docs/PREFILL_PROFILE.md", "target": "Perfil-de-prefill.md"},
+    {"source": "docs/TILED_ATTENTION.md", "target": "Atencion-por-teselas.md"},
+    {"source": "docs/RETRIEVAL_EVALUATION.md", "target": "Recuperacion-documental.md"},
+    {"source": "deploy/local-production/README.md", "target": "Entorno-local.md"},
+    {"source": "docs/NAMING_STANDARD.md", "target": "Estandar-de-nombres.md"},
+    {"source": "docs/PENDIENTE.md", "target": "Trabajo-pendiente.md"}
+  ],
+  "required_editorial_pages": [
+    "Home.md",
+    "Rendimiento-y-decode.md",
+    "Mapa-de-modulos.md",
+    "Binarios.md",
+    "CI-y-comprobaciones.md",
+    "_Sidebar.md",
+    "_Footer.md"
+  ],
+  "historical_identifiers": [
+    "OpenClLlm",
+    "OpenClModelAdapter",
+    "--target-dir"
+  ]
+}
