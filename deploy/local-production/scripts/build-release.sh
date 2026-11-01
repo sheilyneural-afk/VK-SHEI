@@ -10,6 +10,14 @@ env_file="$root/deploy/local-production/local-production.env"
 # shellcheck disable=SC1090
 source "$env_file"
 
+# Release builds must never use incremental compilation:
+#   - avoids stale .o fragments polluting the artefact directory
+#   - produces deterministic output identical to CI / production
+# Belt-and-suspenders: also set in .cargo/config.toml and in cargo-local.sh
+# when --release is detected, but explicit here too so this script is
+# self-contained regardless of how cargo is invoked.
+export CARGO_INCREMENTAL=0
+
 case "${MSLIM_MODEL_DIR:?MSLIM_MODEL_DIR must be set}" in
   /*) model_dir="$MSLIM_MODEL_DIR" ;;
   *) model_dir="$root/$MSLIM_MODEL_DIR" ;;
