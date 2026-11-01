@@ -1,0 +1,94 @@
+name: Dependency advisory evidence
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - .github/security/dependency-advisory-baseline.json
+      - .github/workflows/dependency-advisory-evidence.yml
+      - scripts/dependency-advisory-evidence.py
+      - scripts/evidence_io.py
+  schedule:
+    - cron: "41 4 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: read
+
+concurrency:
+  group: dependency-advisory-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  advisory-delta:
+    name: Advisory delta (known findings remain open)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the analyzed source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Select the repository Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
+        with:
+          toolchain: "1.99.1"
+      - name: Install the pinned advisory scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Capture the raw RustSec inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/mslim-dependency-advisories"
+          mkdir -p "$root"
+          set +e
+          cargo audit --json >"$root/cargo-audit.json"
+          audit_status=$?
+          set -e
+          case "$audit_status" in
+            0|1) ;;
+            *) echo "cargo audit failed operationally with status $audit_status" >&2; exit "$audit_status" ;;
+          esac
+          test -s "$root/cargo-audit.json"
+          printf '%s\n' "$audit_status" >"$root/cargo-audit.exit-code"
+      - name: Capture the all-feature dependency paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo tree --locked --all-features --target all \
+            >"$RUNNER_TEMP/mslim-dependency-advisories/cargo-tree-all-features.txt"
+      - name: Capture the open Dependabot advisory feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api \
+            "repos/$GITHUB_REPOSITORY/dependabot/alerts?state=open&per_page=100" \
+            >"$RUNNER_TEMP/mslim-dependency-advisories/dependabot-open.json"
+      - name: Build the source-bound advisory receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/mslim-dependency-advisories"
+          python3 scripts/dependency-advisory-evidence.py build \
+            --baseline .github/security/dependency-advisory-baseline.json \
+            --cargo-audit-json "$root/cargo-audit.json" \
+            --dependabot-json "$root/dependabot-open.json" \
+            --lockfile Cargo.lock \
+            --output "$root/evidence.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Reject unreviewed advisory or lockfile drift
+        run: >-
+          python3 scripts/dependency-advisory-evidence.py verify
+          "$RUNNER_TEMP/mslim-dependency-advisories/evidence.json"
+      - name: Preserve raw inputs and normalized evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-advisories-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mslim-dependency-advisories
+          if-no-files-found: error
+          retention-days: 90
