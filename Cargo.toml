@@ -19,6 +19,11 @@ required-features = ["torch-backend"]
 path = "src/bin/mslim-long-context.rs"
 
 [[bin]]
+name = "mslim-benchmark"
+required-features = ["torch-backend"]
+path = "src/bin/mslim-benchmark.rs"
+
+[[bin]]
 name = "mslim-chat"
 required-features = ["torch-backend"]
 path = "src/bin/mslim-chat.rs"

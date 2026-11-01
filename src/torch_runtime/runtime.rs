@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use tch::{Device, Kind, Tensor};
 use tokenizers::Tokenizer;
 
-#[cfg(test)]
 use crate::model_config::ModelSpec;
 use crate::shadow_metrics::{ShadowDiagnosticReport, ShadowMetrics};
 

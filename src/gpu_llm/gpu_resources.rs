@@ -16,9 +16,10 @@ use opencl3::{
     kernel::ExecuteKernel,
     memory::{Buffer, CL_MEM_READ_WRITE},
     program::Program,
-    types::CL_BLOCKING,
+    types::{CL_BLOCKING, CL_NON_BLOCKING},
 };
 use std::{
+    cell::RefCell,
     fs, ptr,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -55,6 +56,9 @@ pub(crate) struct GpuEngine {
     pub(crate) gemv_unroll4_enabled: AtomicBool,
     pub(crate) fused_decode_enabled: AtomicBool,
     pub(crate) exact_hot_attention_enabled: AtomicBool,
+    /// Reused across decode steps to avoid per-call alloc + CL_BLOCKING upload.
+    /// Stores (buffer, capacity_elements).
+    pub(crate) micro_indices_cache: RefCell<Option<(Buffer<u32>, usize)>>,
     #[cfg(feature = "hip-backend")]
     pub(crate) hip: Option<HipRuntime>,
 }
@@ -148,6 +152,7 @@ impl GpuEngine {
             gemv_unroll4_enabled: AtomicBool::new(false),
             fused_decode_enabled: AtomicBool::new(false),
             exact_hot_attention_enabled: AtomicBool::new(false),
+            micro_indices_cache: RefCell::new(None),
             #[cfg(feature = "hip-backend")]
             hip,
         })
@@ -627,6 +632,13 @@ impl GpuEngine {
     /// micro-links/4-bit LSH priorities + BF16 K-box omitted-mass proof.
     /// All nonselected token scores become -INFINITY; original GPU
     /// softmax and BF16 PV operate on certified real selected K/V.
+    ///
+    /// The indices buffer is kept resident in device memory across calls
+    /// (`micro_indices_cache`) so that each decode step pays only for the
+    /// non-blocking write enqueue, not a full alloc + CL_BLOCKING stall.
+    /// The in-order command queue guarantees the write completes before the
+    /// kernels that follow it; the caller is responsible for a final
+    /// `queue.finish()` after the full layer is processed.
     pub(crate) fn micro_sparse_scores(
         &self,
         query: &Buffer<u8>,
@@ -659,13 +671,27 @@ impl GpuEngine {
             .copied()
             .map(u32::try_from)
             .collect::<std::result::Result<Vec<u32>, _>>()?;
-        let mut indices = self.alloc_indices(ids.len())?;
+
+        // Reuse or grow the cached device buffer. Growing invalidates the old
+        // buffer (it is dropped), and the new one is stored for later calls.
+        let mut cache = self.micro_indices_cache.borrow_mut();
+        let needs_realloc = cache
+            .as_ref()
+            .map_or(true, |(_, cap)| *cap < ids.len());
+        if needs_realloc {
+            let cap = ids.len().max(64);
+            *cache = Some((self.alloc_indices(cap)?, cap));
+        }
+        let indices = &mut cache.as_mut().unwrap().0;
+
         // SAFETY: GPU score bounds are checked; all OpenCL indices
         // originate from the canonical original CPU region IDs and
         // were checked against the committed K length above.
+        // CL_NON_BLOCKING: the in-order queue ensures the write is
+        // complete before micro_clear and micro_sparse_qk execute.
         unsafe {
             self.queue
-                .enqueue_write_buffer(&mut indices, CL_BLOCKING, 0, &ids, &[])
+                .enqueue_write_buffer(indices, CL_NON_BLOCKING, 0, &ids, &[])
                 .context("upload certified GPU micro token positions")?;
             ExecuteKernel::new(&self.kernels.micro_clear)
                 .set_arg(scores)
@@ -676,7 +702,7 @@ impl GpuEngine {
             ExecuteKernel::new(&self.kernels.micro_sparse_qk)
                 .set_arg(query)
                 .set_arg(keys)
-                .set_arg(&indices)
+                .set_arg(indices)
                 .set_arg(scores)
                 .set_arg(&selected_count)
                 .set_arg(&total_count)
@@ -687,11 +713,7 @@ impl GpuEngine {
                 .enqueue_nd_range(&self.queue)
                 .context("GPU real BF16 QK only for certified micro regions")?;
         }
-        // Temporary indices buffer cannot be freed while QK still
-        // references it; finish the queue before returning.
-        self.queue
-            .finish()
-            .context("GPU micro sparse QK indices lifetime")?;
+        // No queue.finish() here: the caller synchronizes after the full layer.
         Ok(())
     }
 

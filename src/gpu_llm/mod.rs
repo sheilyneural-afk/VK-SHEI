@@ -3015,9 +3015,20 @@ mod tests {
             let lod_result = lod.generate(&ids, 16, true).unwrap();
             assert_eq!(dense_ids, lod_result.tokens);
             assert!(lod_result.gpu_region_components_active);
+            // Bound: LOD allocates only keys (not values), so it must be less
+            // than a full dense K+V budget.  Dense K+V = max_tokens × kv_heads
+            // × head_dim × 2 bytes × 2 (K+V) × layers.
+            let dense_kv_bytes = 64
+                * lod.spec().attention.kv_heads
+                * lod.spec().attention.head_dim
+                * 2   // BF16
+                * 2   // K and V
+                * lod.spec().num_hidden_layers;
             assert!(
-                lod_result.gpu_kv_capacity_bytes
-                    < 64 * 2 * 2 * 128 * lod.spec().num_hidden_layers * 2
+                lod_result.gpu_kv_capacity_bytes < dense_kv_bytes,
+                "LOD kv capacity {} should be < dense K+V budget {}",
+                lod_result.gpu_kv_capacity_bytes,
+                dense_kv_bytes
             );
             let stats = lod_result.gpu_region_stats.as_ref().unwrap();
             assert!(stats.exact_v_tokens_read_from_cold > 0);
