@@ -193,7 +193,7 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
-safetensors = { version = "0.3.3", optional = true }
+safetensors = { version = "0.8.0", optional = true }
 tokenizers = { version = "0.22", optional = true }
 minijinja = { version = "2", optional = true }
 tempfile = "3"
