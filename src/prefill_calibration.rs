@@ -80,14 +80,17 @@ fn parse_options(args: Vec<String>) -> Result<Options> {
             PrefillSettings {
                 batch_tokens: Some(32),
                 weight_reuse_tokens: 8,
+                attention: Default::default(),
             },
             PrefillSettings {
                 batch_tokens: Some(64),
                 weight_reuse_tokens: 8,
+                attention: Default::default(),
             },
             PrefillSettings {
                 batch_tokens: Some(256),
                 weight_reuse_tokens: 8,
+                attention: Default::default(),
             },
         ],
         repeats: 3,
@@ -119,9 +122,15 @@ fn parse_options(args: Vec<String>) -> Result<Options> {
                         Ok(PrefillSettings {
                             batch_tokens: Some(batch.parse()?),
                             weight_reuse_tokens: reuse.parse()?,
+                            attention: Default::default(),
                         })
                     })
                     .collect::<Result<_>>()?;
+            }
+            "--kernel-candidates-json" => {
+                ensure!(value.len() <= 32 * 1024, "kernel candidates JSON too large");
+                options.candidates = serde_json::from_str(&value)
+                    .context("kernel candidates must be a JSON array of PrefillSettings")?;
             }
             "--repeats" => options.repeats = value.parse()?,
             "--warmups" => options.warmups = value.parse()?,
@@ -830,6 +839,7 @@ mod tests {
             settings: PrefillSettings {
                 batch_tokens: Some(32),
                 weight_reuse_tokens: 8,
+                attention: Default::default(),
             },
             observation: CalibrationObservation {
                 profile_id: "test".into(),

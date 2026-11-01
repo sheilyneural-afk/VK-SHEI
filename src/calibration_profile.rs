@@ -20,10 +20,13 @@ pub fn sha256(bytes: &[u8]) -> String {
 pub struct PrefillSettings {
     pub batch_tokens: Option<usize>,
     pub weight_reuse_tokens: usize,
+    #[serde(default)]
+    pub attention: crate::attention_kernel::AttentionKernelConfig,
 }
 
 impl PrefillSettings {
     pub fn validate(&self) -> Result<()> {
+        self.attention.validate_activation(false)?;
         ensure!(
             self.batch_tokens.is_none_or(|n| (1..=512).contains(&n)),
             "prefill batch must be 1..=512"
@@ -35,12 +38,17 @@ impl PrefillSettings {
         Ok(())
     }
     pub fn id(&self) -> String {
-        format!(
+        let base = format!(
             "batch-{}-reuse-{}",
             self.batch_tokens
                 .map_or("sequential".into(), |n| n.to_string()),
             self.weight_reuse_tokens
-        )
+        );
+        if self.attention == Default::default() {
+            base
+        } else {
+            format!("{base}-{}", self.attention.id())
+        }
     }
 }
 
@@ -89,6 +97,9 @@ pub fn implementation_digest() -> &'static str {
             include_str!("gpu_llm/kernels.rs"),
             include_str!("gpu_llm/gpu_resources.rs"),
             include_str!("gpu_llm/prefill.rs"),
+            include_str!("gpu_llm/tiled_attention.rs"),
+            include_str!("attention_kernel.rs"),
+            include_str!("../assets/tiled_attention.cl"),
             include_str!("../assets/gpu_llm.cl"),
             include_str!("gpu_region_store.rs"),
             include_str!("gpu_micro_regions.rs"),
@@ -298,6 +309,7 @@ mod tests {
             settings: PrefillSettings {
                 batch_tokens: Some(64),
                 weight_reuse_tokens: 8,
+                attention: Default::default(),
             },
             validated_context_tokens: vec![16, 32, 64],
             prompt_suite_sha256: "f".repeat(64),
@@ -340,7 +352,8 @@ mod tests {
         assert!(
             PrefillSettings {
                 batch_tokens: Some(513),
-                weight_reuse_tokens: 8
+                weight_reuse_tokens: 8,
+                attention: Default::default(),
             }
             .validate()
             .is_err()
@@ -348,7 +361,8 @@ mod tests {
         assert!(
             PrefillSettings {
                 batch_tokens: Some(64),
-                weight_reuse_tokens: 7
+                weight_reuse_tokens: 7,
+                attention: Default::default(),
             }
             .validate()
             .is_err()

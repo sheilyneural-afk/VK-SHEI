@@ -360,18 +360,22 @@ impl BatchKernels {
         Ok(())
     }
 
-    fn attention(
+    pub(super) fn attention(
         &self,
         engine: &GpuEngine,
         queries: &Buffer<u8>,
         keys: &Buffer<u8>,
         values: &Buffer<u8>,
-        scores: &Buffer<f32>,
+        scores: Option<&Buffer<f32>>,
         output: &Buffer<u8>,
         tokens: usize,
         prior: usize,
         geom: AttentionGeometry,
     ) -> Result<()> {
+        if let Some(tiled) = &engine.tiled_attention {
+            return tiled.run(engine, queries, keys, values, output, tokens, prior, geom);
+        }
+        let scores = scores.context("reference prefill scores missing")?;
         let history = prior
             .checked_add(tokens)
             .context("GPU causal history overflow")?;
@@ -451,7 +455,7 @@ struct BatchBuffers {
     up: Buffer<u8>,
     activation: Buffer<u8>,
     down: Buffer<u8>,
-    scores: Buffer<f32>,
+    scores: Option<Buffer<f32>>,
 }
 
 impl BatchBuffers {
@@ -471,10 +475,14 @@ impl BatchBuffers {
                     .context("GPU prefill activation count overflow")?,
             )
         };
-        let score_items = batch_limit
-            .checked_mul(spec.attention.query_heads)
-            .and_then(|v| v.checked_mul(prompt_len))
-            .context("GPU prefill scratch score length overflow")?;
+        let score_items = if engine.tiled_attention.is_some() {
+            0
+        } else {
+            batch_limit
+                .checked_mul(spec.attention.query_heads)
+                .and_then(|v| v.checked_mul(prompt_len))
+                .context("GPU prefill scratch score length overflow")?
+        };
         ensure!(
             score_items
                 .checked_mul(4)
@@ -498,7 +506,11 @@ impl BatchBuffers {
             up: alloc(middle)?,
             activation: alloc(middle)?,
             down: alloc(hidden)?,
-            scores: engine.alloc_scores(score_items)?,
+            scores: if score_items == 0 {
+                None
+            } else {
+                Some(engine.alloc_scores(score_items)?)
+            },
         })
     }
 }
@@ -557,7 +569,14 @@ impl GpuLlm {
             .query_heads
             .checked_mul(prompt_ids.len())
             .context("GPU batch prefill index overflow")?;
-        let allowed_by_memory = MAX_SCRATCH_SCORES_BYTES / (4 * per_score_token);
+        let allowed_by_memory = if self.engine.tiled_attention.is_some() {
+            512
+        } else {
+            MAX_SCRATCH_SCORES_BYTES
+                / per_score_token
+                    .checked_mul(4)
+                    .context("attention scratch overflow")?
+        };
         ensure!(
             allowed_by_memory > 0,
             "GPU prefill context too long for 64MiB scratch score budget"
@@ -982,7 +1001,7 @@ fn run_batch_layer(
         &b.query_rope,
         key_cache,
         value_cache,
-        &b.scores,
+        b.scores.as_ref(),
         &b.attention,
         tokens,
         prior,

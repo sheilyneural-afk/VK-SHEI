@@ -22,6 +22,7 @@ fn settings(batch: usize) -> PrefillSettings {
     PrefillSettings {
         batch_tokens: Some(batch),
         weight_reuse_tokens: 8,
+        attention: Default::default(),
     }
 }
 fn profile(batch: usize) -> mslim::calibration_transaction::CalibrationProfile {

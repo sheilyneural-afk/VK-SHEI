@@ -57,9 +57,19 @@ fn main() -> Result<()> {
     let mut decode_unroll4 = false;
     let mut native_hip = false;
     let mut prefill_profile: Option<PathBuf> = None;
+    let mut attention_kernel = mslim::attention_kernel::AttentionKernelConfig::default();
+    let mut allow_experimental_attention = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--attention-kernel-json" => {
+                let value = args
+                    .next()
+                    .context("--attention-kernel-json requires JSON")?;
+                ensure!(value.len() <= 4096, "attention JSON too large");
+                attention_kernel = serde_json::from_str(&value)?;
+            }
+            "--allow-experimental-attention" => allow_experimental_attention = true,
             "--model" => model = args.next().context("--model value missing")?.into(),
             "--prompt" => user = args.next().context("--prompt value missing")?,
             "--ids" => ids = Some(parse_ids(&args.next().context("--ids value missing")?)?),
@@ -206,6 +216,9 @@ fn main() -> Result<()> {
                     .cold_directory = Some(value);
             }
             "--help" | "-h" => {
+                println!(
+                    "--attention-kernel-json JSON [--allow-experimental-attention]: optional strict_tiled or online_experimental/split_kv_experimental; reference is default"
+                );
                 println!("M-SLIM BF16 Rust/GPU full LLM inference, experimental");
                 println!(
                     "Usage: mslim-runtime-cli [--model dir] [--prompt Hola | --ids 1,2,3] [--max-new-tokens 1] [--max-context-tokens 128] [--resident|--stream-weights] [--load-only] [--verify-weights] [--logits] [--thinking] [--gpu-lod] [--lod-epsilon 0] [--lod-stage 64] [--gpu-dense-kv] [--gpu-prefill-batch 128|--gpu-prefill-fallback] [--prefill-profile PATH]"
@@ -269,6 +282,7 @@ fn main() -> Result<()> {
         }
         runtime.set_gpu_micro_axis_policy(policy)?;
     }
+    runtime.set_attention_kernel(attention_kernel, allow_experimental_attention)?;
     runtime.set_batch_prefill_tokens(prefill_batch)?;
     runtime.set_prefill_weight_reuse_tokens(weight_reuse)?;
     runtime.set_prefill_projection_fusion_mode(fused_prefill_mask)?;
@@ -361,6 +375,7 @@ fn main() -> Result<()> {
             "gpu_micro_axis_warmup":runtime.gpu_micro_axis_policy().map(|p|p.warmup_observations),
             "gpu_micro_axis_open_safety_fuse":runtime.gpu_micro_axis_policy().and_then(|p|p.open_extent_safety_limit),
             "calibrated_prefill_profile": runtime.calibrated_prefill_profile(),
+            "attention_kernel": runtime.attention_kernel_diagnostics(),
             "gpu_prefill_batch_tokens":generation.gpu_prefill_batch_tokens,
             "gpu_prefill_weight_reuse_tokens":generation.gpu_prefill_weight_reuse_tokens,
             "gpu_prefill_fused_projections":generation.gpu_prefill_fused_projections,
