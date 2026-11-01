@@ -29,7 +29,7 @@ concurrency:
 jobs:
   release:
     name: Build and attest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -100,7 +100,7 @@ jobs:
         with:
           subject-path: ${{ github.workspace }}/deploy/local-production/runtime/github-evidence/*.evidence.json
       - name: Preserve the complete release candidate
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ env.RELEASE_TAG }}
           path: |
@@ -125,13 +125,13 @@ jobs:
     if: github.event_name == 'push' || inputs.publish_release
     name: Publish GitHub Release
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: write
     steps:
       - name: Download the already attested release candidate
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-${{ env.RELEASE_TAG }}
           path: release
