@@ -49,7 +49,7 @@ impl WeightShard {
         Ok(SafeTensors::deserialize(&self.map)?
             .names()
             .into_iter()
-            .cloned()
+            .map(str::to_owned)
             .collect())
     }
 }
@@ -69,7 +69,7 @@ impl NativeWeightArchive {
         for (index, shard) in shards.iter().enumerate() {
             for name in shard.names()? {
                 ensure!(
-                    owners.insert(name.clone(), index).is_none(),
+                    owners.insert(name.to_owned(), index).is_none(),
                     "tensor duplicado entre shards: {name}"
                 );
             }

@@ -97,7 +97,7 @@ impl WeightFile {
     fn tensor_names(&self) -> Result<Vec<String>> {
         let archive = SafeTensors::deserialize(&self.mapping)
             .with_context(|| format!("safetensors inválido: {}", self.path.display()))?;
-        Ok(archive.names().into_iter().cloned().collect())
+        Ok(archive.names().into_iter().map(str::to_owned).collect())
     }
 }
 
