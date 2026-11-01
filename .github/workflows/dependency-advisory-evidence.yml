@@ -16,7 +16,7 @@ on:
 
 permissions:
   contents: read
-  security-events: read
+  vulnerability-alerts: read
 
 concurrency:
   group: dependency-advisory-evidence-${{ github.ref }}

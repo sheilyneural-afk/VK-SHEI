@@ -1,17 +1,17 @@
 {
   "schema": "mslim.dependency_advisory_baseline/v1",
   "captured_from": {
-    "source_commit": "8648ff2b78911c2bc3623763fc3cd7eb3a28aba9",
-    "cargo_lock_sha256": "314d3adfdfbb12a5a190a8ee8af012007f7b757ccd32cac35bb655e145f68719",
+    "source_commit": "e6ec873ba5e8663801f8f22ee880a6446d7b53df",
+    "cargo_lock_sha256": "db93ced29a314becbbbfa3ef08f0c15dbbdfea1cdaef0ac9af54529518d85f57",
     "cargo_audit_version": "0.22.2",
     "advisory_database_commit": "2295466c4e9df26647fd67d8fa1c705ac2fc7f81",
     "advisory_database_updated_at": "2026-10-30T12:12:39+01:00",
-    "captured_at": "2026-11-01T20:00:00+01:00"
+    "captured_at": "2026-11-01T21:28:23+01:00"
   },
   "policy": {
     "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34",
     "delta_gate": "Fail on an unregistered advisory, package/version/kind drift, or a Cargo.lock digest that no longer matches this review.",
-    "known_findings": "A registered finding remains open risk; registration is not acceptance, remediation, dismissal, or proof of non-exploitability."
+    "known_findings": "A registered finding remains an observed risk signal; registration is not acceptance, dismissal, or proof of non-exploitability. Its disposition records source remediation that may still await an upstream rescan."
   },
   "known_advisories": [
     {
@@ -20,10 +20,10 @@
       "kind": "vulnerability",
       "package": "zip",
       "version": "0.6.6",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6",
-      "feature_surface": "torch-backend",
-      "reachability": "The affected AES decrypt APIs are present transitively; no call from KV-SHEI or its observed tch paths was found.",
-      "disposition": "open-remediation",
+      "dependency_path": "Dependabot alert for prior lock: mslim -> tch 0.18.1 -> zip 0.6.6; source e6ec873 pins zip 9.0.5",
+      "feature_surface": "stale GitHub alert for the optional torch-backend graph",
+      "reachability": "Source e6ec873 removes zip 0.6.6 from Cargo.lock; the alert was still open in GitHub while its dependency graph awaited rescan.",
+      "disposition": "source-remediated-awaiting-dependabot-rescan",
       "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/32"
     },
     {
@@ -32,10 +32,10 @@
       "kind": "vulnerability",
       "package": "zip",
       "version": "0.6.6",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6",
-      "feature_surface": "torch-backend",
-      "reachability": "The affected streaming extraction API is present transitively; no ZipStreamReader extraction call was found in KV-SHEI or its observed tch/torch-sys paths.",
-      "disposition": "open-remediation",
+      "dependency_path": "Dependabot alert for prior lock: mslim -> tch 0.18.1 -> zip 0.6.6; source e6ec873 pins zip 9.0.5",
+      "feature_surface": "stale GitHub alert for the optional torch-backend graph",
+      "reachability": "Source e6ec873 removes zip 0.6.6 from Cargo.lock; the alert was still open in GitHub while its dependency graph awaited rescan.",
+      "disposition": "source-remediated-awaiting-dependabot-rescan",
       "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/32"
     },
     {
@@ -47,150 +47,6 @@
       "dependency_path": "mslim -> tokenizers 0.22.2 -> paste 1.0.15",
       "feature_surface": "model-bundle; default native-cpu-backend build",
       "reachability": "Compile-time procedural macro dependency; this is a maintenance warning, not a reported runtime vulnerability.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0367",
-      "kind": "vulnerability",
-      "package": "zip",
-      "version": "0.6.6",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6",
-      "feature_surface": "torch-backend",
-      "reachability": "Affected archive extraction API is present; no ZipArchive::extract call was found in KV-SHEI or its observed tch/torch-sys paths.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/32"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0368",
-      "kind": "vulnerability",
-      "package": "zip",
-      "version": "0.6.6",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6",
-      "feature_surface": "torch-backend",
-      "reachability": "Affected archive extraction API is present; no ZipArchive::extract call was found in KV-SHEI or its observed tch/torch-sys paths.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/32"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0369",
-      "kind": "vulnerability",
-      "package": "zip",
-      "version": "0.6.6",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6",
-      "feature_surface": "torch-backend",
-      "reachability": "Affected archive extraction APIs are present; no ZipStreamReader::extract or ZipArchive::extract call was found in KV-SHEI or its observed tch/torch-sys paths.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/32"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0395",
-      "kind": "unsound",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "Affected low-level StableInBuffer API was not found in KV-SHEI, tch, torch-sys, or the zip call path.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0397",
-      "kind": "unsound",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "Affected low-level OutBuffer::around_pos API was not found in KV-SHEI, tch, torch-sys, or the zip call path.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0399",
-      "kind": "unsound",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "Affected experimental dictionary initialization APIs were not found in KV-SHEI, tch, torch-sys, or the zip call path.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0400",
-      "kind": "unsound",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "Affected mixed one-shot/stream dictionary APIs were not found in KV-SHEI, tch, torch-sys, or the zip call path.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0401",
-      "kind": "unsound",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "Affected dictionary training API was not found in KV-SHEI, tch, torch-sys, or the zip call path.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0402",
-      "kind": "unsound",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "Affected experimental multithreaded clone API was not found in KV-SHEI, tch, torch-sys, or the zip call path.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0403",
-      "kind": "vulnerability",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "The advisory affects streaming write decompression; zip 0.6.6 was observed using zstd stream read decoding and write encoding instead.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0404",
-      "kind": "unsound",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "Affected experimental DCtx::try_clone API was not found in KV-SHEI, tch, torch-sys, or the zip call path.",
-      "disposition": "open-remediation",
-      "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
-    },
-    {
-      "source": "cargo-audit",
-      "id": "RUSTSEC-2026-0406",
-      "kind": "unsound",
-      "package": "zstd-safe",
-      "version": "5.0.2+zstd.1.5.2",
-      "dependency_path": "mslim -> tch 0.18.1 -> zip 0.6.6 -> zstd 0.11.2 -> zstd-safe 5.0.2",
-      "feature_surface": "torch-backend via zip default zstd feature",
-      "reachability": "Affected low-level multithreaded context mutation APIs were not found in KV-SHEI, tch, torch-sys, or the zip call path.",
       "disposition": "open-remediation",
       "tracking_issue": "https://github.com/sheilyneural-afk/KV-SHEI/issues/34"
     }
