@@ -22,6 +22,10 @@ pub fn source_revision() -> Value {
     })
 }
 
+pub fn current_build_is_clean() -> bool {
+    SOURCE_DIRTY == "false"
+}
+
 /// Reusable evidence must come from this exact commit and from a clean build.
 /// A dirty build may still be useful for development, but it cannot authorize
 /// a cached production receipt.
@@ -29,7 +33,8 @@ pub fn is_current_clean_source_revision(value: Option<&Value>) -> bool {
     let Some(value) = value else {
         return false;
     };
-    SOURCE_COMMIT.len() == 40
+    current_build_is_clean()
+        && SOURCE_COMMIT.len() == 40
         && SOURCE_COMMIT.bytes().all(|byte| byte.is_ascii_hexdigit())
         && value.get("commit").and_then(Value::as_str) == Some(SOURCE_COMMIT)
         && value
@@ -64,7 +69,7 @@ mod tests {
 
     #[test]
     fn reusable_revision_requires_the_current_commit_and_a_clean_build() {
-        if SOURCE_COMMIT == "unknown" {
+        if SOURCE_COMMIT == "unknown" || !current_build_is_clean() {
             assert!(!is_current_clean_source_revision(Some(&source_revision())));
             return;
         }

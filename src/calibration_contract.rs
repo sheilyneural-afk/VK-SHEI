@@ -243,9 +243,11 @@ mod tests {
     #[test]
     fn accepts_only_the_canonical_v4_contract() {
         let bundle = "a".repeat(64);
-        assert!(
-            validate_calibration_receipt(&receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle), &bundle)
-                .is_ok()
+        let canonical =
+            validate_calibration_receipt(&receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle), &bundle);
+        assert_eq!(
+            canonical.is_ok(),
+            crate::build_info::current_build_is_clean()
         );
         for legacy in [
             "mslim.calibration_receipt/v1",

@@ -516,15 +516,16 @@ mod tests {
             "cross_backend_diagnostic": {"all_logits_exact": false},
         });
         fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
-        assert_eq!(
-            require_passing_validation_matrix_if_accelerated(
-                root.path(),
-                &digest,
-                "accelerator-runtime"
-            )
-            .unwrap(),
-            "same-backend-and-kv-integrity-passed"
+        let canonical = require_passing_validation_matrix_if_accelerated(
+            root.path(),
+            &digest,
+            "accelerator-runtime",
         );
+        if mslim::build_info::current_build_is_clean() {
+            assert_eq!(canonical.unwrap(), "same-backend-and-kv-integrity-passed");
+        } else {
+            assert!(canonical.is_err());
+        }
 
         receipt["source_revision"]["tracked_files_modified_at_build"] = json!(true);
         fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();

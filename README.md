@@ -198,7 +198,7 @@ El worker escucha en loopback y expone:
 | Endpoint | Comportamiento actual |
 |---|---|
 | `GET /health` | estado del proceso y descripción del runtime cargado |
-| `GET /ready` | informa que el worker terminó su carga |
+| `GET /ready` | exige modelo cargado, matriz válida para la configuración efectiva y calibración sostenida válida |
 | `GET /v1/models` | modelo activo |
 | `GET /v1/capabilities` | configuración, calibración reconocida y matriz reconocida |
 | `POST /v1/chat/completions` | generación greedy y operaciones de continuidad |
@@ -209,9 +209,9 @@ y `top_p` distinto de uno. Acepta entre 1 y 512 tokens de salida. “Stream” e
 la respuesta HTTP.
 
 El gateway es un proceso separado. Exige `MSLIM_GATEWAY_TOKEN`, compara el
-bearer token y solo acepta workers en loopback. Su selector de calibración está
-actualmente desalineado con el worker, como se indica en “Estado del despliegue
-local”.
+bearer token y solo acepta workers en loopback. Worker y gateway exigen la misma
+matriz y calibración válidas; un manifest de runtime externo demuestra sus
+capacidades IPC, pero no sustituye esas evidencias.
 
 Cargo tiene `autobins = false` y registra `mslim-server` con
 `src/bin/mslim-gateway.rs`. La implementación HTTP anterior que vivía en

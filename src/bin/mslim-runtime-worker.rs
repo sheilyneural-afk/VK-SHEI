@@ -1064,35 +1064,33 @@ fn validation_matrix_summary(state: &AppState) -> Option<Value> {
         || receipt.get("status").and_then(Value::as_str) != Some("passed")
         || receipt.get("bundle_sha256").and_then(Value::as_str) != Some(model_digest)
         || !mslim::build_info::is_current_clean_source_revision(receipt.get("source_revision"))
-        || state.runtime_manifest.is_none()
-            && (frozen.get("stage_tokens").and_then(Value::as_u64)
-                != state.lod_stage.map(|value| value as u64)
-                || frozen.get("prefill_batch_tokens").and_then(Value::as_u64)
-                    != state.gpu_prefill_batch_tokens.map(|value| value as u64)
-                || frozen
-                    .get("prefill_weight_reuse_tokens")
-                    .and_then(Value::as_u64)
-                    != Some(state.gpu_prefill_weight_reuse_tokens as u64)
-                || frozen.get("hot_v_tokens").and_then(Value::as_u64)
-                    != Some(state.gpu_hot_v_capacity_tokens as u64)
-                || frozen.get("prompt_replay_tokens").and_then(Value::as_u64)
-                    != Some(state.gpu_verified_prompt_replay_max_tokens as u64)
-                || frozen.get("shared_prefix").and_then(Value::as_bool)
-                    != Some(state.gpu_verified_shared_prefix_enabled)
-                || frozen.get("deferred_cold_commit").and_then(Value::as_bool)
-                    != Some(state.gpu_deferred_cold_enabled)
-                || frozen
-                    .get("exact_hot_fused_attention")
-                    .and_then(Value::as_bool)
-                    != Some(state.gpu_exact_hot_fused_attention)
-                || frozen.get("decode_unroll4").and_then(Value::as_bool)
-                    != Some(state.gpu_decode_unroll4)
-                || frozen.get("decode_fused_kernels").and_then(Value::as_bool)
-                    != Some(state.gpu_decode_fused_kernels)
-                || frozen
-                    .get("prefill_fuse_projections")
-                    .and_then(Value::as_bool)
-                    != Some(state.gpu_prefill_fuse_projections))
+        || frozen.get("stage_tokens").and_then(Value::as_u64)
+            != state.lod_stage.map(|value| value as u64)
+        || frozen.get("prefill_batch_tokens").and_then(Value::as_u64)
+            != state.gpu_prefill_batch_tokens.map(|value| value as u64)
+        || frozen
+            .get("prefill_weight_reuse_tokens")
+            .and_then(Value::as_u64)
+            != Some(state.gpu_prefill_weight_reuse_tokens as u64)
+        || frozen.get("hot_v_tokens").and_then(Value::as_u64)
+            != Some(state.gpu_hot_v_capacity_tokens as u64)
+        || frozen.get("prompt_replay_tokens").and_then(Value::as_u64)
+            != Some(state.gpu_verified_prompt_replay_max_tokens as u64)
+        || frozen.get("shared_prefix").and_then(Value::as_bool)
+            != Some(state.gpu_verified_shared_prefix_enabled)
+        || frozen.get("deferred_cold_commit").and_then(Value::as_bool)
+            != Some(state.gpu_deferred_cold_enabled)
+        || frozen
+            .get("exact_hot_fused_attention")
+            .and_then(Value::as_bool)
+            != Some(state.gpu_exact_hot_fused_attention)
+        || frozen.get("decode_unroll4").and_then(Value::as_bool) != Some(state.gpu_decode_unroll4)
+        || frozen.get("decode_fused_kernels").and_then(Value::as_bool)
+            != Some(state.gpu_decode_fused_kernels)
+        || frozen
+            .get("prefill_fuse_projections")
+            .and_then(Value::as_bool)
+            != Some(state.gpu_prefill_fuse_projections)
     {
         return None;
     }
@@ -1112,8 +1110,26 @@ fn validation_matrix_summary(state: &AppState) -> Option<Value> {
     }))
 }
 
+fn calibration_receipt(state: &AppState) -> Option<Value> {
+    let model_digest = Path::new(&state.model_dir).file_name()?.to_str()?;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("deploy/local-production/runtime/calibration")
+        .join(format!("{model_digest}.json"));
+    serde_json::from_slice::<Value>(&fs::read(path).ok()?)
+        .ok()
+        .filter(|receipt| validate_calibration_receipt(receipt, model_digest).is_ok())
+}
+
+fn readiness_evidence(state: &AppState) -> (Option<Value>, Option<Value>) {
+    (validation_matrix_summary(state), calibration_receipt(state))
+}
+
+fn evidence_is_ready(validation: &Option<Value>, calibration: &Option<Value>) -> bool {
+    validation.is_some() && calibration.is_some()
+}
+
 async fn health(State(state): State<AppState>) -> Json<Value> {
-    let validation = validation_matrix_summary(&state);
+    let (validation, calibration) = readiness_evidence(&state);
     let exact_dense_logits_parity_proven = validation
         .as_ref()
         .and_then(|value| value.get("same_backend_exact"))
@@ -1121,7 +1137,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         .unwrap_or(false);
     Json(json!({
         "status":"alive",
-        "ready": state.runtime_manifest.is_some() || validation.is_some(),
+        "ready": evidence_is_ready(&validation, &calibration),
         "engine":"mslim-engine",
         "model":state.model_id,
         "model_directory": state.model_dir,
@@ -1175,21 +1191,10 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
-    let matrix_ready =
-        state.runtime_manifest.is_some() || validation_matrix_summary(&state).is_some();
-    let model_digest = Path::new(&state.model_dir)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let calibration_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("deploy/local-production/runtime/calibration")
-        .join(format!("{model_digest}.json"));
-    let calibration_ready = state.runtime_manifest.is_some()
-        || fs::read(calibration_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .is_some_and(|receipt| validate_calibration_receipt(&receipt, model_digest).is_ok());
-    if matrix_ready && calibration_ready {
+    let (validation, calibration) = readiness_evidence(&state);
+    let matrix_ready = validation.is_some();
+    let calibration_ready = calibration.is_some();
+    if evidence_is_ready(&validation, &calibration) {
         (
             StatusCode::OK,
             Json(json!({
@@ -1224,14 +1229,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("unknown");
-    let calibration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("deploy/local-production/runtime/calibration")
-        .join(format!("{model_digest}.json"));
-    let calibration = std::fs::read(&calibration_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .filter(|value| validate_calibration_receipt(value, model_digest).is_ok());
-    let validation = validation_matrix_summary(&state);
+    let (validation, calibration) = readiness_evidence(&state);
     let backend = if state.runtime_manifest.is_some() {
         "external-runtime-session"
     } else {
@@ -1932,6 +1930,16 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_requires_both_matrix_and_calibration_evidence() {
+        let present = Some(json!({"status": "passed"}));
+        let missing = None;
+        assert!(evidence_is_ready(&present, &present));
+        assert!(!evidence_is_ready(&present, &missing));
+        assert!(!evidence_is_ready(&missing, &present));
+        assert!(!evidence_is_ready(&missing, &missing));
+    }
 
     fn test_continuity_request() -> ContinuityRequest {
         ContinuityRequest {

@@ -14,6 +14,16 @@ fn git(arguments: &[&str]) -> Option<String> {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // A worktree-only source edit does not touch .git/index. Watch the
+    // canonical Rust input trees as directories so edits and newly-created
+    // source files force this build script to recompute SOURCE_DIRTY before
+    // rustc embeds it. Deployment/runtime state is deliberately not watched.
+    for source_tree in ["src", "tests", "crates", "tools"] {
+        println!("cargo:rerun-if-changed={source_tree}");
+    }
+    for source_input in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"] {
+        println!("cargo:rerun-if-changed={source_input}");
+    }
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
     if let Some(reference) = git(&["rev-parse", "--symbolic-full-name", "HEAD"])

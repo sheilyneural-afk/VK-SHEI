@@ -245,7 +245,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             calibration_receipt_is_reusable(root.path(), std::ffi::OsStr::new(&bundle)),
-            "available"
+            if mslim::build_info::current_build_is_clean() {
+                "available"
+            } else {
+                "invalid"
+            }
         );
         let mut legacy = canonical_receipt(&bundle);
         legacy["schema"] = json!("kvslim.calibration_receipt/v2");

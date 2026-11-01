@@ -96,19 +96,44 @@ async fn health() -> impl IntoResponse {
     )
 }
 
+fn worker_is_ready(transport_ready: bool, capabilities: Option<&Value>) -> bool {
+    transport_ready && worker_capabilities_are_valid(capabilities)
+}
+
 async fn ready(state: State<Arc<AppState>>) -> impl IntoResponse {
     let mut available = Vec::new();
     for (id, endpoint) in state.workers.iter() {
-        let result = state
+        let transport_ready = state
             .client
             .get(format!("{endpoint}/ready"))
             .timeout(Duration::from_secs(2))
             .send()
-            .await;
+            .await
+            .is_ok_and(|response| response.status().is_success());
+        let capabilities = if transport_ready {
+            match state
+                .client
+                .get(format!("{endpoint}/v1/capabilities"))
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    response.json::<Value>().await.ok()
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let evidence_ready = worker_capabilities_are_valid(capabilities.as_ref());
+        let admitted = worker_is_ready(transport_ready, capabilities.as_ref());
         available.push(json!({
             "id": id,
             "endpoint": endpoint,
-            "ready": result.is_ok_and(|response| response.status().is_success())
+            "transport_ready": transport_ready,
+            "evidence_ready": evidence_ready,
+            "ready": admitted
         }));
     }
     let any = available
@@ -210,10 +235,29 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
             mslim::calibration_contract::validate_calibration_receipt(receipt, digest).is_ok()
         })
     });
+    let validation = capabilities.get("validation_matrix");
+    let has_validation = model_digest.is_some_and(|digest| {
+        validation.is_some_and(|matrix| {
+            matrix.get("schema").and_then(Value::as_str)
+                == Some("mslim.validation-matrix-summary/v1")
+                && matrix.get("status").and_then(Value::as_str) == Some("passed")
+                && matrix.get("bundle_sha256").and_then(Value::as_str) == Some(digest)
+                && matrix.get("same_backend_exact").and_then(Value::as_bool) == Some(true)
+                && matrix
+                    .get("physical_coldstore_snapshot")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })
+    });
     let identity_matches = model_digest.is_some()
         && model_digest == checkpoint_digest
         && model_digest == calibration_digest;
-    has_engine && has_model && has_runtime_description && has_calibration && identity_matches
+    has_engine
+        && has_model
+        && has_runtime_description
+        && has_calibration
+        && has_validation
+        && identity_matches
 }
 
 async fn models(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError> {
@@ -221,6 +265,7 @@ async fn models(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError
     let response = state
         .client
         .get(format!("{worker}/v1/models"))
+        .timeout(Duration::from_secs(2))
         .send()
         .await
         .map_err(|error| GatewayError(StatusCode::BAD_GATEWAY, error.to_string()))?;
@@ -237,20 +282,32 @@ async fn models(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError
 
 async fn capabilities(state: State<Arc<AppState>>) -> Result<Json<Value>, GatewayError> {
     let worker = select_worker(&state, None).await?;
-    let body = state
+    let response = state
         .client
         .get(format!("{worker}/v1/capabilities"))
+        .timeout(Duration::from_secs(2))
         .send()
         .await
-        .map_err(|error| GatewayError(StatusCode::BAD_GATEWAY, error.to_string()))?
+        .map_err(|error| GatewayError(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let status = response.status();
+    let body = response
         .json::<Value>()
         .await
         .map_err(|error| GatewayError(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    ensure_worker_success(status, &body)?;
     Ok(Json(json!({
         "server": "mslim-server",
         "worker_capabilities": body,
         "routing": "readiness-and-worker-registry"
     })))
+}
+
+fn ensure_worker_success(status: StatusCode, body: &Value) -> Result<(), GatewayError> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(GatewayError(status, body.to_string()))
+    }
 }
 
 async fn chat(
@@ -366,6 +423,21 @@ mod tests {
     }
 
     #[test]
+    fn transport_success_without_evidence_is_not_readiness() {
+        assert!(!worker_is_ready(true, None));
+        assert!(!worker_is_ready(false, Some(&json!({}))));
+    }
+
+    #[test]
+    fn worker_error_cannot_be_wrapped_as_success() {
+        let body = json!({"error": "evidence disappeared"});
+        let error = ensure_worker_success(StatusCode::SERVICE_UNAVAILABLE, &body).unwrap_err();
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.1.contains("evidence disappeared"));
+        assert!(ensure_worker_success(StatusCode::OK, &body).is_ok());
+    }
+
+    #[test]
     fn parse_workers_accepts_loopback_and_trims() {
         let workers = parse_workers(&assignments(&[
             " a = http://127.0.0.1:9000/ ",
@@ -420,6 +492,10 @@ mod tests {
                 "schema": mslim::project_identity::CALIBRATION_RECEIPT_SCHEMA,
                 "status": "measured-sustained-execution",
                 "bundle": "a".repeat(64),
+                "source_revision": {
+                    "commit": mslim::build_info::SOURCE_COMMIT,
+                    "tracked_files_modified_at_build": false
+                },
                 "adapter": "accelerator-runtime",
                 "identity_digest": "b".repeat(64),
                 "started_unix_seconds": 1,
@@ -439,9 +515,36 @@ mod tests {
                     "restore_latency_measured_as_physical_kv_hydration": false
                 },
                 "validation_matrix_gate": "same-backend-and-kv-integrity-passed"
+            },
+            "validation_matrix": {
+                "schema": "mslim.validation-matrix-summary/v1",
+                "status": "passed",
+                "bundle_sha256": "a".repeat(64),
+                "same_backend_exact": true,
+                "physical_coldstore_snapshot": true
             }
         });
-        assert!(worker_capabilities_are_valid(Some(&valid)));
+        assert_eq!(
+            worker_capabilities_are_valid(Some(&valid)),
+            mslim::build_info::current_build_is_clean()
+        );
+        let mut missing_source_revision = valid.clone();
+        missing_source_revision["calibration"]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_revision");
+        assert!(!worker_capabilities_are_valid(Some(
+            &missing_source_revision
+        )));
+        let mut missing_validation = valid.clone();
+        missing_validation
+            .as_object_mut()
+            .unwrap()
+            .remove("validation_matrix");
+        assert!(!worker_capabilities_are_valid(Some(&missing_validation)));
+        let mut non_exact_validation = valid.clone();
+        non_exact_validation["validation_matrix"]["same_backend_exact"] = json!(false);
+        assert!(!worker_capabilities_are_valid(Some(&non_exact_validation)));
         let mut invalid = valid.clone();
         invalid["calibration"]["bundle"] = json!("c".repeat(64));
         assert!(!worker_capabilities_are_valid(Some(&invalid)));
