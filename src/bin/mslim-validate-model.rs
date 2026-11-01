@@ -60,7 +60,10 @@ fn main() -> Result<()> {
     let validation_root = root.join("deploy/local-production/runtime/validation");
     fs::create_dir_all(&validation_root)?;
     let receipt = serde_json::json!({
-        "schema": "mslim.validation_receipt/v1",
+        "project": mslim::project_identity::PROJECT,
+        "product": mslim::project_identity::PRODUCT,
+        "technical_namespace": mslim::project_identity::TECHNICAL_NAMESPACE,
+        "schema": mslim::project_identity::VALIDATION_RECEIPT_SCHEMA,
         "source_revision": mslim::build_info::source_revision(),
         "bundle_sha256": bundle_digest,
         "adapter": selection.adapter_id,

@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{error::Error, fmt};
 
+pub use mslim_adapter_api::CacheMode;
+
 pub const CONTINUITY_REQUEST_SCHEMA: &str = "mslim.continuity.request/v1";
-pub const CACHE_RECEIPT_SCHEMA: &str = "mslim.continuity.cache-receipt/v1";
+pub const CACHE_RECEIPT_SCHEMA: &str = "mslim.continuity.cache-receipt/v2";
 const REQUEST_HASH_DOMAIN: &[u8] = b"mslim-continuity-request-v1\0";
-const RECEIPT_HASH_DOMAIN: &[u8] = b"mslim-continuity-cache-receipt-v1\0";
+const RECEIPT_HASH_DOMAIN: &[u8] = b"mslim-continuity-cache-receipt-v2\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractError {
@@ -38,13 +40,6 @@ pub enum ContinuityOperation {
     Resume,
     Snapshot,
     Release,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheMode {
-    Exact,
-    CertifiedApproximate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,7 +107,10 @@ impl ContinuityRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CacheReceipt {
+pub struct ContinuityCacheReceipt {
+    pub project: String,
+    pub product: String,
+    pub technical_namespace: String,
     pub schema: String,
     pub operation: ContinuityOperation,
     pub opaque_session_handle: String,
@@ -127,13 +125,22 @@ pub struct CacheReceipt {
     pub mode: CacheMode,
 }
 
-impl CacheReceipt {
+impl ContinuityCacheReceipt {
     pub fn validate_for_at(
         &self,
         request: &ContinuityRequest,
         now_unix_s: u64,
     ) -> Result<(), ContractError> {
         request.validate_at(now_unix_s)?;
+        if self.project != crate::project_identity::PROJECT
+            || self.product != crate::project_identity::PRODUCT
+            || self.technical_namespace != crate::project_identity::TECHNICAL_NAMESPACE
+        {
+            return Err(ContractError::new(
+                "receipt.identity",
+                "unsupported identity",
+            ));
+        }
         validate_schema(&self.schema, CACHE_RECEIPT_SCHEMA, "receipt.schema")?;
         validate_handle(&self.opaque_session_handle)?;
         validate_digest(&self.model_digest, "receipt.model_digest")?;
@@ -266,8 +273,11 @@ mod tests {
         }
     }
 
-    fn receipt(request: &ContinuityRequest) -> CacheReceipt {
-        CacheReceipt {
+    fn receipt(request: &ContinuityRequest) -> ContinuityCacheReceipt {
+        ContinuityCacheReceipt {
+            project: crate::project_identity::PROJECT.into(),
+            product: crate::project_identity::PRODUCT.into(),
+            technical_namespace: crate::project_identity::TECHNICAL_NAMESPACE.into(),
             schema: CACHE_RECEIPT_SCHEMA.into(),
             operation: request.operation,
             opaque_session_handle: request.opaque_session_handle.clone(),

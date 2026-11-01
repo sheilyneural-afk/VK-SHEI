@@ -17,7 +17,10 @@ use std::{
 const DEFAULT_CONTEXTS: &[usize] = &[1, 128, 512, 2_048];
 
 #[derive(Debug, Serialize)]
-struct CalibrationReceipt {
+struct SustainedCalibrationReceipt {
+    project: &'static str,
+    product: &'static str,
+    technical_namespace: &'static str,
     schema: &'static str,
     bundle: String,
     adapter: String,
@@ -223,7 +226,10 @@ fn main() -> Result<()> {
         });
     }
 
-    let receipt = CalibrationReceipt {
+    let receipt = SustainedCalibrationReceipt {
+        project: mslim::project_identity::PROJECT,
+        product: mslim::project_identity::PRODUCT,
+        technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE,
         schema: CALIBRATION_RECEIPT_SCHEMA,
         bundle: digest.to_owned(),
         adapter: selection.adapter_id,
@@ -316,8 +322,9 @@ fn require_passing_validation_matrix_if_accelerated(
     })?)
     .context("matriz de validación inválida")?;
     ensure!(
-        receipt.get("schema").and_then(Value::as_str) == Some("mslim.validation-matrix/v1"),
-        "la validación del acelerador no usa el contrato de matriz v1"
+        receipt.get("schema").and_then(Value::as_str)
+            == Some(mslim::project_identity::VALIDATION_MATRIX_SCHEMA),
+        "la validación del acelerador no usa el contrato canónico de matriz"
     );
     ensure!(
         receipt.get("status").and_then(Value::as_str) == Some("passed"),
@@ -484,7 +491,10 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join(format!("validation-matrix-{digest}.json"));
         let mut receipt = json!({
-            "schema": "mslim.validation-matrix/v1",
+            "project": mslim::project_identity::PROJECT,
+            "product": mslim::project_identity::PRODUCT,
+            "technical_namespace": mslim::project_identity::TECHNICAL_NAMESPACE,
+            "schema": mslim::project_identity::VALIDATION_MATRIX_SCHEMA,
             "status": "passed",
             "bundle_sha256": digest,
             "determinism": {"all_passed": true},

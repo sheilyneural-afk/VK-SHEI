@@ -10,8 +10,8 @@ use mslim::{
     runtime_host::RuntimeHost,
 };
 use mslim_adapter_api::{
-    AdapterCapabilities, CacheMode, CacheReceipt, GenerationRequest, GenerationResult,
-    GenerationStats, ModelIdentity, RuntimeSession,
+    AdapterCapabilities, CacheMode, GenerationRequest, GenerationResult, GenerationStats,
+    ModelIdentity, RuntimeCacheReceipt, RuntimeSession,
 };
 use serde_json::Value;
 use std::{
@@ -75,8 +75,11 @@ impl RuntimeSession for DeterministicSession {
         }
         Ok(())
     }
-    fn snapshot_receipt(&mut self) -> Result<CacheReceipt> {
-        Ok(CacheReceipt {
+    fn snapshot_receipt(&mut self) -> Result<RuntimeCacheReceipt> {
+        Ok(RuntimeCacheReceipt {
+            project: mslim::project_identity::PROJECT.into(),
+            product: mslim::project_identity::PRODUCT.into(),
+            technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE.into(),
             schema: "v1".into(),
             operation: "snapshot".into(),
             model_digest: self.identity.model_digest.clone(),
@@ -89,7 +92,7 @@ impl RuntimeSession for DeterministicSession {
             mode: CacheMode::Exact,
         })
     }
-    fn restore_receipt(&mut self, receipt: &CacheReceipt, bytes: &[u8]) -> Result<()> {
+    fn restore_receipt(&mut self, receipt: &RuntimeCacheReceipt, bytes: &[u8]) -> Result<()> {
         if receipt.model_digest != self.identity.model_digest {
             bail!("model digest mismatch");
         }

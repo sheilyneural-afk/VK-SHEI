@@ -1,0 +1,12 @@
+{
+  "schema": "mslim.inventory.duplicate-allowlist/v1",
+  "groups": [
+    {
+      "reason": "Identical test-only fixture builders; no production behavior or public contract is duplicated.",
+      "members": [
+        "src/fused_retrieval.rs::build",
+        "src/stem_index.rs::build"
+      ]
+    }
+  ]
+}

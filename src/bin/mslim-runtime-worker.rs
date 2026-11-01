@@ -16,8 +16,8 @@ use minijinja::{Environment, context};
 use mslim::{
     calibration_contract::validate_calibration_receipt,
     continuity_contract::{
-        CACHE_RECEIPT_SCHEMA, CacheMode as ContinuityCacheMode, CacheReceipt as ContinuityReceipt,
-        ContinuityOperation, ContinuityRequest,
+        CACHE_RECEIPT_SCHEMA, CacheMode as ContinuityCacheMode,
+        ContinuityCacheReceipt as ContinuityReceipt, ContinuityOperation, ContinuityRequest,
     },
     generic_runtime::{
         Capability, IPC_SCHEMA, IpcOperation, IpcRequest, IpcResponse, RuntimeManifest,
@@ -30,7 +30,7 @@ use mslim::{
     model_config::ModelSpec,
     session_store::SessionStore,
 };
-use mslim_adapter_api::{CacheReceipt as RuntimeCacheReceipt, GenerationRequest, GenerationResult};
+use mslim_adapter_api::{GenerationRequest, GenerationResult, RuntimeCacheReceipt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -601,6 +601,9 @@ impl ExternalExecutor {
                     .prepare_and_commit(&request.opaque_session_handle, resulting_generation, state)
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 let receipt = ContinuityReceipt {
+                    project: mslim::project_identity::PROJECT.into(),
+                    product: mslim::project_identity::PRODUCT.into(),
+                    technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE.into(),
                     schema: CACHE_RECEIPT_SCHEMA.into(),
                     operation: ContinuityOperation::Snapshot,
                     opaque_session_handle: request.opaque_session_handle.clone(),
@@ -675,6 +678,9 @@ impl ExternalExecutor {
                     }),
                 )?;
                 let receipt = ContinuityReceipt {
+                    project: mslim::project_identity::PROJECT.into(),
+                    product: mslim::project_identity::PRODUCT.into(),
+                    technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE.into(),
                     schema: CACHE_RECEIPT_SCHEMA.into(),
                     operation: ContinuityOperation::Resume,
                     opaque_session_handle: request.opaque_session_handle.clone(),
@@ -702,6 +708,9 @@ impl ExternalExecutor {
             ContinuityOperation::Release => {
                 self.send("release", IpcOperation::Release, Value::Null)?;
                 let receipt = ContinuityReceipt {
+                    project: mslim::project_identity::PROJECT.into(),
+                    product: mslim::project_identity::PRODUCT.into(),
+                    technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE.into(),
                     schema: CACHE_RECEIPT_SCHEMA.into(),
                     operation: ContinuityOperation::Release,
                     opaque_session_handle: request.opaque_session_handle.clone(),
@@ -840,6 +849,7 @@ struct AppState {
     gpu_deferred_cold_enabled: bool,
     gpu_decode_fused_kernels: bool,
     gpu_exact_hot_fused_attention: bool,
+    gpu_prefill_fuse_projections: bool,
     timeout: Duration,
     runtime_manifest: Option<String>,
     runtime_session_id: Option<String>,
@@ -849,15 +859,50 @@ async fn index() -> Html<&'static str> {
     Html(CHAT_HTML)
 }
 
-fn validation_matrix_summary(model_dir: &str) -> Option<Value> {
-    let model_digest = Path::new(model_dir).file_name()?.to_str()?;
+fn validation_matrix_summary(state: &AppState) -> Option<Value> {
+    let model_digest = Path::new(&state.model_dir).file_name()?.to_str()?;
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("deploy/local-production/runtime/validation")
         .join(format!("validation-matrix-{model_digest}.json"));
     let receipt: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    if receipt.get("schema").and_then(Value::as_str) != Some("mslim.validation-matrix/v1")
+    let frozen = receipt.get("frozen_runtime_configuration")?;
+    if receipt.get("project").and_then(Value::as_str) != Some(mslim::project_identity::PROJECT)
+        || receipt.get("product").and_then(Value::as_str) != Some(mslim::project_identity::PRODUCT)
+        || receipt.get("technical_namespace").and_then(Value::as_str)
+            != Some(mslim::project_identity::TECHNICAL_NAMESPACE)
+        || receipt.get("schema").and_then(Value::as_str)
+            != Some(mslim::project_identity::VALIDATION_MATRIX_SCHEMA)
         || receipt.get("status").and_then(Value::as_str) != Some("passed")
         || receipt.get("bundle_sha256").and_then(Value::as_str) != Some(model_digest)
+        || state.runtime_manifest.is_none()
+            && (frozen.get("stage_tokens").and_then(Value::as_u64)
+                != state.lod_stage.map(|value| value as u64)
+                || frozen.get("prefill_batch_tokens").and_then(Value::as_u64)
+                    != state.gpu_prefill_batch_tokens.map(|value| value as u64)
+                || frozen
+                    .get("prefill_weight_reuse_tokens")
+                    .and_then(Value::as_u64)
+                    != Some(state.gpu_prefill_weight_reuse_tokens as u64)
+                || frozen.get("hot_v_tokens").and_then(Value::as_u64)
+                    != Some(state.gpu_hot_v_capacity_tokens as u64)
+                || frozen.get("prompt_replay_tokens").and_then(Value::as_u64)
+                    != Some(state.gpu_verified_prompt_replay_max_tokens as u64)
+                || frozen.get("shared_prefix").and_then(Value::as_bool)
+                    != Some(state.gpu_verified_shared_prefix_enabled)
+                || frozen.get("deferred_cold_commit").and_then(Value::as_bool)
+                    != Some(state.gpu_deferred_cold_enabled)
+                || frozen
+                    .get("exact_hot_fused_attention")
+                    .and_then(Value::as_bool)
+                    != Some(state.gpu_exact_hot_fused_attention)
+                || frozen.get("decode_unroll4").and_then(Value::as_bool)
+                    != Some(state.gpu_decode_unroll4)
+                || frozen.get("decode_fused_kernels").and_then(Value::as_bool)
+                    != Some(state.gpu_decode_fused_kernels)
+                || frozen
+                    .get("prefill_fuse_projections")
+                    .and_then(Value::as_bool)
+                    != Some(state.gpu_prefill_fuse_projections))
     {
         return None;
     }
@@ -878,14 +923,15 @@ fn validation_matrix_summary(model_dir: &str) -> Option<Value> {
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
-    let validation = validation_matrix_summary(&state.model_dir);
+    let validation = validation_matrix_summary(&state);
     let exact_dense_logits_parity_proven = validation
         .as_ref()
         .and_then(|value| value.get("same_backend_exact"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
     Json(json!({
-        "status":"ready",
+        "status":"alive",
+        "ready": state.runtime_manifest.is_some() || validation.is_some(),
         "engine":"mslim-engine",
         "model":state.model_id,
         "model_directory": state.model_dir,
@@ -938,8 +984,42 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
-async fn ready(State(_state): State<AppState>) -> Json<Value> {
-    Json(json!({"status":"ready","workers":1,"model_loaded":true}))
+async fn ready(State(state): State<AppState>) -> Response {
+    let matrix_ready =
+        state.runtime_manifest.is_some() || validation_matrix_summary(&state).is_some();
+    let model_digest = Path::new(&state.model_dir)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let calibration_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("deploy/local-production/runtime/calibration")
+        .join(format!("{model_digest}.json"));
+    let calibration_ready = state.runtime_manifest.is_some()
+        || fs::read(calibration_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|receipt| validate_calibration_receipt(&receipt, model_digest).is_ok());
+    if matrix_ready && calibration_ready {
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status":"ready", "workers":1, "model_loaded":true,
+                "validation_matrix_ready": matrix_ready,
+                "calibration_ready": calibration_ready
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status":"not_ready", "workers":1, "model_loaded":true,
+                "validation_matrix_ready": matrix_ready,
+                "calibration_ready": calibration_ready
+            })),
+        )
+            .into_response()
+    }
 }
 
 async fn models(State(state): State<AppState>) -> Json<Value> {
@@ -961,11 +1041,35 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .filter(|value| validate_calibration_receipt(value, model_digest).is_ok());
-    let validation = validation_matrix_summary(&state.model_dir);
+    let validation = validation_matrix_summary(&state);
+    let backend = if state.runtime_manifest.is_some() {
+        "external-runtime-session"
+    } else {
+        "local-accelerator-runtime"
+    };
+    let worker_capabilities = mslim::worker_capabilities::effective_configuration(
+        model_digest,
+        backend,
+        json!({
+            "lod_epsilon": state.lod_epsilon,
+            "stage_tokens": state.lod_stage,
+            "prefill_batch_tokens": state.gpu_prefill_batch_tokens,
+            "prefill_weight_reuse_tokens": state.gpu_prefill_weight_reuse_tokens,
+            "hot_v_tokens": state.gpu_hot_v_capacity_tokens,
+            "prompt_replay_tokens": state.gpu_verified_prompt_replay_max_tokens,
+            "shared_prefix": state.gpu_verified_shared_prefix_enabled,
+            "deferred_cold_commit": state.gpu_deferred_cold_enabled,
+            "exact_hot_fused_attention": state.gpu_exact_hot_fused_attention,
+            "decode_unroll4": state.gpu_decode_unroll4,
+            "decode_fused_kernels": state.gpu_decode_fused_kernels,
+            "prefill_fuse_projections": state.gpu_prefill_fuse_projections,
+        }),
+    );
     Json(json!({
         "engine":"mslim-engine",
         "model_checkpoint":state.model_dir,
         "model_digest":model_digest,
+        "worker_capabilities":worker_capabilities,
         "calibration":calibration,
         "model":state.model_id,"gpu_device":state.gpu_device,
         "gpu_model_loaded":true,"gpu_full_llm_inference":true,
@@ -1002,7 +1106,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_prefill_temporary_v_residency":"released after cold seal; no permanent extra GPU V cache",
          "gpu_region_scope":"hierarchical best-first Grid/Chunk/Page selection over original CPU index/LSH and micro-links; ColdStore and conservative BF16-box omitted-mass certificates authorize positive-epsilon pruning; exact epsilon=0 remains dense",
         "validation_matrix":validation,
-        "server_backend": if state.runtime_manifest.is_some() { "external-runtime-session" } else { "local-runtime" },
+        "server_backend":backend,
         "max_context_tokens":state.max_context_tokens,
         "max_output_tokens":512,
         "API":{"OpenAI_compatible_subset":true,"stream":false,
@@ -1162,6 +1266,7 @@ async fn main() -> Result<()> {
     let mut deferred_cold = true;
     let mut fused_decode = false;
     let mut exact_hot_fused = true;
+    let mut prefill_fuse_projections = false;
     let mut allow_network = false;
     let mut runtime_manifest_path = std::env::var_os("MSLIM_RUNTIME_MANIFEST").map(PathBuf::from);
     let mut prefill_profile: Option<PathBuf> = None;
@@ -1254,6 +1359,12 @@ async fn main() -> Result<()> {
             "--gpu-exact-original-attention" => {
                 exact_hot_fused = false;
             }
+            "--gpu-fused-prefill-projections" => {
+                prefill_fuse_projections = true;
+            }
+            "--gpu-original-prefill-projections" => {
+                prefill_fuse_projections = false;
+            }
             "--gpu-unfused-decode" => {
                 fused_decode = false;
             }
@@ -1298,7 +1409,7 @@ async fn main() -> Result<()> {
             "--help" | "-h" => {
                 println!("M-SLIM local runtime worker (local model runtime)");
                 println!(
-                    "--model DIR --host 127.0.0.1 --port 8188 --max-context-tokens 2048 --timeout-secs 300 --resident|--stream-weights --gpu-lod|--gpu-dense-kv --lod-epsilon 0 --lod-stage 64 --gpu-prefill-batch 128|--gpu-prefill-fallback --gpu-prefill-weight-reuse 8 --prefill-profile PATH --gpu-hot-v-tokens 512 --gpu-decode-unroll4|--gpu-decode-original --gpu-deferred-cold|--gpu-immediate-cold --gpu-fused-decode|--gpu-unfused-decode"
+                    "--model DIR --host 127.0.0.1 --port 8188 --max-context-tokens 2048 --timeout-secs 300 --resident|--stream-weights --gpu-lod|--gpu-dense-kv --lod-epsilon 0 --lod-stage 64 --gpu-prefill-batch 128|--gpu-prefill-fallback --gpu-prefill-weight-reuse 8 --gpu-fused-prefill-projections|--gpu-original-prefill-projections --prefill-profile PATH --gpu-hot-v-tokens 512 --gpu-decode-unroll4|--gpu-decode-original --gpu-deferred-cold|--gpu-immediate-cold --gpu-fused-decode|--gpu-unfused-decode"
                 );
                 println!(
                     "No direct authentication: bind loopback only; use the authenticated gateway for clients."
@@ -1415,6 +1526,7 @@ async fn main() -> Result<()> {
         gpu_deferred_cold_enabled,
         gpu_decode_fused_kernels,
         gpu_exact_hot_fused_attention,
+        gpu_prefill_fuse_projections,
     ) = if let Some((client, session_id)) = external_client {
         let session_root = std::env::var_os("MSLIM_SESSION_STORE")
             .map(PathBuf::from)
@@ -1462,6 +1574,7 @@ async fn main() -> Result<()> {
             false,
             false,
             false,
+            false,
         )
     } else {
         let mut engine = if let Some(config) = lod {
@@ -1499,6 +1612,7 @@ async fn main() -> Result<()> {
         engine.set_deferred_cold_commit(deferred_cold)?;
         engine.set_decode_fused_kernels(fused_decode)?;
         engine.set_exact_hot_fused_attention(exact_hot_fused)?;
+        engine.set_prefill_fuse_projections(prefill_fuse_projections)?;
         if let Some(path) = &prefill_profile {
             engine.apply_promoted_prefill_profile(path)?;
             eprintln!("Applied measured prefill profile: {}", path.display());
@@ -1514,6 +1628,7 @@ async fn main() -> Result<()> {
         let gpu_verified_shared_prefix_enabled = engine.verified_gpu_prefix_replay_enabled();
         let gpu_micro_hot_v_capacity_tokens = engine.micro_hot_v_capacity_tokens();
         let gpu_decode_unroll4 = engine.decode_unroll4();
+        let gpu_prefill_fuse_projections = engine.prefill_fuse_projections();
         let lod_epsilon = engine.gpu_region_config().map(|x| x.epsilon);
         let lod_stage = engine.gpu_region_config().map(|x| x.stage_tokens);
         let gpu_kv_capacity_bytes = engine.gpu_region_gpu_kv_capacity_bytes();
@@ -1553,6 +1668,7 @@ async fn main() -> Result<()> {
             gpu_deferred_cold_enabled,
             gpu_decode_fused_kernels,
             gpu_exact_hot_fused_attention,
+            gpu_prefill_fuse_projections,
         )
     };
     let state = AppState {
@@ -1579,6 +1695,7 @@ async fn main() -> Result<()> {
         gpu_deferred_cold_enabled,
         gpu_decode_fused_kernels,
         gpu_exact_hot_fused_attention,
+        gpu_prefill_fuse_projections,
         timeout: Duration::from_secs(timeout_secs.max(1)),
         runtime_manifest,
         runtime_session_id,
@@ -1643,7 +1760,10 @@ mod tests {
         std::fs::write(
             bundle.join("bundle-manifest.json"),
             serde_json::to_vec(&json!({
-                "schema": "mslim.model_bundle/v1",
+                "project": "KV-SHEI",
+                "product": "M-SLIM",
+                "technical_namespace": "mslim",
+                "schema": mslim::project_identity::MODEL_BUNDLE_SCHEMA,
                 "bundle_sha256": bundle_digest,
                 "files": ["config.json", "tokenizer_config.json"]
             }))

@@ -17,7 +17,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.1"
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-analyzer
+      - name: Install inventory parser dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-clang-18 libclang-18-dev
       # The same gate that the local pre-push hook runs: rustfmt, clippy with
       # -D warnings and the test suites for no-default, default and
       # accelerator feature sets.

@@ -1,0 +1,9 @@
+{
+  "schema": "mslim.inventory.indirect-entrypoint-allowlist/v1",
+  "entries": [
+    {
+      "function": "src/bin/mslim-runtime-proxy.rs::default_tokens",
+      "reason": "Serde derive invokes this function through #[serde(default = \"default_tokens\")], which rust-analyzer LSIF does not model as a normal call edge."
+    }
+  ]
+}

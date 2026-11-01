@@ -66,6 +66,9 @@ fi
 [ "${MSLIM_EXACT_HOT_FUSED_ATTENTION:-false}" = "true" ] &&
   profile_args+=(--gpu-exact-fused-attention) ||
   profile_args+=(--gpu-exact-original-attention)
+[ "${MSLIM_PREFILL_FUSE_PROJECTIONS:-false}" = "true" ] &&
+  profile_args+=(--gpu-fused-prefill-projections) ||
+  profile_args+=(--gpu-original-prefill-projections)
 
 exec "$binary" \
   --model "$model_dir" \

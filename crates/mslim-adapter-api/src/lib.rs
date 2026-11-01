@@ -197,7 +197,10 @@ pub enum CacheMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CacheReceipt {
+pub struct RuntimeCacheReceipt {
+    pub project: String,
+    pub product: String,
+    pub technical_namespace: String,
     pub schema: String,
     pub operation: String,
     pub model_digest: String,
@@ -316,13 +319,16 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
         Ok(())
     }
 
-    fn snapshot_receipt(&mut self) -> Result<CacheReceipt> {
+    fn snapshot_receipt(&mut self) -> Result<RuntimeCacheReceipt> {
         let snapshot = self.adapter.snapshot_kv()?;
         let mut hasher = Sha256::new();
         hasher.update(snapshot);
         let prefix_digest = format!("{:x}", hasher.finalize());
-        Ok(CacheReceipt {
-            schema: "mslim.runtime.cache-receipt/v1".to_owned(),
+        Ok(RuntimeCacheReceipt {
+            project: "KV-SHEI".to_owned(),
+            product: "M-SLIM".to_owned(),
+            technical_namespace: "mslim".to_owned(),
+            schema: "mslim.runtime.cache-receipt/v2".to_owned(),
             operation: "snapshot".to_owned(),
             model_digest: self.identity.model_digest.clone(),
             tokenizer_digest: self.identity.tokenizer_digest.clone(),
@@ -335,9 +341,15 @@ impl<M: ModelAdapter> RuntimeSession for ModelAdapterSession<M> {
         })
     }
 
-    fn restore_receipt(&mut self, receipt: &CacheReceipt, snapshot: &[u8]) -> Result<()> {
+    fn restore_receipt(&mut self, receipt: &RuntimeCacheReceipt, snapshot: &[u8]) -> Result<()> {
         anyhow::ensure!(
-            receipt.schema == "mslim.runtime.cache-receipt/v1",
+            receipt.project == "KV-SHEI"
+                && receipt.product == "M-SLIM"
+                && receipt.technical_namespace == "mslim",
+            "cache receipt project identity mismatch"
+        );
+        anyhow::ensure!(
+            receipt.schema == "mslim.runtime.cache-receipt/v2",
             "unsupported cache receipt schema"
         );
         anyhow::ensure!(
@@ -394,11 +406,11 @@ pub trait RuntimeSession: Send {
 
     /// A receipt is deliberately explicit: the backend must populate identity,
     /// prefix and byte/token counts after a verified operation.
-    fn snapshot_receipt(&mut self) -> Result<CacheReceipt> {
+    fn snapshot_receipt(&mut self) -> Result<RuntimeCacheReceipt> {
         anyhow::bail!("runtime session does not expose a verified snapshot receipt")
     }
 
-    fn restore_receipt(&mut self, _receipt: &CacheReceipt, _snapshot: &[u8]) -> Result<()> {
+    fn restore_receipt(&mut self, _receipt: &RuntimeCacheReceipt, _snapshot: &[u8]) -> Result<()> {
         anyhow::bail!("runtime session does not expose a verified restore receipt")
     }
 }

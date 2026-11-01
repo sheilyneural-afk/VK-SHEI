@@ -57,4 +57,16 @@ fi
 step "adapter api crate"
 cargo test --locked -p mslim-adapter-api
 
+step "release manifest contract"
+cargo test --locked --features release-installer --bin mslim-install-release
+
+step "persistent contract migration"
+python3 scripts/migrate-persistent-contracts.py --self-test
+
+step "model bundle content digest"
+python3 scripts/model-bundle-digest.py --self-test
+
+step "source inventory regression gates"
+scripts/check-source-inventory.sh
+
 printf '\nOK: all checks passed.\n'

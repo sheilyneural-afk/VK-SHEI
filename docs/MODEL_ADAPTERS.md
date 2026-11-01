@@ -78,9 +78,9 @@ solo puede inspeccionarse no debe anunciarse como ejecutable.
 El bundle activo se identifica por digest. El runtime no debe seleccionar un
 modelo por un nombre ambiguo ni modificar sus archivos durante la inferencia.
 
-`mslim-validate-model` emite `mslim.validation_receipt/v1`. Ese recibo declara
+`mslim-validate-model` emite `mslim.validation_receipt/v2`. Ese recibo declara
 que un adapter concreto completó inspect, load, prefill, decode, snapshot y
-restore. Es distinto de `mslim.validation-matrix/v1`, que compara las cuatro
+restore. Es distinto de `mslim.validation-matrix/v2`, que compara las cuatro
 rutas exactas. Los consumidores que piden uno no deben aceptar el otro por
 similitud de nombre.
 

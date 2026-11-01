@@ -11,9 +11,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const RELEASE_SCHEMA: &str = mslim::project_identity::LOCAL_RELEASE_SCHEMA;
+
 #[derive(Debug, Deserialize)]
 struct Manifest {
+    project: String,
+    product: String,
+    technical_namespace: String,
     schema: String,
+    build_input_digest: String,
+    #[serde(default)]
     artifacts: Vec<Artifact>,
 }
 
@@ -27,6 +34,29 @@ struct Artifact {
     sha256: String,
     required: bool,
     license_confirmation_required: bool,
+}
+
+fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
+    let manifest: Manifest = serde_json::from_slice(bytes)?;
+    ensure!(
+        manifest.schema == RELEASE_SCHEMA,
+        "schema de release no soportado"
+    );
+    ensure!(
+        manifest.project == "KV-SHEI"
+            && manifest.product == "M-SLIM"
+            && manifest.technical_namespace == "mslim",
+        "identidad de proyecto no soportada"
+    );
+    ensure!(
+        manifest.build_input_digest.len() == 64
+            && manifest
+                .build_input_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "build_input_digest inválido"
+    );
+    Ok(manifest)
 }
 
 fn usage() -> ! {
@@ -92,11 +122,7 @@ fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let manifest_path = PathBuf::from(args.next().unwrap_or_else(|| usage()));
     let accept_licenses = args.any(|arg| arg == "--accept-licenses");
-    let manifest: Manifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-    ensure!(
-        manifest.schema == "mslim.local_release/v1",
-        "schema de release no soportado"
-    );
+    let manifest = parse_manifest(&fs::read(&manifest_path)?)?;
     let project_root = manifest_path
         .parent()
         .and_then(Path::parent)
@@ -173,5 +199,36 @@ mod tests {
         let client = Client::builder().build().unwrap();
         let root = tempfile::tempdir().unwrap();
         assert!(download_verified(&client, &artifact, &root.path().join("test.bin")).is_err());
+    }
+
+    #[test]
+    fn versioned_example_uses_the_installer_schema() {
+        let example = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/deploy/local-production/manifest.example.json"
+        ));
+        let manifest = parse_manifest(example).unwrap();
+        assert_eq!(manifest.schema, RELEASE_SCHEMA);
+    }
+
+    #[test]
+    fn local_manifest_uses_the_installer_contract_when_present() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/local-production/manifest.json");
+        if path.exists() {
+            parse_manifest(&fs::read(path).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn historical_hyphenated_schema_is_rejected() {
+        let manifest = br#"{"project":"KV-SHEI","product":"M-SLIM","technical_namespace":"mslim","schema":"mslim.local-release/v1","build_input_digest":"0000000000000000000000000000000000000000000000000000000000000000","artifacts":[]}"#;
+        assert!(parse_manifest(manifest).is_err());
+    }
+
+    #[test]
+    fn identity_free_v1_release_schema_is_rejected() {
+        let manifest = br#"{"project":"KV-SHEI","product":"M-SLIM","technical_namespace":"mslim","schema":"mslim.local_release/v1","build_input_digest":"0000000000000000000000000000000000000000000000000000000000000000","artifacts":[]}"#;
+        assert!(parse_manifest(manifest).is_err());
     }
 }

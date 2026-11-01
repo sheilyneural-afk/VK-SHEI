@@ -96,6 +96,9 @@ fn main() -> Result<()> {
         (status, 6, output.status.code(), stdout, stderr)
     };
     let receipt = json!({
+        "project": mslim::project_identity::PROJECT,
+        "product": mslim::project_identity::PRODUCT,
+        "technical_namespace": mslim::project_identity::TECHNICAL_NAMESPACE,
         "schema": "mslim.certification/v1",
         "source_revision": mslim::build_info::source_revision(),
         "started_unix_seconds": started,

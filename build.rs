@@ -23,8 +23,9 @@ fn main() {
     }
     let commit = git(&["rev-parse", "HEAD"])
         .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    let dirty =
-        git(&["status", "--porcelain", "--untracked-files=no"]).map(|status| !status.is_empty());
+    // Untracked source files are compiled inputs too, so they count as dirty.
+    // Ignored build products (target/, deploy artifacts) never appear here.
+    let dirty = git(&["status", "--porcelain"]).map(|status| !status.is_empty());
     println!(
         "cargo:rustc-env=MSLIM_SOURCE_COMMIT={}",
         commit.as_deref().unwrap_or("unknown")

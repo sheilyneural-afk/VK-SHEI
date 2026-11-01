@@ -45,7 +45,7 @@ fn main() -> Result<()> {
             .context("max-bytes inválido")?
             .unwrap_or(DEFAULT_MAX_BYTES);
         let host = mslim::adapter_catalog::host_capabilities();
-        let search_query = hardware_search_query(&host, &query);
+        let search_query = mslim::model_resolver::hardware_search_query(&host, &query);
         let candidates = mslim::model_catalog::huggingface::search_with_details(&search_query, 50)?;
         let recommendation = mslim::model_resolver::rank_candidates(&host, candidates)
             .into_iter()
@@ -76,28 +76,6 @@ fn main() -> Result<()> {
         .context("max-bytes inválido")?
         .unwrap_or(DEFAULT_MAX_BYTES);
     download(&model_id, &revision, max_bytes)
-}
-
-fn hardware_search_query(host: &mslim::adapter_catalog::HostCapabilities, task: &str) -> String {
-    let model_types = host
-        .adapters
-        .iter()
-        .filter(|status| {
-            status.availability == mslim_adapter_api::AdapterAvailability::RuntimeAvailable
-        })
-        .flat_map(|status| status.descriptor.supported_model_types.iter())
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let task_term = if task != "local-inference" { task } else { "" };
-    if model_types.is_empty() {
-        format!("instruct {task_term}").trim().to_owned()
-    } else {
-        format!("instruct {task_term} {model_types}")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
 }
 
 fn download(model_id: &str, revision: &str, max_bytes: u64) -> Result<()> {
@@ -147,7 +125,9 @@ fn download(model_id: &str, revision: &str, max_bytes: u64) -> Result<()> {
         "el repositorio no contiene config.json"
     );
     ensure!(
-        files.iter().any(|file| is_weight(&file.rfilename)),
+        files
+            .iter()
+            .any(|file| mslim::model_catalog::is_weight_file(&file.rfilename)),
         "no se encontró un archivo de pesos admitido"
     );
     let total = files
@@ -188,7 +168,15 @@ fn download(model_id: &str, revision: &str, max_bytes: u64) -> Result<()> {
     collect_files(temporary.path(), temporary.path(), &mut entries)?;
     entries.sort();
     let digest = digest_bundle(temporary.path(), &entries)?;
-    let manifest = serde_json::json!({"schema":"mslim.model_bundle/v1","bundle_sha256":digest,"files":entries.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect::<Vec<_>>(),"source":{"provider":"huggingface","model_id":model_id,"revision":revision}});
+    let manifest = serde_json::json!({
+        "project": mslim::project_identity::PROJECT,
+        "product": mslim::project_identity::PRODUCT,
+        "technical_namespace": mslim::project_identity::TECHNICAL_NAMESPACE,
+        "schema": mslim::project_identity::MODEL_BUNDLE_SCHEMA,
+        "bundle_sha256": digest,
+        "files": entries.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect::<Vec<_>>(),
+        "source": {"provider":"huggingface","model_id":model_id,"revision":revision}
+    });
     fs::write(
         temporary.path().join("bundle-manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
@@ -273,11 +261,6 @@ fn local_token(runtime: &Path) -> Option<String> {
 fn has_local_token(runtime: &Path) -> bool {
     local_token(runtime).is_some()
 }
-fn is_weight(path: &str) -> bool {
-    [".safetensors", ".bin", ".gguf", ".ggml", ".onnx"]
-        .iter()
-        .any(|suffix| path.ends_with(suffix))
-}
 fn allowed_file(path: &str) -> bool {
     !path.starts_with('.')
         && !path.contains("..")
@@ -287,7 +270,7 @@ fn allowed_file(path: &str) -> bool {
             || path.ends_with(".json")
             || path.ends_with(".model")
             || path.ends_with(".tiktoken")
-            || is_weight(path)
+            || mslim::model_catalog::is_weight_file(path)
             || path == "vocab.json"
             || path == "merges.txt")
 }

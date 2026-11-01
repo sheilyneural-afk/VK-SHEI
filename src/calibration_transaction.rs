@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const RECEIPT_SCHEMA: &str = "mslim.calibration_transaction.receipt/v1";
+const RECEIPT_SCHEMA: &str = "mslim.calibration_transaction.receipt/v2";
+const LEGACY_RECEIPT_SCHEMA: &str = "mslim.calibration_transaction.receipt/v1";
 const PROFILE_SCHEMA: &str = "mslim.calibration_profile/v1";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -302,7 +303,13 @@ pub struct ProfileCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CalibrationReceipt {
+pub struct CalibrationTransactionReceipt {
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub product: String,
+    #[serde(default)]
+    pub technical_namespace: String,
     pub schema: String,
     pub sequence: u64,
     pub timestamp_unix_ms: u128,
@@ -316,6 +323,24 @@ pub struct CalibrationReceipt {
 
 #[derive(Debug, Clone, Serialize)]
 struct ReceiptPayload<'a> {
+    project: &'a str,
+    product: &'a str,
+    technical_namespace: &'a str,
+    schema: &'a str,
+    sequence: u64,
+    timestamp_unix_ms: u128,
+    proposal_id: &'a str,
+    state: CalibrationState,
+    event: &'a str,
+    details: &'a Map<String, Value>,
+    previous_hash: &'a str,
+}
+
+/// Exact payload used by historical v1 chains.  It intentionally has no
+/// identity fields; changing this layout would make already-written hashes
+/// unverifiable.
+#[derive(Debug, Clone, Serialize)]
+struct LegacyReceiptPayload<'a> {
     schema: &'a str,
     sequence: u64,
     timestamp_unix_ms: u128,
@@ -410,7 +435,17 @@ impl CalibrationTransaction {
             ));
         }
         let receipt_path = root.join("calibration-receipts.jsonl");
-        if verify_receipt_chain(&receipt_path)?
+        let existing_receipts = verify_receipt_chain(&receipt_path)?;
+        if existing_receipts
+            .iter()
+            .any(|receipt| receipt.schema == LEGACY_RECEIPT_SCHEMA)
+        {
+            return Err(CalibrationError::Invalid(
+                "legacy v1 receipt chain is verified but read-only; start a new v2 transaction root"
+                    .into(),
+            ));
+        }
+        if existing_receipts
             .iter()
             .any(|r| r.proposal_id == proposal.proposal_id)
         {
@@ -441,7 +476,7 @@ impl CalibrationTransaction {
         &self.receipt_path
     }
 
-    pub fn propose(&mut self) -> CalibrationResult<CalibrationReceipt> {
+    pub fn propose(&mut self) -> CalibrationResult<CalibrationTransactionReceipt> {
         if self.proposal_recorded {
             return self.idempotent_receipt("proposal_recorded");
         }
@@ -457,7 +492,7 @@ impl CalibrationTransaction {
         Ok(receipt)
     }
 
-    pub fn begin_shadow(&mut self) -> CalibrationResult<CalibrationReceipt> {
+    pub fn begin_shadow(&mut self) -> CalibrationResult<CalibrationTransactionReceipt> {
         self.require_state(CalibrationState::Proposed)?;
         if !self.proposal_recorded {
             return Err(CalibrationError::Invalid(
@@ -492,7 +527,7 @@ impl CalibrationTransaction {
     }
 
     /// Activates the candidate for canary traffic. This never promotes it.
-    pub fn begin_canary(&mut self) -> CalibrationResult<CalibrationReceipt> {
+    pub fn begin_canary(&mut self) -> CalibrationResult<CalibrationTransactionReceipt> {
         self.require_state(CalibrationState::Shadow)?;
         if !self.shadow_passed {
             return Err(CalibrationError::Invalid(
@@ -566,7 +601,7 @@ impl CalibrationTransaction {
         Ok(report)
     }
 
-    pub fn promote(&mut self, authority: &str) -> CalibrationResult<CalibrationReceipt> {
+    pub fn promote(&mut self, authority: &str) -> CalibrationResult<CalibrationTransactionReceipt> {
         self.require_state(CalibrationState::Canary)?;
         if authority.trim().is_empty() {
             return Err(CalibrationError::Invalid(
@@ -600,7 +635,7 @@ impl CalibrationTransaction {
         Ok(receipt)
     }
 
-    pub fn rollback(&mut self, reason: &str) -> CalibrationResult<CalibrationReceipt> {
+    pub fn rollback(&mut self, reason: &str) -> CalibrationResult<CalibrationTransactionReceipt> {
         if self.state == CalibrationState::RolledBack {
             return self.idempotent_receipt("rollback_verified");
         }
@@ -616,7 +651,7 @@ impl CalibrationTransaction {
         &mut self,
         reason: &str,
         mut details: Map<String, Value>,
-    ) -> CalibrationResult<CalibrationReceipt> {
+    ) -> CalibrationResult<CalibrationTransactionReceipt> {
         if reason.trim().is_empty() {
             return Err(CalibrationError::Invalid("rollback reason is empty".into()));
         }
@@ -696,7 +731,7 @@ impl CalibrationTransaction {
         &self,
         event: &str,
         details: Map<String, Value>,
-    ) -> CalibrationResult<CalibrationReceipt> {
+    ) -> CalibrationResult<CalibrationTransactionReceipt> {
         let _receipt_lock = FileLock::acquire(self.root.join(".calibration-receipts.lock"))?;
         let receipts = verify_receipt_chain(&self.receipt_path)?;
         let sequence = receipts.len() as u64;
@@ -709,6 +744,9 @@ impl CalibrationTransaction {
             .map_err(|_| CalibrationError::Invalid("system clock precedes epoch".into()))?
             .as_millis();
         let payload = ReceiptPayload {
+            project: crate::project_identity::PROJECT,
+            product: crate::project_identity::PRODUCT,
+            technical_namespace: crate::project_identity::TECHNICAL_NAMESPACE,
             schema: RECEIPT_SCHEMA,
             sequence,
             timestamp_unix_ms,
@@ -719,7 +757,10 @@ impl CalibrationTransaction {
             previous_hash: &previous_hash,
         };
         let hash = digest_serializable(&payload)?;
-        let receipt = CalibrationReceipt {
+        let receipt = CalibrationTransactionReceipt {
+            project: crate::project_identity::PROJECT.into(),
+            product: crate::project_identity::PRODUCT.into(),
+            technical_namespace: crate::project_identity::TECHNICAL_NAMESPACE.into(),
             schema: RECEIPT_SCHEMA.into(),
             sequence,
             timestamp_unix_ms,
@@ -734,7 +775,7 @@ impl CalibrationTransaction {
         Ok(receipt)
     }
 
-    fn idempotent_receipt(&self, event: &str) -> CalibrationResult<CalibrationReceipt> {
+    fn idempotent_receipt(&self, event: &str) -> CalibrationResult<CalibrationTransactionReceipt> {
         verify_receipt_chain(&self.receipt_path)?
             .into_iter()
             .rev()
@@ -747,7 +788,9 @@ impl CalibrationTransaction {
     }
 }
 
-pub fn verify_receipt_chain(path: impl AsRef<Path>) -> CalibrationResult<Vec<CalibrationReceipt>> {
+pub fn verify_receipt_chain(
+    path: impl AsRef<Path>,
+) -> CalibrationResult<Vec<CalibrationTransactionReceipt>> {
     let path = path.as_ref();
     if !path.exists() {
         return Ok(Vec::new());
@@ -763,9 +806,11 @@ pub fn verify_receipt_chain(path: impl AsRef<Path>) -> CalibrationResult<Vec<Cal
                 index + 1
             )));
         }
-        let receipt: CalibrationReceipt = serde_json::from_str(&line)?;
-        if receipt.schema != RECEIPT_SCHEMA
-            || receipt.sequence != index as u64
+        let receipt: CalibrationTransactionReceipt = serde_json::from_str(&line)?;
+        if !matches!(
+            receipt.schema.as_str(),
+            RECEIPT_SCHEMA | LEGACY_RECEIPT_SCHEMA
+        ) || receipt.sequence != index as u64
             || receipt.previous_hash != expected_previous
         {
             return Err(CalibrationError::Integrity(format!(
@@ -773,17 +818,50 @@ pub fn verify_receipt_chain(path: impl AsRef<Path>) -> CalibrationResult<Vec<Cal
                 index + 1
             )));
         }
-        let payload = ReceiptPayload {
-            schema: &receipt.schema,
-            sequence: receipt.sequence,
-            timestamp_unix_ms: receipt.timestamp_unix_ms,
-            proposal_id: &receipt.proposal_id,
-            state: receipt.state,
-            event: &receipt.event,
-            details: &receipt.details,
-            previous_hash: &receipt.previous_hash,
+        let expected_hash = if receipt.schema == LEGACY_RECEIPT_SCHEMA {
+            if !receipt.project.is_empty()
+                || !receipt.product.is_empty()
+                || !receipt.technical_namespace.is_empty()
+            {
+                return Err(CalibrationError::Integrity(format!(
+                    "legacy receipt contains v2 identity fields at line {}",
+                    index + 1
+                )));
+            }
+            digest_serializable(&LegacyReceiptPayload {
+                schema: &receipt.schema,
+                sequence: receipt.sequence,
+                timestamp_unix_ms: receipt.timestamp_unix_ms,
+                proposal_id: &receipt.proposal_id,
+                state: receipt.state,
+                event: &receipt.event,
+                details: &receipt.details,
+                previous_hash: &receipt.previous_hash,
+            })?
+        } else {
+            if receipt.project != crate::project_identity::PROJECT
+                || receipt.product != crate::project_identity::PRODUCT
+                || receipt.technical_namespace != crate::project_identity::TECHNICAL_NAMESPACE
+            {
+                return Err(CalibrationError::Integrity(format!(
+                    "receipt project identity invalid at line {}",
+                    index + 1
+                )));
+            }
+            digest_serializable(&ReceiptPayload {
+                project: &receipt.project,
+                product: &receipt.product,
+                technical_namespace: &receipt.technical_namespace,
+                schema: &receipt.schema,
+                sequence: receipt.sequence,
+                timestamp_unix_ms: receipt.timestamp_unix_ms,
+                proposal_id: &receipt.proposal_id,
+                state: receipt.state,
+                event: &receipt.event,
+                details: &receipt.details,
+                previous_hash: &receipt.previous_hash,
+            })?
         };
-        let expected_hash = digest_serializable(&payload)?;
         if receipt.hash != expected_hash {
             return Err(CalibrationError::Integrity(format!(
                 "receipt hash invalid at line {}",
@@ -972,6 +1050,44 @@ mod tests {
             verify_receipt_chain(path),
             Err(CalibrationError::Integrity(_))
         ));
+    }
+
+    fn collect_receipt_chains(root: &Path, output: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_receipt_chains(&path, output);
+            } else if path.file_name().and_then(|name| name.to_str())
+                == Some("calibration-receipts.jsonl")
+            {
+                output.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn installed_legacy_chains_remain_verifiable_and_read_only() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/local-production/runtime/receipts");
+        let mut paths = Vec::new();
+        collect_receipt_chains(&root, &mut paths);
+        for path in paths {
+            let receipts = verify_receipt_chain(&path)
+                .unwrap_or_else(|error| panic!("{} is not verifiable: {error}", path.display()));
+            if receipts
+                .iter()
+                .any(|receipt| receipt.schema == LEGACY_RECEIPT_SCHEMA)
+            {
+                assert!(
+                    receipts
+                        .iter()
+                        .all(|receipt| receipt.schema == LEGACY_RECEIPT_SCHEMA)
+                );
+            }
+        }
     }
 
     #[test]

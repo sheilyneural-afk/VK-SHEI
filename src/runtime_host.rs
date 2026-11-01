@@ -108,7 +108,7 @@ impl RuntimeHost {
                 ))
             }
             IpcOperation::RestoreKv => {
-                let receipt: mslim_adapter_api::CacheReceipt = serde_json::from_value(
+                let receipt: mslim_adapter_api::RuntimeCacheReceipt = serde_json::from_value(
                     request
                         .payload
                         .get("receipt")
@@ -171,8 +171,11 @@ mod tests {
         fn restore_kv(&mut self, _: &[u8]) -> Result<()> {
             Ok(())
         }
-        fn snapshot_receipt(&mut self) -> Result<mslim_adapter_api::CacheReceipt> {
-            Ok(mslim_adapter_api::CacheReceipt {
+        fn snapshot_receipt(&mut self) -> Result<mslim_adapter_api::RuntimeCacheReceipt> {
+            Ok(mslim_adapter_api::RuntimeCacheReceipt {
+                project: crate::project_identity::PROJECT.into(),
+                product: crate::project_identity::PRODUCT.into(),
+                technical_namespace: crate::project_identity::TECHNICAL_NAMESPACE.into(),
                 schema: "v1".into(),
                 operation: "snapshot".into(),
                 model_digest: self.id.model_digest.clone(),
@@ -185,7 +188,11 @@ mod tests {
                 mode: CacheMode::Exact,
             })
         }
-        fn restore_receipt(&mut self, r: &mslim_adapter_api::CacheReceipt, b: &[u8]) -> Result<()> {
+        fn restore_receipt(
+            &mut self,
+            r: &mslim_adapter_api::RuntimeCacheReceipt,
+            b: &[u8],
+        ) -> Result<()> {
             if r.model_digest != self.id.model_digest || b.is_empty() {
                 bail!("invalid receipt or snapshot")
             }

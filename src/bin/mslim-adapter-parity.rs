@@ -68,6 +68,8 @@ fn frozen_common_config(base: &Value) -> Result<Value> {
     values.insert("mslim_epsilon".into(), json!(0.0));
     values.insert("mslim_stage_tokens".into(), json!(64));
     values.insert("mslim_prefill_batch_tokens".into(), json!(128));
+    values.insert("mslim_prefill_weight_reuse_tokens".into(), json!(8));
+    values.insert("mslim_hot_v_tokens".into(), json!(512));
     values.insert("mslim_prompt_replay_tokens".into(), json!(0));
     values.insert("mslim_shared_prefix".into(), json!(false));
     values.insert("mslim_deferred_cold_commit".into(), json!(false));
@@ -337,7 +339,10 @@ fn main() -> Result<()> {
     let passed = deterministic && same_backend_exact && accelerator_physical_snapshot;
 
     let receipt = json!({
-        "schema": "mslim.validation-matrix/v1",
+        "project": mslim::project_identity::PROJECT,
+        "product": mslim::project_identity::PRODUCT,
+        "technical_namespace": mslim::project_identity::TECHNICAL_NAMESPACE,
+        "schema": mslim::project_identity::VALIDATION_MATRIX_SCHEMA,
         "status": if passed { "passed" } else { "failed" },
         "source_revision": mslim::build_info::source_revision(),
         "bundle_sha256": bundle_id,
@@ -356,6 +361,8 @@ fn main() -> Result<()> {
         "frozen_runtime_configuration": {
             "stage_tokens": 64,
             "prefill_batch_tokens": 128,
+            "prefill_weight_reuse_tokens": 8,
+            "hot_v_tokens": 512,
             "prompt_replay_tokens": 0,
             "shared_prefix": false,
             "deferred_cold_commit": false,

@@ -20,10 +20,13 @@ use tokenizers::Tokenizer;
 
 use crate::model_config::ModelSpec;
 
-pub const MODEL_BUNDLE_MANIFEST_SCHEMA: &str = "mslim.model_bundle/v1";
+pub const MODEL_BUNDLE_MANIFEST_SCHEMA: &str = crate::project_identity::MODEL_BUNDLE_SCHEMA;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelBundleManifest {
+    pub project: String,
+    pub product: String,
+    pub technical_namespace: String,
     pub schema: String,
     pub bundle_sha256: String,
     pub files: Vec<String>,
@@ -50,6 +53,12 @@ pub fn validated_bundle_manifest(root: impl AsRef<Path>) -> Result<ModelBundleMa
     ensure!(
         manifest.schema == MODEL_BUNDLE_MANIFEST_SCHEMA,
         "unsupported bundle manifest schema"
+    );
+    ensure!(
+        manifest.project == crate::project_identity::PROJECT
+            && manifest.product == crate::project_identity::PRODUCT
+            && manifest.technical_namespace == crate::project_identity::TECHNICAL_NAMESPACE,
+        "unsupported bundle manifest project identity"
     );
     ensure!(
         manifest
@@ -301,6 +310,9 @@ mod tests {
         fs::write(root.join("config.json"), b"{}").unwrap();
         let manifest = |schema: &str, files: Vec<&str>| {
             serde_json::json!({
+                "project": "KV-SHEI",
+                "product": "M-SLIM",
+                "technical_namespace": "mslim",
                 "schema": schema,
                 "bundle_sha256": digest,
                 "files": files

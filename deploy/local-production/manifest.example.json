@@ -1,5 +1,9 @@
 {
-  "schema": "mslim.local_release/v1",
+  "project": "KV-SHEI",
+  "product": "M-SLIM",
+  "technical_namespace": "mslim",
+  "schema": "mslim.local_release/v2",
+  "build_input_digest": "0000000000000000000000000000000000000000000000000000000000000000",
   "release_id": "REPLACE_WITH_RELEASE_ID",
   "backend": "auto",
   "host": "127.0.0.1",
@@ -17,7 +21,7 @@
   "model": {
     "relative_path": "runtime/models/REPLACE_WITH_MODEL_DIGEST",
     "format": "declared-by-adapter",
-    "sha256": "REPLACE_WITH_SHA256",
+    "bundle_sha256": "REPLACE_WITH_SHA256",
     "tokenizer_sha256": "REPLACE_WITH_SHA256"
   },
   "artifacts": [

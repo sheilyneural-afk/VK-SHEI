@@ -1,4 +1,9 @@
 //! Provider-neutral HTTP proxy over the generic runtime IPC session.
+//!
+//! `/v1/generate` is an internal, token-level bridge for local runtime
+//! integration tests and adapter development. It is not the supported M-SLIM
+//! product API. External callers use the gateway's OpenAI-compatible
+//! `/v1/chat/completions` contract instead.
 use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
@@ -141,6 +146,7 @@ async fn main() -> Result<()> {
     };
     let app = Router::new()
         .route("/health", get(health))
+        // Internal protocol: raw token ids over the generic IPC session.
         .route("/v1/generate", post(generate))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;

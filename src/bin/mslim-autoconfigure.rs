@@ -139,8 +139,14 @@ fn validated_bundles(
             Ok(value) => value,
             Err(_) => continue,
         };
-        if value.get("schema").and_then(serde_json::Value::as_str)
-            != Some("mslim.validation_receipt/v1")
+        if value.get("project").and_then(serde_json::Value::as_str) != Some("KV-SHEI")
+            || value.get("product").and_then(serde_json::Value::as_str) != Some("M-SLIM")
+            || value
+                .get("technical_namespace")
+                .and_then(serde_json::Value::as_str)
+                != Some("mslim")
+            || value.get("schema").and_then(serde_json::Value::as_str)
+                != Some(mslim::project_identity::VALIDATION_RECEIPT_SCHEMA)
             || value.get("status").and_then(serde_json::Value::as_str)
                 != Some("validated-for-local-execution")
         {
@@ -194,7 +200,10 @@ mod tests {
 
     fn canonical_receipt(bundle: &str) -> serde_json::Value {
         json!({
-            "schema": "mslim.calibration_receipt/v3",
+            "project": "KV-SHEI",
+            "product": "M-SLIM",
+            "technical_namespace": "mslim",
+            "schema": mslim::project_identity::CALIBRATION_RECEIPT_SCHEMA,
             "bundle": bundle,
             "adapter": "accelerator-runtime",
             "identity_digest": "b".repeat(64),

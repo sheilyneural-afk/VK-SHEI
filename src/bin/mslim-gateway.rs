@@ -89,6 +89,13 @@ fn parse_workers(assignments: &[String]) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
+async fn health() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(json!({"status": "alive", "service": "mslim-server"})),
+    )
+}
+
 async fn ready(state: State<Arc<AppState>>) -> impl IntoResponse {
     let mut available = Vec::new();
     for (id, endpoint) in state.workers.iter() {
@@ -179,14 +186,15 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
             .get("worker_capabilities")
             .and_then(Value::as_object)
             .is_some();
-    let has_runtime_description = capabilities
-        .get("model_metadata")
-        .or_else(|| capabilities.get("worker_capabilities"))
-        .is_some_and(Value::is_object);
     let model_digest = capabilities
         .get("model_digest")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
+    let has_runtime_description = model_digest.is_some_and(|digest| {
+        capabilities
+            .get("worker_capabilities")
+            .is_some_and(|value| mslim::worker_capabilities::validate(value, digest))
+    });
     let checkpoint_digest = capabilities
         .get("model_checkpoint")
         .and_then(Value::as_str)
@@ -319,7 +327,7 @@ async fn main() -> Result<()> {
         .route("/v1/chat/completions", post(chat))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
     let app = Router::new()
-        .route("/health", get(ready))
+        .route("/health", get(health))
         .route("/ready", get(ready))
         .merge(protected)
         .with_state(state);
@@ -338,6 +346,23 @@ mod tests {
 
     fn assignments(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[tokio::test]
+    async fn health_reports_process_liveness_without_worker_readiness() {
+        let response = health().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ready_fails_closed_without_a_ready_worker() {
+        let state = Arc::new(AppState {
+            client: Client::new(),
+            workers: Arc::new(Vec::new()),
+            auth_token: Arc::from(Vec::<u8>::new()),
+        });
+        let response = ready(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
@@ -383,9 +408,16 @@ mod tests {
             "engine": "mslim-engine",
             "model_checkpoint": format!("runtime/models/{bundle}"),
             "model_digest": bundle,
-            "model_metadata": {},
+            "worker_capabilities": mslim::worker_capabilities::effective_configuration(
+                &bundle,
+                "accelerator-runtime",
+                json!({"lod_epsilon": 0.0}),
+            ),
             "calibration": {
-                "schema": "mslim.calibration_receipt/v3",
+                "project": "KV-SHEI",
+                "product": "M-SLIM",
+                "technical_namespace": "mslim",
+                "schema": mslim::project_identity::CALIBRATION_RECEIPT_SCHEMA,
                 "status": "measured-sustained-execution",
                 "bundle": "a".repeat(64),
                 "adapter": "accelerator-runtime",

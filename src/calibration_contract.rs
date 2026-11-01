@@ -6,7 +6,7 @@
 use anyhow::{Result, ensure};
 use serde_json::Value;
 
-pub const CALIBRATION_RECEIPT_SCHEMA: &str = "mslim.calibration_receipt/v3";
+pub const CALIBRATION_RECEIPT_SCHEMA: &str = crate::project_identity::CALIBRATION_RECEIPT_SCHEMA;
 pub const CALIBRATION_RECEIPT_STATUS: &str = "measured-sustained-execution";
 pub const LOGICAL_REPLAY_SNAPSHOT_KIND: &str = "logical-replay-token-history";
 pub const PHYSICAL_COLDSTORE_SNAPSHOT_KIND: &str = "physical-coldstore-handle";
@@ -15,6 +15,14 @@ pub fn validate_calibration_receipt(receipt: &Value, expected_bundle: &str) -> R
     ensure!(
         is_sha256(expected_bundle),
         "expected bundle is not a SHA-256 digest"
+    );
+    ensure!(
+        receipt.get("project").and_then(Value::as_str) == Some(crate::project_identity::PROJECT)
+            && receipt.get("product").and_then(Value::as_str)
+                == Some(crate::project_identity::PRODUCT)
+            && receipt.get("technical_namespace").and_then(Value::as_str)
+                == Some(crate::project_identity::TECHNICAL_NAMESPACE),
+        "unsupported calibration receipt project identity"
     );
     ensure!(
         receipt.get("schema").and_then(Value::as_str) == Some(CALIBRATION_RECEIPT_SCHEMA),
@@ -190,6 +198,9 @@ mod tests {
 
     fn receipt(schema: &str, bundle: &str) -> Value {
         json!({
+            "project": "KV-SHEI",
+            "product": "M-SLIM",
+            "technical_namespace": "mslim",
             "schema": schema,
             "bundle": bundle,
             "adapter": "accelerator-runtime",
@@ -222,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_the_canonical_v3_contract() {
+    fn accepts_only_the_canonical_v4_contract() {
         let bundle = "a".repeat(64);
         assert!(
             validate_calibration_receipt(&receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle), &bundle)
@@ -231,6 +242,7 @@ mod tests {
         for legacy in [
             "mslim.calibration_receipt/v1",
             "mslim.calibration_receipt/v2",
+            "mslim.calibration_receipt/v3",
             "kvslim.calibration_receipt/v2",
         ] {
             assert!(validate_calibration_receipt(&receipt(legacy, &bundle), &bundle).is_err());

@@ -113,8 +113,14 @@ fn validation_status(root: &Path, bundle: &str) -> String {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return "invalid-receipt".into();
     };
-    if value.get("schema").and_then(serde_json::Value::as_str)
-        == Some("mslim.validation_receipt/v1")
+    if value.get("project").and_then(serde_json::Value::as_str) == Some("KV-SHEI")
+        && value.get("product").and_then(serde_json::Value::as_str) == Some("M-SLIM")
+        && value
+            .get("technical_namespace")
+            .and_then(serde_json::Value::as_str)
+            == Some("mslim")
+        && value.get("schema").and_then(serde_json::Value::as_str)
+            == Some(mslim::project_identity::VALIDATION_RECEIPT_SCHEMA)
         && value
             .get("bundle_sha256")
             .and_then(serde_json::Value::as_str)

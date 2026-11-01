@@ -63,6 +63,7 @@ pub mod model_resolver;
 pub mod portable;
 pub mod portable_store;
 pub mod project_identity;
+pub mod worker_capabilities;
 pub mod worker_registry;
 
 #[cfg(feature = "accelerator-backend")]

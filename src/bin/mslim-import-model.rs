@@ -11,6 +11,9 @@ use std::{
 
 #[derive(Debug, Serialize)]
 struct BundleManifest {
+    project: &'static str,
+    product: &'static str,
+    technical_namespace: &'static str,
     schema: &'static str,
     bundle_sha256: String,
     files: Vec<String>,
@@ -88,6 +91,9 @@ fn main() -> Result<()> {
         .tempdir_in(runtime_root.join("tmp"))?;
     copy_bundle(&source, temporary.path(), &files)?;
     let manifest = BundleManifest {
+        project: mslim::project_identity::PROJECT,
+        product: mslim::project_identity::PRODUCT,
+        technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE,
         schema: mslim::model_bundle::MODEL_BUNDLE_MANIFEST_SCHEMA,
         bundle_sha256: digest.clone(),
         files: files
