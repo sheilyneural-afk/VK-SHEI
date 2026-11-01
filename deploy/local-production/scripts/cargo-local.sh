@@ -2,17 +2,19 @@
 # deploy/local-production/scripts/cargo-local.sh
 #
 # Wrapper around cargo that:
-#   1. Keeps ALL build artefacts inside the project tree.
-#   2. Activates sccache when it is installed in the project tool-bin
-#      (compiler cache shared across dev + release builds).
-#   3. After every non-clean command, runs cargo-sweep to prune artefacts
-#      that are no longer referenced by any current build graph fingerprint.
+#   1. Keeps Cargo home, temporaries and build artefacts inside the project.
+#   2. Uses sccache as RUSTC_WRAPPER when it is installed in runtime/tool-bin
+#      (compiler object cache shared by debug and release builds, 5 GB cap).
+#   3. Disables incremental compilation for --release builds.
+#   4. After commands that produce artefacts, prunes in the background the
+#      build artefacts not touched for 7 days (cargo-sweep, when installed).
 #
 # Usage:  ./cargo-local.sh build --release [extra flags]
 #         ./cargo-local.sh test
-#         ./cargo-local.sh clean          # sweep only; never removes src
-#         ./cargo-local.sh sweep          # alias for above
+#         ./cargo-local.sh sweep          # prune artefacts older than 7 days now
 #
+# Every other command, `clean` included, is passed to cargo unchanged.
+# sccache and cargo-sweep are installed with install-tools.sh.
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -23,6 +25,7 @@ CARGO_HOME_LOCAL="$root/deploy/local-production/runtime/cargo-home"
 BUILD_TARGET="$root/deploy/local-production/runtime/build-target"
 TOOL_BIN="$root/deploy/local-production/runtime/tool-bin"
 TMPDIR_LOCAL="$root/deploy/local-production/runtime/tmp"
+SWEEP_DAYS=7
 
 export CARGO_HOME="$CARGO_HOME_LOCAL"
 export CARGO_TARGET_DIR="$BUILD_TARGET"
@@ -31,6 +34,13 @@ export TMP="$TMPDIR_LOCAL"
 export TEMP="$TMPDIR_LOCAL"
 
 mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR" "$TMPDIR" "$TOOL_BIN"
+
+# cargo-sweep is a cargo subcommand binary: its first argument must be
+# `sweep`. It locates the target directory through `cargo metadata`, which
+# honours CARGO_TARGET_DIR exported above.
+sweep_old_artefacts() {
+  "$TOOL_BIN/cargo-sweep" sweep --time "$SWEEP_DAYS" "$root"
+}
 
 # ── sccache (compiler object cache) ──────────────────────────────────────────
 SCCACHE_BIN="$TOOL_BIN/sccache"
@@ -42,57 +52,37 @@ if [[ -x "$SCCACHE_BIN" ]]; then
 fi
 
 # ── Release builds: never keep incremental state ─────────────────────────────
-# Detect if --release is on the command line (including after subcommands).
-_is_release=0
 for arg in "$@"; do
-  [[ "$arg" == "--release" ]] && _is_release=1 && break
+  if [[ "$arg" == "--release" ]]; then
+    export CARGO_INCREMENTAL=0
+    break
+  fi
 done
-if (( _is_release )); then
-  export CARGO_INCREMENTAL=0
-fi
 
-# ── Handle synthetic commands ─────────────────────────────────────────────────
-case "${1:-}" in
-  sweep|clean)
-    echo "[cargo-local] Running cargo-sweep (stamp + sweep)…"
-    _do_sweep "$root" "$TOOL_BIN" "$BUILD_TARGET"
-    exit 0
-    ;;
-esac
+# ── Synthetic command ─────────────────────────────────────────────────────────
+if [[ "${1:-}" == "sweep" ]]; then
+  if [[ ! -x "$TOOL_BIN/cargo-sweep" ]]; then
+    echo "[cargo-local] cargo-sweep is not installed; run install-tools.sh" >&2
+    exit 1
+  fi
+  echo "[cargo-local] pruning artefacts not used for $SWEEP_DAYS days"
+  sweep_old_artefacts
+  exit 0
+fi
 
 # ── Run cargo ─────────────────────────────────────────────────────────────────
+# With `set -e` a failing cargo command ends the script with cargo's status.
 cargo "$@"
-_cargo_exit=$?
 
 # ── Post-build sweep (background, non-blocking) ───────────────────────────────
-# Skip on commands that don't produce artefacts (fmt, clippy --fix, …).
-_skip_sweep=0
 case "${1:-}" in
-  fmt|check|clippy|doc|metadata|locate-project|read-manifest|verify-project)
-    _skip_sweep=1 ;;
+  fmt|check|clippy|doc|metadata|locate-project|read-manifest|verify-project|clean)
+    ;;
+  *)
+    if [[ -x "$TOOL_BIN/cargo-sweep" ]]; then
+      # Only artefacts untouched for SWEEP_DAYS are removed, so a build that
+      # starts while the sweep runs never loses files it is using.
+      sweep_old_artefacts >/dev/null 2>&1 &
+    fi
+    ;;
 esac
-
-if (( ! _skip_sweep )) && [[ -x "$TOOL_BIN/cargo-sweep" ]]; then
-  (
-    # Stamp must be set immediately before the build and used after.
-    # Since we can't stamp before cargo, we use --time 7 (days) instead:
-    # artefacts not touched in the last 7 days are orphans.
-    "$TOOL_BIN/cargo-sweep" \
-      --target-dir "$BUILD_TARGET" \
-      --time 7 \
-      2>/dev/null &
-  )
-fi
-
-exit $_cargo_exit
-
-# ── Helper ────────────────────────────────────────────────────────────────────
-_do_sweep() {
-  local _root="$1" _tool_bin="$2" _target="$3"
-  local sweep_bin="$_tool_bin/cargo-sweep"
-  if [[ ! -x "$sweep_bin" ]]; then
-    echo "[cargo-local] cargo-sweep not installed in tool-bin; skipping." >&2
-    return 0
-  fi
-  "$sweep_bin" --target-dir "$_target" --time 7
-}

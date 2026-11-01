@@ -21,7 +21,7 @@ case "$artifact_url" in https://*) ;; *) echo "artifact-url debe usar HTTPS" >&2
 case "$checksum_url" in https://*) ;; *) echo "checksum-url debe usar HTTPS" >&2; exit 1 ;; esac
 case "$destination" in ''|/*|*'..'*|*'//'*) echo "destino inválido" >&2; exit 1 ;; esac
 
-script_dir=$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd -- "$script_dir/../../.." && pwd)
 runtime="$root/deploy/local-production/runtime"
 mkdir -p "$runtime/tmp" "$runtime/manifests" "$(dirname -- "$runtime/$destination")"

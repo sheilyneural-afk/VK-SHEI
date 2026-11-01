@@ -68,7 +68,11 @@ else
   section "cargo-sweep (artefacts older than ${DAYS} days)"
   SWEEP_BIN="$TOOL_BIN/cargo-sweep"
   if [[ -x "$SWEEP_BIN" ]]; then
-    "$SWEEP_BIN" --target-dir "$BUILD_TARGET" --time "$DAYS"
+    # cargo-sweep needs its `sweep` subcommand and finds the target directory
+    # through `cargo metadata`; use the same Cargo home and target as builds.
+    CARGO_HOME="$root/deploy/local-production/runtime/cargo-home" \
+      CARGO_TARGET_DIR="$BUILD_TARGET" \
+      "$SWEEP_BIN" sweep --time "$DAYS" "$root"
   else
     echo "  cargo-sweep not found in $TOOL_BIN — skipping."
     echo "  Run: deploy/local-production/scripts/install-tools.sh"
