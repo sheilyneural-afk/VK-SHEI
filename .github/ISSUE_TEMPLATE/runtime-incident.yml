@@ -1,0 +1,58 @@
+name: Incidente o fallo de runtime
+description: Registre un fallo real conservando identidad, reproducción, impacto y evidencia negativa.
+title: "[runtime] "
+labels: ["bug", "area:runtime", "evidence:required"]
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: Comportamiento observado
+      description: Incluya error exacto, fase y efecto externo. Redacte secretos.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Contrato esperado
+    validations:
+      required: true
+  - type: textarea
+    id: identity
+    attributes:
+      label: Identidad fuente-build-runtime
+      placeholder: |
+        source commit/tree:
+        installed binary SHA-256:
+        resident PID/binary:
+        effective configuration:
+        bundle/backend/device:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproducción mínima real
+      description: Enumere pasos y comandos sin credenciales ni material sensible.
+    validations:
+      required: true
+  - type: textarea
+    id: persistence
+    attributes:
+      label: Persistencia, readback y reinicio
+      description: Indique qué datos se escribieron, cómo se leyeron después y qué procesos/proveedores se reiniciaron realmente.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidencia preservada
+      description: Enlaces de Actions, correlation IDs, recibos, hashes y logs redactados.
+    validations:
+      required: true
+  - type: textarea
+    id: regression
+    attributes:
+      label: Regresión y aceptación
+      description: Prueba que debe fallar antes, pasar después y gates requeridos.
+    validations:
+      required: true

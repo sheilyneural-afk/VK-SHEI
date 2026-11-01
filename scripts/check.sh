@@ -72,4 +72,7 @@ scripts/check-source-inventory.sh
 step "wiki audit regression gates"
 python3 scripts/wiki_audit.py self-test
 
+step "GitHub evidence manifest regression gates"
+python3 scripts/github-evidence.py self-test
+
 printf '\nOK: all checks passed.\n'
