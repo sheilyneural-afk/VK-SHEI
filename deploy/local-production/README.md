@@ -15,12 +15,12 @@ modelos, binarios, estado, recibos y compilación dentro del proyecto.
 
 ```mermaid
 flowchart LR
-    S[Fuente limpia] --> B[build-release]
-    B --> V[verify-release]
-    V --> E[Recibos y matriz]
-    E --> R[/ready]
-    R --> G[Gateway autenticado]
-    G --> X[E2E con reinicio total]
+    S["Fuente limpia"] --> B["build-release"]
+    B --> V["verify-release"]
+    V --> E["Recibos y matriz"]
+    E --> R["Worker /ready"]
+    R --> G["Gateway autenticado"]
+    G --> X["E2E con reinicio total"]
 ```
 
 El desarrollo completo de este flujo está en
