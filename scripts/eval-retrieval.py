@@ -14,7 +14,9 @@ Usage: eval-retrieval.py BIN DOC [DOC ...] [--queries N] [--seed S]
 Prints a JSON report. Synthetic queries measure lexical recall only; they do
 not replace a human-labelled relevance set.
 """
-import argparse, json, random, re, subprocess, sys, tempfile, os, statistics
+import argparse, json, random, re, sys, tempfile, os, statistics
+
+from retrieval_eval_common import run
 
 WORD = re.compile(r"[^\W\d_]{5,}", re.UNICODE)
 STOP = set("""
@@ -26,13 +28,6 @@ puede pueden tiene tienen están estos estas otros otras cada todo todos todas
 
 def words(text):
     return [w.lower() for w in WORD.findall(text) if w.lower() not in STOP]
-
-
-def run(bin_, *args):
-    r = subprocess.run([bin_, *args], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise SystemExit(f"{bin_} {' '.join(args)} failed: {r.stderr[:500]}")
-    return json.loads(r.stdout) if r.stdout.lstrip().startswith("{") else r.stdout
 
 
 def sentences(text):

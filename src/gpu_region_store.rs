@@ -383,8 +383,8 @@ impl GpuRegionStore {
         self.append_batch(layer, position, key, value, 1)
     }
 
-    /// Append exact BF16 K/V provided in GPU [token][kvhead][head_dim]
-    /// layout. The canonical CPU ColdStore stores [head][token][dim].
+    /// Append exact BF16 K/V provided in GPU `[token][kvhead][head_dim]`
+    /// layout. The canonical CPU ColdStore stores `[head][token][dim]`.
     /// No BF16 value or weight is quantized. Every token is covered by
     /// the SAME per-token FNV hash table and committed page digest as CPU.
     /// Pages are grouped in the GPU adapter only; canonical CPU is untouched.

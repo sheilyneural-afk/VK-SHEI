@@ -33,6 +33,7 @@ pub struct AdapterConformanceReport {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LogitParityReport {
     pub compared: usize,
+    /// Equality of every finite FP32 bit pattern, including the sign of zero.
     pub exact: bool,
     pub within_tolerance: bool,
     pub max_abs_difference: f32,
@@ -41,6 +42,7 @@ pub struct LogitParityReport {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LogitDistributionReport {
     pub compared: usize,
+    /// Equality of every finite FP32 bit pattern, including the sign of zero.
     pub exact: bool,
     pub max_abs_difference: f32,
     pub mean_abs_difference: f64,
@@ -133,7 +135,10 @@ pub fn compare_logit_distributions(
     let (candidate_top1, candidate_first, candidate_second) = top_two(candidate);
     Ok(LogitDistributionReport {
         compared: reference.len(),
-        exact: reference == candidate,
+        exact: reference
+            .iter()
+            .zip(candidate)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
         max_abs_difference,
         mean_abs_difference,
         p95_abs_difference,
@@ -164,6 +169,13 @@ pub fn compare_logits(
         tolerance.is_finite() && tolerance >= 0.0,
         "invalid logit tolerance"
     );
+    ensure!(
+        reference
+            .iter()
+            .chain(candidate)
+            .all(|value| value.is_finite()),
+        "logit comparison requires finite values"
+    );
     let max_abs_difference = reference
         .iter()
         .zip(candidate)
@@ -171,7 +183,10 @@ pub fn compare_logits(
         .fold(0.0_f32, f32::max);
     Ok(LogitParityReport {
         compared: reference.len(),
-        exact: reference == candidate,
+        exact: reference
+            .iter()
+            .zip(candidate)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
         within_tolerance: max_abs_difference <= tolerance,
         max_abs_difference,
     })
@@ -302,5 +317,36 @@ mod tests {
         assert!(report.max_abs_difference > 0.0);
         assert!(report.p95_abs_difference > 0.0);
         assert!(report.kl_reference_to_candidate >= 0.0);
+    }
+
+    #[test]
+    fn signed_zero_is_numeric_but_not_bitwise_parity() {
+        let report = compare_logits(&[0.0, 1.0], &[-0.0, 1.0], 0.0).unwrap();
+        assert!(!report.exact);
+        assert!(report.within_tolerance);
+        assert_eq!(report.max_abs_difference, 0.0);
+        assert!(
+            !compare_logit_distributions(&[0.0, 1.0], &[-0.0, 1.0])
+                .unwrap()
+                .exact
+        );
+    }
+
+    #[test]
+    fn equal_finite_bit_patterns_pass_both_contracts() {
+        let values = [-0.0, f32::from_bits(1), -1.25, 2.0];
+        assert!(compare_logits(&values, &values, 0.0).unwrap().exact);
+        assert!(compare_logit_distributions(&values, &values).unwrap().exact);
+    }
+
+    #[test]
+    fn nonfinite_or_missing_logits_never_pass() {
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(compare_logits(&[invalid], &[invalid], 0.0).is_err());
+            assert!(compare_logits(&[0.0], &[invalid], 1.0).is_err());
+            assert!(compare_logit_distributions(&[invalid], &[invalid]).is_err());
+        }
+        assert!(compare_logits(&[], &[], 0.0).is_err());
+        assert!(compare_logits(&[1.0], &[1.0, 2.0], 0.0).is_err());
     }
 }

@@ -120,7 +120,7 @@ fn main() -> Result<()> {
             max_new_tokens,
             runtime.context_limit_tokens()
         );
-        let generation = runtime.generate_messages_dense(&messages, max_new_tokens, false)?;
+        let generation = runtime.generate_messages(&messages, max_new_tokens)?;
         let insufficient = is_insufficient_evidence_answer(&generation.content)
             || !has_substantive_document_answer(&generation.content);
         total_prompt_tokens = total_prompt_tokens

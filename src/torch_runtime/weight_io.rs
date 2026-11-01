@@ -21,6 +21,10 @@ impl WeightFile {
         let path = path.as_ref().to_path_buf();
         let file =
             File::open(&path).with_context(|| format!("no se pudo abrir {}", path.display()))?;
+        // SAFETY: checkpoint shards are treated as immutable for the lifetime
+        // of this read-only mapping, which WeightFile owns. Tensor construction
+        // copies from it before releasing mapped pages. Callers must not mutate
+        // or truncate a loaded bundle; concurrent external writes are unsupported.
         let mapping = unsafe { MmapOptions::new().map(&file) }
             .with_context(|| format!("no se pudo mapear {}", path.display()))?;
         SafeTensors::deserialize(&mapping)

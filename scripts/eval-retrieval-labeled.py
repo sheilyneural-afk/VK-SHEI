@@ -7,7 +7,9 @@ Questions whose marker is missing or straddles a page boundary are skipped
 and reported. Compares the variants below on identical questions and prints a
 JSON report with hit rate, MRR, paired differences and the misses.
 """
-import argparse, json, os, subprocess, tempfile
+import argparse, json, os, tempfile
+
+from retrieval_eval_common import run
 
 VARIANTS = {
     "routing": ["--rank", "routing"],
@@ -15,13 +17,6 @@ VARIANTS = {
     "fused+prf4": ["--rank", "fused", "--expansion-terms", "4"],
     "fused+prf8": ["--rank", "fused", "--expansion-terms", "8"],
 }
-
-
-def run(bin_, *args):
-    r = subprocess.run([bin_, *args], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise SystemExit(f"{bin_} {' '.join(args)} failed: {r.stderr[:500]}")
-    return json.loads(r.stdout) if r.stdout.lstrip().startswith("{") else r.stdout
 
 
 def pages_of(res):

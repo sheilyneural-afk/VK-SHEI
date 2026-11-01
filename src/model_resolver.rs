@@ -25,6 +25,32 @@ pub struct ModelRecommendation {
     pub exclusions: Vec<String>,
 }
 
+/// Build a provider search query from adapters that are actually available on
+/// this host. Resolution owns this policy because it translates local runtime
+/// capabilities into model-family constraints; catalogs only transport remote
+/// candidates.
+pub fn hardware_search_query(host: &HostCapabilities, task: &str) -> String {
+    let model_types = host
+        .adapters
+        .iter()
+        .filter(|status| {
+            status.availability == mslim_adapter_api::AdapterAvailability::RuntimeAvailable
+        })
+        .flat_map(|status| status.descriptor.supported_model_types.iter())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let task_term = if task != "local-inference" { task } else { "" };
+    if model_types.is_empty() {
+        format!("instruct {task_term}").trim().to_owned()
+    } else {
+        format!("instruct {task_term} {model_types}")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 /// Rank catalog candidates against the capabilities currently observed by the
 /// local process. This never downloads, loads or activates a model.
 pub fn rank_candidates(
@@ -273,5 +299,13 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("adaptador"))
         );
+    }
+
+    #[test]
+    fn search_query_uses_available_adapter_model_types() {
+        let query = hardware_search_query(&host(true), "local-inference");
+        assert!(query.starts_with("instruct"));
+        assert!(query.contains("llama"));
+        assert!(!query.contains("  "));
     }
 }

@@ -16,7 +16,7 @@ fn main() -> Result<()> {
         bail!("limit debe estar entre 1 y 100");
     }
     let host = mslim::adapter_catalog::host_capabilities();
-    let search_query = hardware_search_query(&host, &query);
+    let search_query = mslim::model_resolver::hardware_search_query(&host, &query);
     let candidates = mslim::model_catalog::huggingface::search_with_details(&search_query, limit)?;
     let recommendations = mslim::model_resolver::rank_candidates(&host, candidates);
     println!(
@@ -28,26 +28,4 @@ fn main() -> Result<()> {
         })
     );
     Ok(())
-}
-
-fn hardware_search_query(host: &mslim::adapter_catalog::HostCapabilities, task: &str) -> String {
-    let model_types = host
-        .adapters
-        .iter()
-        .filter(|status| {
-            status.availability == mslim_adapter_api::AdapterAvailability::RuntimeAvailable
-        })
-        .flat_map(|status| status.descriptor.supported_model_types.iter())
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let task_term = if task != "local-inference" { task } else { "" };
-    if model_types.is_empty() {
-        format!("instruct {task_term}").trim().to_owned()
-    } else {
-        format!("instruct {task_term} {model_types}")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
 }

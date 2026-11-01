@@ -168,6 +168,11 @@ path = "src/bin/mslim-document-ask.rs"
 required-features = ["torch-backend"]
 
 [[bin]]
+name = "mslim-document-gpu"
+path = "src/bin/mslim-document-gpu.rs"
+required-features = ["accelerator-backend"]
+
+[[bin]]
 name = "mslim-document"
 path = "src/bin/mslim-document.rs"
 

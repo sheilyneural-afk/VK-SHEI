@@ -193,6 +193,9 @@ impl DenseKvCache {
             for tensor in [key, value] {
                 ensure!(tensor.kind() == Kind::BFloat16, "estado KV no BF16");
                 let contiguous = tensor.contiguous();
+                // SAFETY: this CPU runtime's cache owns contiguous BF16 tensors.
+                // The tensor remains alive and unmodified while its numel()*2
+                // initialized bytes are borrowed for the digest; the slice does not escape.
                 let bytes = unsafe {
                     std::slice::from_raw_parts(
                         contiguous.data_ptr().cast::<u8>(),
@@ -251,9 +254,14 @@ impl DenseKvCache {
                 let left = left.narrow(2, start as i64, appended as i64).contiguous();
                 let right = right.narrow(2, start as i64, appended as i64).contiguous();
                 ensure!(left.size() == right.size(), "colas KV incompatibles");
+                // SAFETY: both tails are contiguous owned views of this CPU
+                // runtime's BF16 cache, aligned for u16, with numel() initialized
+                // elements. They remain alive and unmodified throughout comparison.
                 let left_bits = unsafe {
                     std::slice::from_raw_parts(left.data_ptr().cast::<u16>(), left.numel())
                 };
+                // SAFETY: same CPU/BF16, alignment, extent and lifetime contract
+                // as left_bits above; this slice is also used only within this scope.
                 let right_bits = unsafe {
                     std::slice::from_raw_parts(right.data_ptr().cast::<u16>(), right.numel())
                 };
@@ -1137,6 +1145,9 @@ impl MslimKvCache {
                                     .narrow(1, head as i64, 1)
                                     .contiguous();
                                 ensure!(tensor.kind() == Kind::BFloat16, "estado KV no BF16");
+                                // SAFETY: pending pages are CPU BF16 tensors; narrow
+                                // and contiguous retain owned storage through digest.update.
+                                // Read exactly numel()*2 initialized bytes, with no mutation.
                                 let bytes = unsafe {
                                     std::slice::from_raw_parts(
                                         tensor.data_ptr().cast::<u8>(),
@@ -1152,6 +1163,9 @@ impl MslimKvCache {
                             .narrow(1, head as i64, 1)
                             .contiguous();
                         ensure!(tensor.kind() == Kind::BFloat16, "cola KV no BF16");
+                        // SAFETY: the owned contiguous CPU BF16 tail outlives
+                        // this read-only byte view and digest.update; the view spans
+                        // exactly numel()*2 initialized bytes and never escapes.
                         let bytes = unsafe {
                             std::slice::from_raw_parts(
                                 tensor.data_ptr().cast::<u8>(),
@@ -1564,6 +1578,9 @@ impl MslimKvCache {
     pub(super) fn bf16_bits(tensor: &Tensor) -> Result<Vec<u16>> {
         ensure!(tensor.kind() == Kind::BFloat16, "página no BF16");
         let contiguous = tensor.contiguous();
+        // SAFETY: callers supply BF16 tensors from the CPU-only runtime.
+        // contiguous owns aligned storage for numel() initialized u16 bit patterns;
+        // to_vec copies them before that tensor can be dropped or mutated.
         let source = unsafe {
             std::slice::from_raw_parts(contiguous.data_ptr().cast::<u16>(), contiguous.numel())
         };
@@ -1571,6 +1588,8 @@ impl MslimKvCache {
     }
 
     pub(super) fn u16_bytes(values: &[u16]) -> &[u8] {
+        // SAFETY: u16 has two initialized bytes and no padding. u8 has alignment
+        // one; the shared byte view has exactly the input extent and borrowed lifetime.
         unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len() * 2) }
     }
 

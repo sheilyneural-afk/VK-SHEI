@@ -22,9 +22,17 @@ pub struct ModelCandidate {
     pub private: bool,
 }
 
+/// Return whether a catalog path is a model-weight format accepted by the
+/// local importer/downloader policy.
+pub fn is_weight_file(path: &str) -> bool {
+    [".safetensors", ".bin", ".gguf", ".ggml", ".onnx"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
 #[cfg(feature = "model-catalog")]
 pub mod huggingface {
-    use super::ModelCandidate;
+    use super::{ModelCandidate, is_weight_file};
     use anyhow::{Context, Result, bail, ensure};
     use reqwest::blocking::Client;
     use serde::Deserialize;
@@ -234,12 +242,6 @@ pub mod huggingface {
             private: item.private,
         }
     }
-
-    fn is_weight_file(path: &str) -> bool {
-        [".safetensors", ".bin", ".gguf", ".ggml", ".onnx"]
-            .iter()
-            .any(|suffix| path.ends_with(suffix))
-    }
 }
 
 #[cfg(test)]
@@ -268,5 +270,13 @@ mod tests {
         let encoded = serde_json::to_string(&candidate).unwrap();
         assert!(encoded.contains("org/model"));
         assert!(encoded.contains("text-generation"));
+    }
+
+    #[test]
+    fn weight_file_policy_is_shared_and_extension_based() {
+        assert!(is_weight_file("weights/model.safetensors"));
+        assert!(is_weight_file("model.gguf"));
+        assert!(!is_weight_file("model.gguf.json"));
+        assert!(!is_weight_file("config.json"));
     }
 }
