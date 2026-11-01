@@ -93,7 +93,7 @@ impl SessionStore {
         verify(&g)?;
         let name = generation_file_name(generation);
         let final_path = d.join(&name);
-        let tmp = d.join(format!(".{name}.tmp"));
+        let tmp = d.join(unique_tmp_name(&name));
         let bytes =
             serde_json::to_vec_pretty(&g).map_err(|e| StoreError::Invalid(e.to_string()))?;
         fs::write(&tmp, bytes).map_err(ioe)?;
@@ -153,7 +153,7 @@ impl SessionStore {
                 }
             }
         }
-        let tmp = d.join(".CURRENT.tmp");
+        let tmp = d.join(unique_tmp_name("CURRENT"));
         fs::write(&tmp, format!("{name}\n")).map_err(ioe)?;
         let file = fs::OpenOptions::new().read(true).open(&tmp).map_err(ioe)?;
         file.sync_all().map_err(ioe)?;
@@ -172,6 +172,15 @@ impl SessionStore {
         self.prepare(handle, generation, state)?;
         self.commit(handle, generation)
     }
+}
+
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Each writer gets its own temporary name, so concurrent calls never share
+/// (and never delete) each other's partially written file.
+fn unique_tmp_name(base: &str) -> String {
+    let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(".{base}.{}.{n}.tmp", std::process::id())
 }
 
 fn generation_file_name(generation: u64) -> String {
@@ -228,6 +237,43 @@ fn ioe(e: io::Error) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simultaneous_prepare_of_same_generation_is_linearizable() {
+        let base = std::env::temp_dir().join(format!("mslim-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        for i in 0..200 {
+            let s = SessionStore::open(base.join(format!("r{i}"))).unwrap();
+            let a = serde_json::json!({"who": "A", "i": i});
+            let b = serde_json::json!({"who": "B", "i": i});
+            let (ra, rb) = std::thread::scope(|sc| {
+                let h1 = sc.spawn(|| s.prepare("h", 0, a.clone()));
+                let h2 = sc.spawn(|| s.prepare("h", 0, b.clone()));
+                (h1.join().unwrap(), h2.join().unwrap())
+            });
+            // Exactly one caller may win; the other must get a clean conflict.
+            let mut winners = Vec::new();
+            for r in [ra, rb] {
+                match r {
+                    Ok(g) => winners.push(g),
+                    Err(StoreError::Invalid(m)) => {
+                        assert!(m.contains("already prepared"), "unexpected error: {m}")
+                    }
+                    Err(e) => panic!("unexpected error: {e}"),
+                }
+            }
+            assert_eq!(winners.len(), 1, "iteration {i}");
+            let on_disk = s.latest("h").unwrap();
+            assert!(on_disk.is_none(), "prepare must not move CURRENT");
+            let path = base
+                .join(format!("r{i}"))
+                .join("h")
+                .join(generation_file_name(0));
+            let disk = load_generation(&path, "h").unwrap();
+            assert_eq!(disk, winners[0]);
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn restart_roundtrip_and_atomic_current() {
         let d = std::env::temp_dir().join(format!("mslim-session-{}", std::process::id()));
