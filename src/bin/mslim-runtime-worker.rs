@@ -2341,6 +2341,14 @@ mod tests {
             "temperature":0,"stream":false,"max_tokens":2}));
         assert_eq!(validate(&req, "model-a").unwrap(), 2);
     }
+
+    #[test]
+    fn embedded_browser_ui_uses_the_supported_runtime_contract() {
+        assert!(CHAT_HTML.contains("/v1/chat/completions"));
+        assert!(!CHAT_HTML.contains("native: true"));
+        assert!(!CHAT_HTML.contains("stream: true"));
+    }
+
     #[test]
     fn gpu_api_does_not_silently_accept_unimplemented_modes() {
         for param in [
