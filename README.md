@@ -172,6 +172,14 @@ La continuidad tiene dos capas distintas:
 Un restore comprueba modelo, tokenizer, prefijo, política, generación, límites
 y recibo. Una identidad incompatible debe fallar de forma cerrada.
 
+El propietario gobernado vive fuera de M-SLIM: el llamador autenticado conserva
+la relación entre su usuario o trabajo y el handle opaco. El worker separa por
+hash los namespaces de conversación y continuidad, persiste caducidad y
+política, y convierte `release` en una lápida durable que impide restauraciones
+posteriores. La máquina de estados, las responsabilidades y el límite actual de
+propietario local único están definidos en
+[`docs/CONTINUITY_LIFECYCLE.md`](docs/CONTINUITY_LIFECYCLE.md).
+
 ### Runtime externo e IPC
 
 El contrato backend-neutral permite conectar un proveedor mediante un manifest

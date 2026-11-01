@@ -33,6 +33,7 @@ use mslim::{
 use mslim_adapter_api::{GenerationRequest, GenerationResult, RuntimeCacheReceipt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -360,6 +361,113 @@ struct ExternalExecutor {
     stop_tokens: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum StoredContinuitySchema {
+    #[serde(rename = "mslim.worker.continuity-state/v1")]
+    V1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredContinuityState {
+    Active {
+        schema: StoredContinuitySchema,
+        snapshot_bytes: Vec<u8>,
+        runtime_receipt: Box<RuntimeCacheReceipt>,
+        model_digest: String,
+        tokenizer_digest: String,
+        prefix_digest: String,
+        policy_digest: String,
+        expires_at_unix_s: u64,
+        reused_tokens: u64,
+        restored_bytes: u64,
+    },
+    Released {
+        schema: StoredContinuitySchema,
+        model_digest: String,
+        tokenizer_digest: String,
+        prefix_digest: String,
+        policy_digest: String,
+        released_at_unix_s: u64,
+    },
+}
+
+struct AuthorizedContinuityRestore {
+    snapshot_bytes: Vec<u8>,
+    runtime_receipt: RuntimeCacheReceipt,
+    reused_tokens: u64,
+    restored_bytes: u64,
+}
+
+fn authorize_continuity_restore(
+    state: StoredContinuityState,
+    request: &ContinuityRequest,
+    now: u64,
+) -> Result<AuthorizedContinuityRestore> {
+    let StoredContinuityState::Active {
+        schema: _,
+        snapshot_bytes,
+        runtime_receipt,
+        model_digest,
+        tokenizer_digest,
+        prefix_digest,
+        policy_digest,
+        expires_at_unix_s,
+        reused_tokens,
+        restored_bytes,
+    } = state
+    else {
+        bail!("continuity session was released")
+    };
+    ensure!(
+        model_digest == request.model_digest
+            && tokenizer_digest == request.tokenizer_digest
+            && prefix_digest == request.prefix_digest
+            && policy_digest == request.policy_digest,
+        "continuity identity, prefix, or policy mismatch"
+    );
+    ensure!(
+        now < expires_at_unix_s,
+        "stored continuity snapshot is expired"
+    );
+    ensure!(
+        request.expires_at_unix_s <= expires_at_unix_s,
+        "resume capability exceeds the stored snapshot expiry"
+    );
+    ensure!(
+        reused_tokens <= request.bounds.max_reused_tokens,
+        "stored token prefix exceeds restore bound"
+    );
+    ensure!(
+        restored_bytes <= request.bounds.max_restored_bytes,
+        "stored physical KV prefix exceeds restore bound"
+    );
+    Ok(AuthorizedContinuityRestore {
+        snapshot_bytes,
+        runtime_receipt: *runtime_receipt,
+        reused_tokens,
+        restored_bytes,
+    })
+}
+
+fn scoped_store_handle(scope: &str, external_handle: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mslim-session-store-scope-v1\0");
+    digest.update((scope.len() as u64).to_le_bytes());
+    digest.update(scope.as_bytes());
+    digest.update((external_handle.len() as u64).to_le_bytes());
+    digest.update(external_handle.as_bytes());
+    format!("{scope}-{}", hex::encode(digest.finalize()))
+}
+
+fn conversation_store_handle(conversation_id: &str) -> String {
+    scoped_store_handle("conversation", conversation_id)
+}
+
+fn continuity_store_handle(opaque_session_handle: &str) -> String {
+    scoped_store_handle("continuity", opaque_session_handle)
+}
+
 fn committed_output_len(output_len: usize, finish_reason: &str) -> Result<usize> {
     match finish_reason {
         // A stop token is discovered only after the preceding emitted token
@@ -430,9 +538,10 @@ impl ExternalExecutor {
             self.reset_runtime()?;
         }
 
+        let store_handle = conversation_store_handle(conversation_id);
         let stored = self
             .session_store
-            .latest(conversation_id)
+            .latest(&store_handle)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         if let Some(generation) = stored {
             let history: Vec<u32> = serde_json::from_value(
@@ -514,9 +623,10 @@ impl ExternalExecutor {
             "runtime snapshot token history diverges from generated physical prefix"
         );
 
+        let store_handle = conversation_store_handle(conversation_id);
         let previous = self
             .session_store
-            .latest(conversation_id)
+            .latest(&store_handle)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let generation = previous
             .as_ref()
@@ -526,7 +636,7 @@ impl ExternalExecutor {
         let tokenizer_digest = runtime_receipt.tokenizer_digest.clone();
         self.session_store
             .prepare_and_commit(
-                conversation_id,
+                &store_handle,
                 generation,
                 json!({
                     "conversation_id": conversation_id,
@@ -570,6 +680,7 @@ impl ExternalExecutor {
         request
             .validate_at(now)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let store_handle = continuity_store_handle(&request.opaque_session_handle);
         match request.operation {
             ContinuityOperation::Snapshot => {
                 let response = self.send("snapshot", IpcOperation::SnapshotKv, Value::Null)?;
@@ -592,9 +703,20 @@ impl ExternalExecutor {
                         && runtime_receipt.tokenizer_digest == request.tokenizer_digest,
                     "external snapshot identity does not match continuity request"
                 );
+                let envelope: Value = serde_json::from_slice(&snapshot_bytes)
+                    .context("decode physical continuity snapshot envelope")?;
+                let reused_tokens = envelope
+                    .get("tokens")
+                    .and_then(Value::as_array)
+                    .context("physical continuity snapshot has no token history")?
+                    .len() as u64;
+                let restored_bytes = envelope
+                    .get("prefix_bytes")
+                    .and_then(Value::as_u64)
+                    .context("physical continuity snapshot has no prefix_bytes")?;
                 let previous = self
                     .session_store
-                    .latest(&request.opaque_session_handle)
+                    .latest(&store_handle)
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 let previous_generation = previous.as_ref().map(|g| g.generation).unwrap_or(0);
                 ensure!(
@@ -602,20 +724,54 @@ impl ExternalExecutor {
                         || previous.is_some() && previous_generation == request.expected_generation,
                     "snapshot generation does not match SessionStore"
                 );
+                if let Some(previous) = previous.as_ref() {
+                    match serde_json::from_value::<StoredContinuityState>(previous.state.clone())
+                        .context("decode stored continuity state")?
+                    {
+                        StoredContinuityState::Active {
+                            model_digest,
+                            tokenizer_digest,
+                            prefix_digest,
+                            policy_digest,
+                            expires_at_unix_s,
+                            ..
+                        } => {
+                            ensure!(
+                                model_digest == request.model_digest
+                                    && tokenizer_digest == request.tokenizer_digest
+                                    && prefix_digest == request.prefix_digest
+                                    && policy_digest == request.policy_digest,
+                                "continuity identity, prefix, or policy cannot change within a handle"
+                            );
+                            ensure!(
+                                now < expires_at_unix_s,
+                                "continuity session expired; use a new opaque handle"
+                            );
+                        }
+                        StoredContinuityState::Released { .. } => {
+                            bail!("continuity session was released; use a new opaque handle")
+                        }
+                    }
+                }
                 let resulting_generation = if previous.is_none() {
                     0
                 } else {
                     previous_generation + 1
                 };
-                let state = json!({
-                    "snapshot_bytes": snapshot_bytes,
-                    "runtime_receipt": runtime_receipt,
-                    "model_digest": request.model_digest,
-                    "tokenizer_digest": request.tokenizer_digest,
-                    "prefix_digest": request.prefix_digest,
-                });
+                let state = serde_json::to_value(StoredContinuityState::Active {
+                    schema: StoredContinuitySchema::V1,
+                    snapshot_bytes,
+                    runtime_receipt: Box::new(runtime_receipt),
+                    model_digest: request.model_digest.clone(),
+                    tokenizer_digest: request.tokenizer_digest.clone(),
+                    prefix_digest: request.prefix_digest.clone(),
+                    policy_digest: request.policy_digest.clone(),
+                    expires_at_unix_s: request.expires_at_unix_s,
+                    reused_tokens,
+                    restored_bytes,
+                })?;
                 self.session_store
-                    .prepare_and_commit(&request.opaque_session_handle, resulting_generation, state)
+                    .prepare_and_commit(&store_handle, resulting_generation, state)
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 let receipt = ContinuityReceipt {
                     project: mslim::project_identity::PROJECT.into(),
@@ -646,46 +802,21 @@ impl ExternalExecutor {
             ContinuityOperation::Resume => {
                 let generation = self
                     .session_store
-                    .latest(&request.opaque_session_handle)
+                    .latest(&store_handle)
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
                     .context("continuity session not found")?;
                 ensure!(
                     generation.generation == request.expected_generation,
                     "resume generation does not match SessionStore"
                 );
-                ensure!(
-                    generation.state.get("model_digest").and_then(Value::as_str)
-                        == Some(request.model_digest.as_str())
-                        && generation
-                            .state
-                            .get("tokenizer_digest")
-                            .and_then(Value::as_str)
-                            == Some(request.tokenizer_digest.as_str())
-                        && generation
-                            .state
-                            .get("prefix_digest")
-                            .and_then(Value::as_str)
-                            == Some(request.prefix_digest.as_str()),
-                    "continuity identity or prefix mismatch"
-                );
-                let snapshot_bytes: Vec<u8> = serde_json::from_value(
-                    generation
-                        .state
-                        .get("snapshot_bytes")
-                        .cloned()
-                        .context("stored continuity snapshot has no bytes")?,
-                )?;
-                let runtime_receipt: RuntimeCacheReceipt = serde_json::from_value(
-                    generation
-                        .state
-                        .get("runtime_receipt")
-                        .cloned()
-                        .context("stored continuity snapshot has no runtime receipt")?,
-                )?;
-                ensure!(
-                    snapshot_bytes.len() as u64 <= request.bounds.max_restored_bytes,
-                    "stored snapshot exceeds restore bound"
-                );
+                let state: StoredContinuityState = serde_json::from_value(generation.state)
+                    .context("decode stored continuity state")?;
+                let AuthorizedContinuityRestore {
+                    snapshot_bytes,
+                    runtime_receipt,
+                    reused_tokens,
+                    restored_bytes,
+                } = authorize_continuity_restore(state, &request, now)?;
                 self.send(
                     "restore",
                     IpcOperation::RestoreKv,
@@ -707,10 +838,8 @@ impl ExternalExecutor {
                     tokenizer_digest: request.tokenizer_digest.clone(),
                     prefix_digest: request.prefix_digest.clone(),
                     policy_digest: request.policy_digest.clone(),
-                    reused_tokens: runtime_receipt
-                        .reused_tokens
-                        .min(request.bounds.max_reused_tokens),
-                    restored_bytes: snapshot_bytes.len() as u64,
+                    reused_tokens,
+                    restored_bytes,
                     mode: ContinuityCacheMode::Exact,
                 };
                 let receipt_hash = receipt
@@ -723,7 +852,48 @@ impl ExternalExecutor {
                 })))
             }
             ContinuityOperation::Release => {
-                self.send("release", IpcOperation::Release, Value::Null)?;
+                let generation = self
+                    .session_store
+                    .latest(&store_handle)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                    .context("continuity session not found")?;
+                ensure!(
+                    generation.generation == request.expected_generation,
+                    "release generation does not match SessionStore"
+                );
+                let state: StoredContinuityState = serde_json::from_value(generation.state)
+                    .context("decode stored continuity state")?;
+                let StoredContinuityState::Active {
+                    schema: _,
+                    model_digest,
+                    tokenizer_digest,
+                    prefix_digest,
+                    policy_digest,
+                    ..
+                } = state
+                else {
+                    bail!("continuity session was already released")
+                };
+                ensure!(
+                    model_digest == request.model_digest
+                        && tokenizer_digest == request.tokenizer_digest
+                        && prefix_digest == request.prefix_digest
+                        && policy_digest == request.policy_digest,
+                    "continuity identity, prefix, or policy mismatch"
+                );
+                self.reset_runtime()?;
+                let resulting_generation = generation.generation + 1;
+                let released = serde_json::to_value(StoredContinuityState::Released {
+                    schema: StoredContinuitySchema::V1,
+                    model_digest: request.model_digest.clone(),
+                    tokenizer_digest: request.tokenizer_digest.clone(),
+                    prefix_digest: request.prefix_digest.clone(),
+                    policy_digest: request.policy_digest.clone(),
+                    released_at_unix_s: now,
+                })?;
+                self.session_store
+                    .prepare_and_commit(&store_handle, resulting_generation, released)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 let receipt = ContinuityReceipt {
                     project: mslim::project_identity::PROJECT.into(),
                     product: mslim::project_identity::PRODUCT.into(),
@@ -732,7 +902,7 @@ impl ExternalExecutor {
                     operation: ContinuityOperation::Release,
                     opaque_session_handle: request.opaque_session_handle.clone(),
                     previous_generation: request.expected_generation,
-                    resulting_generation: request.expected_generation,
+                    resulting_generation,
                     model_digest: request.model_digest.clone(),
                     tokenizer_digest: request.tokenizer_digest.clone(),
                     prefix_digest: request.prefix_digest.clone(),
@@ -1762,6 +1932,53 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    fn test_continuity_request() -> ContinuityRequest {
+        ContinuityRequest {
+            schema: mslim::continuity_contract::CONTINUITY_REQUEST_SCHEMA.into(),
+            operation: ContinuityOperation::Resume,
+            opaque_session_handle: "owned-session".into(),
+            expected_generation: 0,
+            model_digest: "a".repeat(64),
+            tokenizer_digest: "b".repeat(64),
+            prefix_digest: "c".repeat(64),
+            policy_digest: "d".repeat(64),
+            expires_at_unix_s: 1_900,
+            bounds: mslim::continuity_contract::ContinuityBounds {
+                max_reused_tokens: 32,
+                max_restored_bytes: 8_192,
+            },
+        }
+    }
+
+    fn test_active_continuity_state() -> StoredContinuityState {
+        StoredContinuityState::Active {
+            schema: StoredContinuitySchema::V1,
+            snapshot_bytes: vec![1, 2, 3],
+            runtime_receipt: Box::new(RuntimeCacheReceipt {
+                project: "KV-SHEI".into(),
+                product: "M-SLIM".into(),
+                technical_namespace: "mslim".into(),
+                schema: "mslim.runtime.cache-receipt/v2".into(),
+                operation: "snapshot".into(),
+                model_digest: "a".repeat(64),
+                tokenizer_digest: "b".repeat(64),
+                architecture_digest: "e".repeat(64),
+                prefix_digest: "f".repeat(64),
+                generation: 0,
+                reused_tokens: 0,
+                restored_bytes: 0,
+                mode: mslim_adapter_api::CacheMode::Exact,
+            }),
+            model_digest: "a".repeat(64),
+            tokenizer_digest: "b".repeat(64),
+            prefix_digest: "c".repeat(64),
+            policy_digest: "d".repeat(64),
+            expires_at_unix_s: 2_000,
+            reused_tokens: 16,
+            restored_bytes: 4_096,
+        }
+    }
+
     #[test]
     fn worker_start_allocates_a_fresh_coldstore_namespace_without_reusing_old_pages() {
         let root = tempfile::tempdir().unwrap();
@@ -1788,6 +2005,117 @@ mod tests {
         assert_eq!(committed_output_len(0, "length").unwrap(), 0);
         assert!(committed_output_len(3, "cancelled").is_err());
     }
+
+    #[test]
+    fn session_store_handles_are_internal_and_domain_separated() {
+        let conversation = conversation_store_handle("same-external-handle");
+        let continuity = continuity_store_handle("same-external-handle");
+        assert_ne!(conversation, continuity);
+        assert_eq!(
+            conversation,
+            conversation_store_handle("same-external-handle")
+        );
+        assert_eq!(continuity, continuity_store_handle("same-external-handle"));
+        assert!(!conversation.contains("same-external-handle"));
+        assert!(!continuity.contains("same-external-handle"));
+        assert!(conversation.len() <= 128);
+        assert!(continuity.len() <= 128);
+    }
+
+    #[test]
+    fn stored_continuity_state_is_typed_and_fail_closed() {
+        let released = StoredContinuityState::Released {
+            schema: StoredContinuitySchema::V1,
+            model_digest: "a".repeat(64),
+            tokenizer_digest: "b".repeat(64),
+            prefix_digest: "c".repeat(64),
+            policy_digest: "d".repeat(64),
+            released_at_unix_s: 42,
+        };
+        let value = serde_json::to_value(released).unwrap();
+        assert_eq!(
+            value.get("status").and_then(Value::as_str),
+            Some("released")
+        );
+        assert_eq!(
+            value.get("schema").and_then(Value::as_str),
+            Some("mslim.worker.continuity-state/v1")
+        );
+        assert!(serde_json::from_value::<StoredContinuityState>(value).is_ok());
+        assert!(
+            serde_json::from_value::<StoredContinuityState>(json!({
+                "status": "released",
+                "schema": "mslim.worker.continuity-state/v2",
+                "model_digest": "a".repeat(64),
+                "tokenizer_digest": "b".repeat(64),
+                "prefix_digest": "c".repeat(64),
+                "policy_digest": "d".repeat(64),
+                "released_at_unix_s": 42
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<StoredContinuityState>(json!({
+                "status": "released",
+                "schema": "mslim.worker.continuity-state/v1",
+                "model_digest": "a".repeat(64),
+                "tokenizer_digest": "b".repeat(64),
+                "prefix_digest": "c".repeat(64),
+                "policy_digest": "d".repeat(64),
+                "released_at_unix_s": 42,
+                "unexpected": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn restore_authorization_binds_identity_expiry_bounds_and_lifecycle() {
+        let request = test_continuity_request();
+        let authorized =
+            authorize_continuity_restore(test_active_continuity_state(), &request, 1_000).unwrap();
+        assert_eq!(authorized.reused_tokens, 16);
+        assert_eq!(authorized.restored_bytes, 4_096);
+
+        let mut changed_policy = request.clone();
+        changed_policy.policy_digest = "9".repeat(64);
+        assert!(
+            authorize_continuity_restore(test_active_continuity_state(), &changed_policy, 1_000)
+                .is_err()
+        );
+
+        assert!(
+            authorize_continuity_restore(test_active_continuity_state(), &request, 2_000).is_err()
+        );
+
+        let mut extended = request.clone();
+        extended.expires_at_unix_s = 2_001;
+        assert!(
+            authorize_continuity_restore(test_active_continuity_state(), &extended, 1_000).is_err()
+        );
+
+        let mut bounded = request.clone();
+        bounded.bounds.max_reused_tokens = 15;
+        assert!(
+            authorize_continuity_restore(test_active_continuity_state(), &bounded, 1_000).is_err()
+        );
+        bounded = request.clone();
+        bounded.bounds.max_restored_bytes = 4_095;
+        assert!(
+            authorize_continuity_restore(test_active_continuity_state(), &bounded, 1_000).is_err()
+        );
+
+        let released = StoredContinuityState::Released {
+            schema: StoredContinuitySchema::V1,
+            model_digest: request.model_digest.clone(),
+            tokenizer_digest: request.tokenizer_digest.clone(),
+            prefix_digest: request.prefix_digest.clone(),
+            policy_digest: request.policy_digest.clone(),
+            released_at_unix_s: 999,
+        };
+        assert!(authorize_continuity_restore(released, &request, 1_000).is_err());
+    }
+
     fn parse(value: Value) -> ChatRequest {
         serde_json::from_value(value).unwrap()
     }

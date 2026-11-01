@@ -23,12 +23,15 @@ manifest="$out_dir/runtime-manifest.json"
 generation_json="$out_dir/generation.json"
 snapshot_json="$out_dir/snapshot.json"
 resume_json="$out_dir/resume.json"
+release_json="$out_dir/release.json"
+released_resume_json="$out_dir/released-resume.json"
 worker_pid=""
 provider_pid=""
 session_handle="external-http-certification-$RANDOM-$$"
 
 mkdir -p "$out_dir" "$session_store" "$cold_dir"
-rm -f "$socket" "$manifest" "$generation_json" "$snapshot_json" "$resume_json"
+rm -f "$socket" "$manifest" "$generation_json" "$snapshot_json" "$resume_json" \
+  "$release_json" "$released_resume_json"
 
 cleanup() {
   kill "$worker_pid" "$provider_pid" 2>/dev/null || true
@@ -188,18 +191,94 @@ except urllib.error.HTTPError as error:
 json.dump(result, sys.stdout, sort_keys=True)
 print()
 assert result["operation"] == "resume"
+assert result["receipt"]["reused_tokens"] > 0
 assert result["receipt"]["restored_bytes"] > 0
 PY
 
-python3 - "$generation_json" "$snapshot_json" "$resume_json" <<'PY'
+python3 - "$port" "$expires_at" "$model_digest" "$tokenizer_digest" "$session_handle" >"$release_json" <<'PY'
+import json, sys, urllib.error, urllib.request
+port, expires, model_digest, tokenizer_digest, session_handle = sys.argv[1:]
+z = "0" * 64
+body = {
+    "messages": [],
+    "continuity": {
+        "schema": "mslim.continuity.request/v1",
+        "operation": "release",
+        "opaque_session_handle": session_handle,
+        "expected_generation": 0,
+        "model_digest": model_digest,
+        "tokenizer_digest": tokenizer_digest,
+        "prefix_digest": z,
+        "policy_digest": z,
+        "expires_at_unix_s": int(expires),
+        "bounds": {"max_reused_tokens": 4096, "max_restored_bytes": 268435456},
+    },
+}
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/v1/chat/completions",
+    data=json.dumps(body).encode(),
+    headers={"content-type": "application/json"},
+)
+try:
+    with urllib.request.urlopen(request, timeout=120) as response:
+        result = json.load(response)
+except urllib.error.HTTPError as error:
+    print(error.read().decode(errors="replace"), file=sys.stderr)
+    raise
+json.dump(result, sys.stdout, sort_keys=True)
+print()
+assert result["operation"] == "release"
+assert result["receipt"]["previous_generation"] == 0
+assert result["receipt"]["resulting_generation"] == 1
+PY
+
+python3 - "$port" "$expires_at" "$model_digest" "$tokenizer_digest" "$session_handle" >"$released_resume_json" <<'PY'
+import json, sys, urllib.error, urllib.request
+port, expires, model_digest, tokenizer_digest, session_handle = sys.argv[1:]
+z = "0" * 64
+body = {
+    "messages": [],
+    "continuity": {
+        "schema": "mslim.continuity.request/v1",
+        "operation": "resume",
+        "opaque_session_handle": session_handle,
+        "expected_generation": 1,
+        "model_digest": model_digest,
+        "tokenizer_digest": tokenizer_digest,
+        "prefix_digest": z,
+        "policy_digest": z,
+        "expires_at_unix_s": int(expires),
+        "bounds": {"max_reused_tokens": 4096, "max_restored_bytes": 268435456},
+    },
+}
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/v1/chat/completions",
+    data=json.dumps(body).encode(),
+    headers={"content-type": "application/json"},
+)
+try:
+    urllib.request.urlopen(request, timeout=120)
+except urllib.error.HTTPError as error:
+    payload = error.read().decode(errors="replace")
+    assert "released" in payload.lower(), payload
+    json.dump({"http_status": error.code, "error": json.loads(payload)}, sys.stdout, sort_keys=True)
+    print()
+else:
+    raise AssertionError("released continuity handle was unexpectedly resumable")
+PY
+
+python3 - "$generation_json" "$snapshot_json" "$resume_json" "$release_json" "$released_resume_json" <<'PY'
 import json, sys
-generation, snapshot, resume = (json.load(open(p)) for p in sys.argv[1:])
+generation, snapshot, resume, release, denied = (json.load(open(p)) for p in sys.argv[1:])
 print("REAL_EXTERNAL_RESTART_E2E_OK")
 print(json.dumps({
     "generation_wall_seconds": generation["measured_wall_seconds"],
     "prefill_seconds": generation["usage"]["prefill_seconds"],
     "decode_seconds": generation["usage"]["runtime_diagnostics"]["stats"]["decode_seconds"],
     "snapshot_generation": snapshot["receipt"]["resulting_generation"],
+    "reused_tokens": resume["receipt"]["reused_tokens"],
     "restored_bytes": resume["receipt"]["restored_bytes"],
+    "released_generation": release["receipt"]["resulting_generation"],
+    "released_resume_http_status": denied["http_status"],
 }, sort_keys=True))
 PY
