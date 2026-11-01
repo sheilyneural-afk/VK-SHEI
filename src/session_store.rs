@@ -219,7 +219,7 @@ fn hash_json(v: &serde_json::Value) -> Result<String, StoreError> {
     let b = serde_json::to_vec(v).map_err(|e| StoreError::Invalid(e.to_string()))?;
     let mut h = Sha256::new();
     h.update(b);
-    Ok(format!("{:x}", h.finalize()))
+    Ok(hex::encode(h.finalize()))
 }
 fn verify(g: &SessionGeneration) -> Result<(), StoreError> {
     if g.state_hash != hash_json(&g.state)? {
