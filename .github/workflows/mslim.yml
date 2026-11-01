@@ -34,6 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
+      - name: Create project-local temporary directory
+        run: mkdir -p deploy/local-production/runtime/tmp
       - name: Compile selected adapter surface
         run: |
           if [ -n "${{ matrix.features }}" ]; then
@@ -48,11 +50,13 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
+      - name: Create project-local temporary directory
+        run: mkdir -p deploy/local-production/runtime/tmp
       - run: cargo build --locked --release --no-default-features --lib
       - run: cargo build --locked --release --features accelerator-backend --bin mslim-runtime-worker
       - run: cargo build --locked --release --features unified-router --bin mslim-server
       - run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
-      - run: test -x target/release/mslim-runtime-worker && test -x target/release/mslim-server
+      - run: test -x deploy/local-production/runtime/build-target/release/mslim-runtime-worker && test -x deploy/local-production/runtime/build-target/release/mslim-server
 
   physical:
     if: github.event_name == 'workflow_dispatch'
@@ -60,6 +64,8 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
+      - name: Create project-local temporary directory
+        run: mkdir -p deploy/local-production/runtime/tmp
       - name: Require a physical model bundle
         env:
           MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
@@ -81,4 +87,6 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
+      - name: Create project-local temporary directory
+        run: mkdir -p deploy/local-production/runtime/tmp
       - run: cargo test --locked --lib inference_worker -- --nocapture
