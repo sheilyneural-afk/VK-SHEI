@@ -1,5 +1,11 @@
 # KV-SHEI / M-SLIM
 
+```yaml
+project: KV-SHEI
+product: M-SLIM
+technical_namespace: mslim
+```
+
 KV-SHEI es el repositorio de M-SLIM, un runtime local escrito en Rust para
 ejecutar modelos de lenguaje, gestionar su caché K/V y conservar sesiones con
 identidad verificable.
@@ -72,34 +78,45 @@ modelo.
 
 ## Estado del despliegue local
 
-En el estado inspeccionado el directorio
-`deploy/local-production/runtime/bin/` no contiene los binarios instalados y no
-hay procesos M-SLIM activos. Por tanto, el layout local no es ahora una release
-ejecutable.
+Los binarios, modelos y recibos instalados viven bajo
+`deploy/local-production/runtime/` y no forman parte del commit. Por eso el
+repositorio no atribuye al `HEAD` el estado mutable de una máquina concreta.
+`deploy/local-production/scripts/build-release.sh` construye los dos binarios
+canónicos desde una única instantánea estable de inputs, instala copias locales
+y escribe `mslim.local_release/v2`. `verify-release.sh` vuelve a calcular los
+hashes de inputs, binarios y contenido del bundle antes de aceptar esa release.
+La disponibilidad de un proceso se demuestra aparte mediante `/health` y la
+aptitud para servir peticiones mediante `/ready` y un E2E autenticado.
 
-Además, existe una incompatibilidad de contrato que debe corregirse antes de
-presentar la ruta gateway como operativa:
-
-- `mslim-calibrate` genera `/v3` con estado
-  `measured-sustained-execution`;
-- el worker actual acepta recibos de calibración
-  `mslim.calibration_receipt/v2` o `/v3` con estado
-  `measured-sustained-execution`;
-- el gateway actual exige `/v1` con estado `measured-basic-execution`;
-- `mslim-autoconfigure` también exige ese contrato `/v1`;
-- no se conserva ningún recibo de calibración hasta que el contrato quede
-  unificado.
-
-Con esos tres formatos distintos, el gateway rechaza el worker al seleccionar
-una ruta. La guía de despliegue explica este límite y no propone el arranque
-gateway como una secuencia actualmente cerrada.
-
-No se conserva ahora `runtime/validation/<digest>.json`. La matriz de cuatro
-rutas no reemplaza ese recibo porque responde a otra pregunta. Hay que ejecutar
-`mslim-validate-model` con el código actual antes de que `mslim-models` y
-`mslim-autoconfigure` puedan reconocer el bundle como validado.
+El contrato de calibración está unificado en
+`mslim.calibration_receipt/v4`, estado `measured-sustained-execution`, mediante
+el validador compartido por `mslim-calibrate`, el worker, el gateway y
+`mslim-autoconfigure`. La matriz `mslim.validation-matrix/v2` congela también
+`prefill_weight_reuse_tokens`, `hot_v_tokens` y el resto del perfil efectivo;
+el worker devuelve `/ready` 503 si falta la evidencia local o si cualquier
+valor difiere. Los documentos anteriores se archivan por hash antes de
+migrarlos; el bloque `migration` enlaza esquema, SHA-256 y copia original. Una
+migración conserva la medición histórica, pero no la convierte en una medición
+nueva ni sustituye una certificación ejecutada desde el commit actual.
 
 ## Cómo funciona
+
+### Superficies HTTP
+
+La API de producto soportada es la del gateway `mslim-server`:
+`/v1/models`, `/v1/capabilities` y `/v1/chat/completions`. El endpoint
+`/v1/generate` pertenece exclusivamente a `mslim-runtime-proxy`: es un puente
+interno de tokens sobre la sesión IPC genérica para integración de runtimes y
+pruebas locales. No es una API pública, no acepta mensajes de chat y no debe
+exponerse fuera de loopback.
+
+La interfaz servida por el worker es `assets/chat-runtime.html`. El cliente
+histórico duplicado se retiró porque ningún entrypoint activo lo servía.
+
+Cada manifiesto de release registra `build_input_digest`. Este digest cubre el
+código, manifests y lockfiles de Cargo, toolchain, configuración y assets de
+compilación. El verificador lo recalcula antes de aceptar la release; el propio
+`manifest.json` se excluye para evitar una identidad autorreferencial.
 
 ### Núcleo y adaptadores
 

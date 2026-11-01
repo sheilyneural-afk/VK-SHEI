@@ -1,26 +1,36 @@
 # Entorno local de M-SLIM
 
+```yaml
+project: KV-SHEI
+product: M-SLIM
+technical_namespace: mslim
+```
+
 El nombre del directorio es `local-production`, pero su existencia no demuestra
 que haya una release instalada ni un servicio activo. Este árbol aísla modelos,
 binarios, estado, recibos y compilación dentro del proyecto.
 
-## Estado inspeccionado
+## Qué demuestra cada capa
 
-A fecha de la revisión documental del 31 de octubre de 2026:
+El contenido de `runtime/` es local, mutable e ignorado por Git. Su mera
+existencia no demuestra el estado del commit ni el de un proceso residente.
 
-- existe un bundle local bajo `runtime/models/`;
-- existe una matriz actual `mslim.validation-matrix/v1` que pasó para una
-  configuración exacta concreta;
-- no se conservan calibraciones, certificaciones ni E2E anteriores;
-- no existe todavía un recibo general `mslim.validation_receipt/v1` para el
-  bundle;
-- `runtime/bin/` no contiene los binarios declarados por la release;
-- no hay procesos M-SLIM activos;
-- el gateway y el worker no aceptan actualmente el mismo contrato de
-  calibración.
+- `build-release.sh` demuestra que ambos binarios se construyeron sin que
+  cambiaran los inputs y deja sus hashes en `mslim.local_release/v2`.
+- `verify-release.sh` demuestra estructura, rutas, permisos y coincidencia de
+  hashes de fuente, binarios y bundle en el instante de la comprobación.
+- `mslim.validation_receipt/v2`, `mslim.validation-matrix/v2` y
+  `mslim.calibration_receipt/v4` demuestran aspectos distintos del modelo; no
+  son intercambiables.
+- `/health` demuestra vida del proceso. `/ready` exige modelo, matriz y
+  calibración compatibles con la configuración efectiva.
+- solo una petición autenticada por el gateway demuestra el recorrido HTTP
+  público; una restauración tras reiniciar el provider demuestra además la
+  persistencia física del K/V.
 
-Por esas razones, este layout no debe describirse ahora como una release
-instalada o arrancable de extremo a extremo.
+La certificación de una revisión debe ejecutar todas esas capas desde un árbol
+limpio y registrar por separado sus resultados. Ningún recibo histórico se
+presenta como evidencia nueva por haber sido migrado de esquema.
 
 ## Layout
 
@@ -134,15 +144,39 @@ cp deploy/local-production/env.example \
   deploy/local-production/local-production.env
 ```
 
-Hay que reemplazar todos los valores `REPLACE_WITH_*` y registrar los digests
-de los binarios y del árbol del modelo. `MSLIM_GATEWAY_TOKEN` es obligatorio
-para el gateway.
+Hay que reemplazar todos los valores `REPLACE_WITH_*`. El constructor canónico
+compila los dos binarios, instala copias atómicas, recalcula el digest de todos
+los inputs de compilación y comprueba el contenido completo del modelo:
 
-El perfil incluido activa varias optimizaciones exactas. La matriz actual no
-las cubre todas a la vez: su configuración congelada desactiva replay de prompt,
-prefijo compartido, commit diferido y unroll4. Antes de instalar ese perfil como
-release hay que repetir la validación con la combinación efectiva o reducir el
-perfil a la configuración ya medida.
+```bash
+deploy/local-production/scripts/build-release.sh
+```
+
+El script escribe `mslim.local_release/v2`, actualiza únicamente los tres
+digests efectivos del entorno y ejecuta `verify-release.sh`. El digest del
+modelo usa el mismo dominio (ruta relativa + NUL + bytes + NUL) que los
+importadores; no es un hash de la lista de nombres. `MSLIM_GATEWAY_TOKEN` es
+obligatorio para el gateway.
+
+Los contratos persistentes que preceden a la identidad obligatoria se migran
+una sola vez con:
+
+```bash
+python3 scripts/migrate-persistent-contracts.py --apply
+python3 scripts/migrate-persistent-contracts.py --check
+```
+
+Antes de sustituir un JSON, el migrador archiva sus bytes exactos bajo
+`runtime/receipts/contract-migration/archive/<sha256>.json`. Las cadenas
+`calibration-receipts.jsonl` v1 no se reescriben: conservan su dominio de hash,
+son verificables y quedan en modo histórico de solo lectura; las transacciones
+nuevas empiezan una raíz v2.
+
+El entorno efectivo debe coincidir exactamente con la configuración congelada
+en la matriz v2, incluidos `prefill_weight_reuse_tokens`, `hot_v_tokens`,
+replay, prefijo compartido, commit diferido, unroll4 y fusiones. Ante cualquier
+ausencia o diferencia, `/health` puede responder que el proceso vive, pero
+`/ready` responde 503.
 
 `MSLIM_ENABLE_LOD=true` con `MSLIM_LOD_EPSILON=0` crea la ruta exacta sin
 descarte. Un valor positivo no está autorizado por la matriz actual.
@@ -152,6 +186,11 @@ descarte. Un valor positivo no está autorizado por la matriz actual.
 El script comprueba:
 
 - que existen `local-production.env` y `manifest.json`;
+- que `manifest.json` usa `mslim.local_release/v2` y que sus rutas y hashes de
+  binarios y modelo coinciden con la configuración efectiva;
+- que la cabecera declara `KV-SHEI` / `M-SLIM` / `mslim` y que
+  `build_input_digest` coincide con código, manifests, lockfiles, toolchain,
+  configuración y assets de compilación actuales;
 - que `MSLIM_HOST` es `127.0.0.1`;
 - que `MSLIM_ENABLE_LOD` es `true` o `false`;
 - que `MSLIM_COLDSTORE_FORMAT` es `TSKVPG04`;
@@ -159,13 +198,12 @@ El script comprueba:
 - que existen y son ejecutables `mslim-server` y
   `mslim-runtime-worker`;
 - que sus SHA-256 coinciden con las variables del entorno;
-- que el digest del árbol del modelo coincide;
+- que el digest de contenido del bundle coincide con el nombre de su directorio;
 - que los archivos del modelo no son escribibles por grupo u otros usuarios.
 
 No comprueba:
 
-- que el contenido de `manifest.json` coincida con todas las variables;
-- que el worker y el gateway acepten el mismo schema de calibración;
+- todos los límites y opciones operativas de `manifest.json`;
 - que el driver o el dispositivo funcionen;
 - que el modelo pueda cargarse;
 - que el worker esté listo;
@@ -192,34 +230,38 @@ El gateway exige un bearer token para `/v1/models`, `/v1/capabilities` y
 `/v1/chat/completions`; `/health` y `/ready` no requieren token. Tanto gateway
 como workers aceptados deben usar loopback.
 
-### Bloqueo actual de calibración
+### Contrato canónico de calibración
 
-La ruta no está cerrada en el código actual:
+La ruta usa un único contrato en el código actual:
 
 | Componente | Contrato aceptado |
 |---|---|
-| `mslim-calibrate` | genera `mslim.calibration_receipt/v3`, estado `measured-sustained-execution` |
-| Worker | `mslim.calibration_receipt/v2` o `/v3`, estado `measured-sustained-execution` |
-| Gateway | `mslim.calibration_receipt/v1`, estado `measured-basic-execution` |
-| `mslim-autoconfigure` | `mslim.calibration_receipt/v1`, estado `measured-basic-execution` |
-| Recibo local | no existe hasta unificar el contrato |
+| `mslim-calibrate` | genera `mslim.calibration_receipt/v4`, estado `measured-sustained-execution` |
+| Worker | valida `/v4` mediante `calibration_contract` |
+| Gateway | valida `/v4` mediante `calibration_contract` |
+| `mslim-autoconfigure` | valida `/v4` mediante `calibration_contract` |
+| Recibo local | cuando se genera debe ser `/v4`; una migración puede enlazar el `/v3` original por SHA-256, pero no cuenta como una medición nueva |
 
-El gateway rechaza un worker que no cumpla su contrato. Antes de documentar el
-arranque como operativo hay que unificar esos schemas, generar una calibración
-actual, instalar los binarios y ejecutar un E2E por el gateway.
+El gateway rechaza un worker cuyo recibo o contrato de capacidades no cumpla
+los contratos compartidos. Para certificar un arranque hay que regenerar la
+evidencia desde la fuente actual, instalar los binarios y ejecutar un E2E
+público por el gateway.
 
 ### Recibo general del bundle
 
 `mslim-validate-model` escribe
 `runtime/validation/<bundle-digest>.json` con schema
-`mslim.validation_receipt/v1`. `mslim-models` y `mslim-autoconfigure` exigen ese
-schema. No se conserva ahora ningún recibo general del bundle.
+`mslim.validation_receipt/v2`. `mslim-models` y `mslim-autoconfigure` exigen ese
+schema. Un recibo local debe regenerarse para certificar una revisión nueva; la
+presencia de uno anterior no enlaza por sí sola el binario residente con el
+`HEAD` actual.
 
 La matriz `validation-matrix-<digest>.json` no sustituye este recibo: valida la
 relación densa/ColdStore, mientras que el recibo general identifica un adapter y
 registra inspect, load, prefill, decode, snapshot y restore. Antes de generar un
-perfil automático hay que volver a ejecutar `mslim-validate-model` y después
-`mslim-calibrate` con los contratos unificados.
+perfil automático certificado hay que volver a ejecutar `mslim-validate-model`
+y después `mslim-calibrate` desde los binarios instalados vinculados a la fuente
+actual.
 
 ## Matriz exacta
 

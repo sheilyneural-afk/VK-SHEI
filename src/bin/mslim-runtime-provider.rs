@@ -13,7 +13,10 @@ use std::{
     env, fs,
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
+    time::Duration,
 };
+
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn digest(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(Sha256::digest(fs::read(path)?)))
@@ -85,6 +88,12 @@ fn load(
 }
 fn serve(stream: UnixStream, host: &mut RuntimeHost) -> Result<()> {
     let mut stream = stream;
+    stream
+        .set_read_timeout(Some(CONNECTION_TIMEOUT))
+        .context("set provider IPC read timeout")?;
+    stream
+        .set_write_timeout(Some(CONNECTION_TIMEOUT))
+        .context("set provider IPC write timeout")?;
     loop {
         let request = match read_request(&mut stream) {
             Ok(r) => r,

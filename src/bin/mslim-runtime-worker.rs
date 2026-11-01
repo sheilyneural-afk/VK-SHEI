@@ -278,6 +278,7 @@ struct GpuAnswer {
     text: String,
     prompt_tokens: usize,
     tokens: Vec<u32>,
+    finish_reason: String,
     prefill_seconds: Option<f64>,
     total_seconds: Option<f64>,
     diagnostics: Value,
@@ -333,6 +334,11 @@ impl InferenceExecutor for GpuExecutor {
         Ok(GpuAnswer {
             text: output,
             prompt_tokens: generated.prompt_tokens,
+            finish_reason: if generated.steps.len() > generated.tokens.len() {
+                "stop".into()
+            } else {
+                "length".into()
+            },
             tokens: generated.tokens,
             prefill_seconds: Some(generated.prefill_seconds),
             total_seconds: Some(generated.total_seconds),
@@ -352,6 +358,18 @@ struct ExternalExecutor {
     active_conversation: Option<String>,
     active_history_tokens: Vec<u32>,
     stop_tokens: Vec<u32>,
+}
+
+fn committed_output_len(output_len: usize, finish_reason: &str) -> Result<usize> {
+    match finish_reason {
+        // A stop token is discovered only after the preceding emitted token
+        // has already been decoded into physical K/V.
+        "stop" => Ok(output_len),
+        // At the length boundary, the final emitted token has logits but has
+        // not yet been decoded into physical K/V.
+        "length" => Ok(output_len.saturating_sub(1)),
+        other => bail!("unsupported generation finish_reason: {other}"),
+    }
 }
 
 impl ExternalExecutor {
@@ -462,6 +480,7 @@ impl ExternalExecutor {
         conversation_id: &str,
         input_tokens: &[u32],
         output_tokens: &[u32],
+        finish_reason: &str,
     ) -> Result<Vec<u32>> {
         let response = self.send("snapshot", IpcOperation::SnapshotKv, Value::Null)?;
         let snapshot_bytes: Vec<u8> = serde_json::from_value(
@@ -487,10 +506,7 @@ impl ExternalExecutor {
                 .context("physical snapshot has no token history")?,
         )?;
 
-        // The final generated token is represented by the returned logits but has
-        // not yet been appended to the physical KV. It becomes part of the
-        // physical prefix on the next turn when it is supplied as input.
-        let committed_output_len = output_tokens.len().saturating_sub(1);
+        let committed_output_len = committed_output_len(output_tokens.len(), finish_reason)?;
         let mut expected_physical = input_tokens.to_vec();
         expected_physical.extend_from_slice(&output_tokens[..committed_output_len]);
         ensure!(
@@ -530,6 +546,7 @@ impl ExternalExecutor {
             text: String::new(),
             prompt_tokens: 0,
             tokens: Vec::new(),
+            finish_reason: "stop".into(),
             prefill_seconds: None,
             total_seconds: None,
             diagnostics: Value::Null,
@@ -788,6 +805,7 @@ impl InferenceExecutor for ExternalExecutor {
                     &conversation_id,
                     &input_tokens,
                     &generation.output_tokens,
+                    &generation.finish_reason,
                 )?;
                 self.active_conversation = Some(conversation_id);
                 self.active_history_tokens = physical_history;
@@ -795,6 +813,7 @@ impl InferenceExecutor for ExternalExecutor {
                 Ok(GpuAnswer {
                     text: output,
                     prompt_tokens: generation.prompt_tokens,
+                    finish_reason: generation.finish_reason,
                     tokens: generation.output_tokens,
                     prefill_seconds: generation.stats.prefill_seconds,
                     total_seconds: generation.stats.total_seconds,
@@ -1189,11 +1208,7 @@ async fn chat(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| invalid(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .as_secs();
-    let finish_reason = if result.tokens.len() >= max_tokens {
-        "length"
-    } else {
-        "stop"
-    };
+    let finish_reason = result.finish_reason;
     Ok(Json(json!({
         "id":format!("chatcmpl-mslim-igpu-{created}"),
         "object":"chat.completion",
@@ -1723,6 +1738,15 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_prefix_boundary_depends_on_the_real_finish_reason() {
+        assert_eq!(committed_output_len(3, "stop").unwrap(), 3);
+        assert_eq!(committed_output_len(3, "length").unwrap(), 2);
+        assert_eq!(committed_output_len(0, "stop").unwrap(), 0);
+        assert_eq!(committed_output_len(0, "length").unwrap(), 0);
+        assert!(committed_output_len(3, "cancelled").is_err());
+    }
     fn parse(value: Value) -> ChatRequest {
         serde_json::from_value(value).unwrap()
     }

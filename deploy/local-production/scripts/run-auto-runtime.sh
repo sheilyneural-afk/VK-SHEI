@@ -18,6 +18,7 @@ fi
 
 binary="$root/deploy/local-production/runtime/bin/mslim-server"
 : "${MSLIM_GATEWAY_TOKEN:?MSLIM_GATEWAY_TOKEN must be set}"
+export MSLIM_GATEWAY_TOKEN
 
 backend="${MSLIM_BACKEND:-auto}"
 configured="${MSLIM_WORKER_ENDPOINT:-}"
