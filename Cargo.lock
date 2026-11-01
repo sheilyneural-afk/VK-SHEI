@@ -2127,7 +2127,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 [[package]]
 name = "tokenizers"
 version = "0.22.2"
-source = "git+https://github.com/sheilyneural-afk/KV-SHEI-tokenizers.git?rev=05eb9baaf444654b77d4a41a15cdbe86f2ffd459#05eb9baaf444654b77d4a41a15cdbe86f2ffd459"
+source = "git+https://github.com/sheilyneural-afk/KV-SHEI-tokenizador-rust.git?rev=05eb9baaf444654b77d4a41a15cdbe86f2ffd459#05eb9baaf444654b77d4a41a15cdbe86f2ffd459"
 dependencies = [
  "ahash",
  "aho-corasick",
