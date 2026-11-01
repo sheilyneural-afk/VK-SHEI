@@ -2945,6 +2945,7 @@ mod tests {
             let lod_result = lod.generate(&ids, 16, true).unwrap();
             assert_eq!(dense_ids, lod_result.tokens);
             assert!(lod_result.gpu_region_components_active);
+            eprintln!("CAPACITY_PROBE bytes={} layers={}", lod_result.gpu_kv_capacity_bytes, lod.spec().num_hidden_layers);
             assert!(
                 lod_result.gpu_kv_capacity_bytes
                     < 64 * 2 * 2 * 128 * lod.spec().num_hidden_layers * 2
@@ -2975,7 +2976,7 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            let text = "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHola, buenos días<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
             let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 15);
             let mut old = GpuLlm::load(&model, 64, WeightMode::Resident).unwrap();
@@ -3147,11 +3148,23 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let prompt = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\nDato verificable: TEST-CODE-001. {}Indica el código del dato verificable.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let ids = tok.encode(prompt, false).unwrap().get_ids().to_vec();
+            let prompt_for = |filler: usize, tail_words: usize| {
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\nDato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tok.encode(prompt_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let mut dense = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             dense.set_batch_prefill_tokens(Some(128)).unwrap();
@@ -3225,14 +3238,26 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let u = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let text = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{u}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let ids = tok.encode(text, false).unwrap().get_ids().to_vec();
+            let prompt_for = |filler: usize, tail_words: usize| {
+                let u = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{u}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let ids = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tok.encode(prompt_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(ids.len(), 375);
             let mut reference = GpuLlm::load(&model, 512, WeightMode::Resident).unwrap();
             reference.set_batch_prefill_tokens(Some(128)).unwrap();
@@ -3274,7 +3299,10 @@ mod tests {
             );
             assert!(stats.physical_cold_store_bytes > 0);
             assert!(stats.physical_cold_store_pages > 0);
-            assert_eq!(actual.gpu_hot_v_attention_calls, 360);
+            assert_eq!(
+                actual.gpu_hot_v_attention_calls,
+                15 * optimized.spec().num_hidden_layers
+            );
             assert_eq!(actual.gpu_hot_v_cold_fallback_calls, 0);
         }
 
@@ -4252,14 +4280,26 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let user = format!(
-                "Dato verificable: TEST-CODE-001. {}Indica el código del dato verificable.",
-                "El informe conserva documentos y códigos de referencia. ".repeat(23)
-            );
-            let input = format!(
-                "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            );
-            let prompt = tokenizer.encode(input, false).unwrap().get_ids().to_vec();
+            let prompt_for = |filler: usize, tail_words: usize| {
+                let user = format!(
+                    "Dato verificable: TEST-CODE-001. {}{}Indica el código del dato verificable.",
+                    "El informe conserva documentos y códigos de referencia. ".repeat(filler),
+                    "ref ".repeat(tail_words)
+                );
+                format!(
+                    "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let prompt = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .map(|(filler, tail_words)| {
+                    tokenizer.encode(prompt_for(filler, tail_words), false)
+                        .unwrap()
+                        .get_ids()
+                        .to_vec()
+                })
+                .find(|ids| ids.len() == 375)
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
             assert_eq!(prompt.len(), 375);
             let build = |enabled: bool| {
                 let mut runtime = GpuLlm::load_with_gpu_region(
@@ -4373,7 +4413,7 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let text = "<s><|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            let text = "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHola, buenos días<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
             let ids = tokenizer.encode(text, false).unwrap().get_ids().to_vec();
             assert_eq!(ids.len(), 15);
             let build = |fused: bool| {
@@ -4754,16 +4794,23 @@ mod tests {
                 std::path::Path::new(&model).join("tokenizer.json"),
             )
             .unwrap();
-            let document = "Dato verificable: TEST-CODE-001. ".to_owned()
-                + &"El informe conserva documentos y códigos de referencia. ".repeat(23);
-            let chat = |question: &str| {
+            let chat = |document: &str, question: &str| {
                 let prompt = format!(
                     "<s><|im_start|>system\nResponde en español, de forma breve y directa.<|im_end|>\n<|im_start|>user\n{document}{question}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
                 );
                 tokenizer.encode(prompt, false).unwrap().get_ids().to_vec()
             };
-            let ids_a = chat("Indica el código del dato verificable.");
-            let ids_b = chat("¿Qué código exacto aparece en el informe?");
+            let (document, ids_a) = (1..=200)
+                .flat_map(|filler| (0..=40).map(move |tail_words| (filler, tail_words)))
+                .find_map(|(filler, tail_words)| {
+                    let document = "Dato verificable: TEST-CODE-001. ".to_owned()
+                        + &"El informe conserva documentos y códigos de referencia. ".repeat(filler)
+                        + &"ref ".repeat(tail_words);
+                    let ids = chat(&document, "Indica el código del dato verificable.");
+                    (ids.len() == 375).then_some((document, ids))
+                })
+                .expect("no filler combination produces a 375-token prompt for this tokenizer");
+            let ids_b = chat(&document, "¿Qué código exacto aparece en el informe?");
             assert_eq!(ids_a.len(), 375);
             let shared = ids_a.iter().zip(&ids_b).take_while(|(a, b)| a == b).count();
             assert!(
@@ -5339,7 +5386,7 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .physical_cold_store_pages,
-                    168
+                    7 * model.spec().num_hidden_layers
                 );
                 eprintln!(
                     "GPU_PREFILL_BATCH_PARITY batch={} prompt_tokens={} generated={} prefill_s={:.6} batch_count={} all_GPU_BF16_logits_KV_exact=true",
