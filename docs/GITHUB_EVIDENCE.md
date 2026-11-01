@@ -41,6 +41,40 @@ persistente sean correctos.
 Las Actions externas están fijadas por SHA completo. El comentario conserva la
 versión humana; el SHA es la autoridad inmutable.
 
+## Inventario reproducible de avisos de dependencias
+
+El workflow `Dependency advisory evidence` conserva durante 90 días cuatro
+piezas ligadas al commit analizado:
+
+1. la salida JSON completa de `cargo audit` y la identidad de su base RustSec;
+2. las alertas Dependabot abiertas obtenidas desde la API de GitHub;
+3. el árbol Cargo con todas las características y objetivos;
+4. un recibo normalizado `mslim.dependency_advisory_evidence/v1`.
+
+El recibo compara esos datos con
+`.github/security/dependency-advisory-baseline.json`. El gate falla si aparece
+un identificador no registrado, cambia paquete/versión/clase o `Cargo.lock` ya
+no coincide con el hash revisado. Un gate verde significa **sin deriva nueva**;
+no significa “sin vulnerabilidades”. Los hallazgos conocidos continúan
+figurando como `known_findings_open` hasta desaparecer de las fuentes.
+
+La revisión del commit `8648ff2` descompone los 15 identificadores agregados
+por Scorecard de esta forma:
+
+| Grupo | Cantidad | Cadena / superficie | Alcanzabilidad observada | Estado |
+|---|---:|---|---|---|
+| `zip` / RustSec extracción | 3 | `tch 0.18.1 → zip 0.6.6`; solo `torch-backend` | Las APIs afectadas existen, pero no se encontró una llamada a `ZipArchive::extract` o `ZipStreamReader::extract` en KV-SHEI ni en las rutas observadas de `tch`/`torch-sys` | Riesgo transitivo abierto; #32 |
+| `zip` / GHSA | 2 | Misma cadena opcional | No se encontró extracción streaming ni lectura AES con contraseña; esto reduce la alcanzabilidad observada, no corrige el paquete | Riesgo transitivo abierto; #32 |
+| `zstd-safe` | 9 | `tch → zip → zstd 0.11.2 → zstd-safe 5.0.2`; `torch-backend` | `zip` activa Zstandard, pero las funciones de bajo nivel señaladas no aparecen en la ruta observada; `RUSTSEC-2026-0403` afecta el decoder de escritura y `zip` usa decoder de lectura / encoder de escritura | Riesgo transitivo abierto; #34 |
+| `paste` sin mantenimiento | 1 | `tokenizers 0.22.2 → paste 1.0.15`; `model-bundle`, incluido el build por defecto | Macro de procedimiento usada al compilar; el aviso es de mantenimiento, no una vulnerabilidad runtime declarada | Sustitución pendiente; #34 |
+
+La clasificación “no se encontró una llamada” está limitada a la fuente y a
+las dependencias inspeccionadas en esa revisión. No equivale a una prueba
+universal de inalcanzabilidad. La migración automática de `tch 0.18.1` a
+`0.26.0` tampoco se acepta solo porque CI portátil compile: cambia el contrato
+de PyTorch/LibTorch y necesita build, carga de modelo, paridad K/V y validación
+física específicos antes de integrarse.
+
 ## Project, campos y vistas
 
 El Project `KV-SHEI — Evidencia y preparación para producción` utiliza Issues y
