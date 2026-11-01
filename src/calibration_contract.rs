@@ -37,6 +37,10 @@ pub fn validate_calibration_receipt(receipt: &Value, expected_bundle: &str) -> R
         "calibration receipt belongs to another bundle"
     );
     ensure!(
+        crate::build_info::is_current_clean_source_revision(receipt.get("source_revision")),
+        "calibration receipt belongs to another or dirty source revision"
+    );
+    ensure!(
         receipt
             .get("identity_digest")
             .and_then(Value::as_str)
@@ -203,6 +207,10 @@ mod tests {
             "technical_namespace": "mslim",
             "schema": schema,
             "bundle": bundle,
+            "source_revision": {
+                "commit": crate::build_info::SOURCE_COMMIT,
+                "tracked_files_modified_at_build": false
+            },
             "adapter": "accelerator-runtime",
             "identity_digest": "b".repeat(64),
             "started_unix_seconds": 1,
@@ -254,6 +262,12 @@ mod tests {
         let bundle = "a".repeat(64);
         let mut value = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
         assert!(validate_calibration_receipt(&value, &"c".repeat(64)).is_err());
+        value["source_revision"]["tracked_files_modified_at_build"] = json!(true);
+        assert!(validate_calibration_receipt(&value, &bundle).is_err());
+        value["source_revision"]["tracked_files_modified_at_build"] = json!(false);
+        value["source_revision"]["commit"] = json!("0".repeat(40));
+        assert!(validate_calibration_receipt(&value, &bundle).is_err());
+        value["source_revision"]["commit"] = json!(crate::build_info::SOURCE_COMMIT);
         value["context_samples"] = json!([]);
         assert!(validate_calibration_receipt(&value, &bundle).is_err());
     }

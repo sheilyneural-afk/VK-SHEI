@@ -22,6 +22,7 @@ struct SustainedCalibrationReceipt {
     product: &'static str,
     technical_namespace: &'static str,
     schema: &'static str,
+    source_revision: Value,
     bundle: String,
     adapter: String,
     identity_digest: String,
@@ -135,6 +136,7 @@ fn main() -> Result<()> {
             Value::String("temporary-calibration-namespace".into());
     }
     let identity_input = serde_json::json!({
+        "source_revision": mslim::build_info::source_revision(),
         "model_digest": digest,
         "config": identity_config,
         "adapter": selection,
@@ -231,6 +233,7 @@ fn main() -> Result<()> {
         product: mslim::project_identity::PRODUCT,
         technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE,
         schema: CALIBRATION_RECEIPT_SCHEMA,
+        source_revision: mslim::build_info::source_revision(),
         bundle: digest.to_owned(),
         adapter: selection.adapter_id,
         identity_digest,
@@ -271,6 +274,8 @@ fn main() -> Result<()> {
         ],
         status: CALIBRATION_RECEIPT_STATUS,
     };
+    let receipt_value = serde_json::to_value(&receipt)?;
+    validate_calibration_receipt(&receipt_value, digest)?;
     fs::create_dir_all(&destination)?;
     let temporary = tempfile::NamedTempFile::new_in(&destination)?;
     fs::write(temporary.path(), serde_json::to_vec_pretty(&receipt)?)?;
@@ -333,6 +338,10 @@ fn require_passing_validation_matrix_if_accelerated(
     ensure!(
         receipt.get("bundle_sha256").and_then(Value::as_str) == Some(digest),
         "la matriz de validación pertenece a otro bundle"
+    );
+    ensure!(
+        mslim::build_info::is_current_clean_source_revision(receipt.get("source_revision")),
+        "la matriz de validación pertenece a otra revisión o a un build sucio"
     );
     ensure!(
         receipt
@@ -496,6 +505,10 @@ mod tests {
             "technical_namespace": mslim::project_identity::TECHNICAL_NAMESPACE,
             "schema": mslim::project_identity::VALIDATION_MATRIX_SCHEMA,
             "status": "passed",
+            "source_revision": {
+                "commit": mslim::build_info::SOURCE_COMMIT,
+                "tracked_files_modified_at_build": false
+            },
             "bundle_sha256": digest,
             "determinism": {"all_passed": true},
             "same_backend": {"all_passed": true},
@@ -513,6 +526,17 @@ mod tests {
             "same-backend-and-kv-integrity-passed"
         );
 
+        receipt["source_revision"]["tracked_files_modified_at_build"] = json!(true);
+        fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(
+            require_passing_validation_matrix_if_accelerated(
+                root.path(),
+                &digest,
+                "accelerator-runtime"
+            )
+            .is_err()
+        );
+        receipt["source_revision"]["tracked_files_modified_at_build"] = json!(false);
         receipt["same_backend"]["all_passed"] = json!(false);
         fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
         assert!(

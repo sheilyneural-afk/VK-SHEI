@@ -111,20 +111,21 @@ binarios y no aprueba otra configuración. Indica únicamente que la ejecución
 incluida en el recibo superó esos gates.
 
 La matriz llama a `snapshot_kv`, pero no restaura ese snapshot. El restore se
-valida en la conformidad del adapter y en los E2E de continuidad. También falta
-en el schema actual una identidad de commit o digest del árbol fuente; el hash
-del JSON no enlaza por sí solo el recibo con una revisión concreta.
+valida en la conformidad del adapter y en los E2E de continuidad. La matriz
+incluye `source_revision`; los consumidores de activación exigen que sea el
+commit exacto del binario actual y que el árbol estuviera limpio al compilarlo.
 
-## Evidencia actual
+## Evidencia histórica
 
-El recibo local más reciente para el bundle
+Una ejecución local anterior para el bundle
 `43e8fa4641e6f06d9df96abc4ef285556a8c714af6909b13e22e01e723d3d686`
-pasó los gates anteriores con ocho pasos de decode. Su SHA-256 es
+pasó los gates anteriores con ocho pasos de decode. El SHA-256 de aquel recibo fue
 `8afd03f87d0c842788f33e86c3e45ff8343aeee974a9049e3b849a8d2d7e3344`.
 
-La comparación CPU/GPU conservó top-1 y tokens, pero no logits ni K/V
-bit-exactos. El máximo absoluto observado fue `0.234375`. Esta es una muestra
-pequeña y no constituye un umbral de producto.
+En esa ejecución, la comparación CPU/GPU conservó top-1 y tokens, pero no
+logits ni K/V bit-exactos. El máximo absoluto observado fue `0.234375`. Es una
+muestra pequeña y no constituye un umbral de producto. La evidencia vigente
+debe leerse del recibo local y coincidir con la revisión fuente actual.
 
 ## Aproximación
 

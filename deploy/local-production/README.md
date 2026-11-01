@@ -242,6 +242,10 @@ La ruta usa un único contrato en el código actual:
 | `mslim-autoconfigure` | valida `/v4` mediante `calibration_contract` |
 | Recibo local | cuando se genera debe ser `/v4`; una migración puede enlazar el `/v3` original por SHA-256, pero no cuenta como una medición nueva |
 
+La calibración v4 incluye la revisión fuente en su identidad. Productores y
+consumidores rechazan una revisión distinta o un árbol que estuviera sucio al
+compilar; una medición anterior del mismo bundle no autoriza el binario actual.
+
 El gateway rechaza un worker cuyo recibo o contrato de capacidades no cumpla
 los contratos compartidos. Para certificar un arranque hay que regenerar la
 evidencia desde la fuente actual, instalar los binarios y ejecutar un E2E
@@ -291,8 +295,10 @@ MSLIM_MODEL_DIR="$PWD/deploy/local-production/runtime/models/<digest>" \
   scripts/e2e-worker-external-restart.sh
 ```
 
-No se conserva ningún resultado E2E anterior. La siguiente ejecución deberá
-generar evidencia nueva y sustituible, sin acumular directorios de intentos.
+Cada ejecución usa un directorio identificado por fecha y PID para no mezclar
+sesiones ni sobrescribir evidencia. Esos directorios locales se conservan hasta
+una limpieza auditable; el script no afirma que el resultado anterior siga
+vigente para otra revisión.
 
 No existe en ese script una prueba de reinicio del proveedor. Si se necesita
 recuperación tras caída completa, debe añadirse un ensayo separado que reinicie

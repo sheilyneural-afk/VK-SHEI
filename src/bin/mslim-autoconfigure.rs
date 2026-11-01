@@ -149,6 +149,7 @@ fn validated_bundles(
                 != Some(mslim::project_identity::VALIDATION_RECEIPT_SCHEMA)
             || value.get("status").and_then(serde_json::Value::as_str)
                 != Some("validated-for-local-execution")
+            || !mslim::build_info::is_current_clean_source_revision(value.get("source_revision"))
         {
             continue;
         }
@@ -204,6 +205,10 @@ mod tests {
             "product": "M-SLIM",
             "technical_namespace": "mslim",
             "schema": mslim::project_identity::CALIBRATION_RECEIPT_SCHEMA,
+            "source_revision": {
+                "commit": mslim::build_info::SOURCE_COMMIT,
+                "tracked_files_modified_at_build": false
+            },
             "bundle": bundle,
             "adapter": "accelerator-runtime",
             "identity_digest": "b".repeat(64),

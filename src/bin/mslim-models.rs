@@ -127,6 +127,7 @@ fn validation_status(root: &Path, bundle: &str) -> String {
             .is_some_and(|digest| digest.eq_ignore_ascii_case(bundle))
         && value.get("status").and_then(serde_json::Value::as_str)
             == Some("validated-for-local-execution")
+        && mslim::build_info::is_current_clean_source_revision(value.get("source_revision"))
     {
         "validated-for-local-execution".into()
     } else {

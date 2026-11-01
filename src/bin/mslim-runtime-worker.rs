@@ -1063,6 +1063,7 @@ fn validation_matrix_summary(state: &AppState) -> Option<Value> {
             != Some(mslim::project_identity::VALIDATION_MATRIX_SCHEMA)
         || receipt.get("status").and_then(Value::as_str) != Some("passed")
         || receipt.get("bundle_sha256").and_then(Value::as_str) != Some(model_digest)
+        || !mslim::build_info::is_current_clean_source_revision(receipt.get("source_revision"))
         || state.runtime_manifest.is_none()
             && (frozen.get("stage_tokens").and_then(Value::as_u64)
                 != state.lod_stage.map(|value| value as u64)
