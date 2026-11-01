@@ -148,9 +148,7 @@ fn main() -> Result<()> {
             "--doc-repetitions" => {
                 doc_repetitions = it.next().context("falta --doc-repetitions")?.parse()?
             }
-            "--max-tokens" => {
-                max_tokens = it.next().context("falta --max-tokens")?.parse()?
-            }
+            "--max-tokens" => max_tokens = it.next().context("falta --max-tokens")?.parse()?,
             "--prefix-cache-dir" => {
                 prefix_cache_dir = Some(PathBuf::from(
                     it.next().context("falta --prefix-cache-dir")?,
@@ -161,7 +159,10 @@ fn main() -> Result<()> {
             other => bail!("argumento desconocido: {other}"),
         }
     }
-    ensure!(!dense_only || !mslim_only, "--dense-only y --mslim-only son excluyentes");
+    ensure!(
+        !dense_only || !mslim_only,
+        "--dense-only y --mslim-only son excluyentes"
+    );
 
     let model_path = model.context("--model es obligatorio")?;
     let system = build_system_prompt(doc_repetitions);
@@ -179,7 +180,10 @@ fn main() -> Result<()> {
     // ─── Carga del modelo ────────────────────────────────────────────────────
     let load_t0 = Instant::now();
     let mslim_runtime = if let Some(ref cache_dir) = prefix_cache_dir {
-        eprintln!("Cargando M-SLIM con caché de prefijo en {}", cache_dir.display());
+        eprintln!(
+            "Cargando M-SLIM con caché de prefijo en {}",
+            cache_dir.display()
+        );
         TorchModelRuntime::load_with_prefix_cache(&model_path, cache_dir)?
     } else {
         let tmp_dir = tempfile::tempdir().context("crear directorio temporal de caché")?;
@@ -212,7 +216,11 @@ fn main() -> Result<()> {
                 r.prefill_seconds,
                 r.decode_seconds,
                 r.latency_seconds,
-                if r.answer.contains("AZULEJO-7319") { "✓ CORRECTO" } else { "✗ incorrecto" }
+                if r.answer.contains("AZULEJO-7319") {
+                    "✓ CORRECTO"
+                } else {
+                    "✗ incorrecto"
+                }
             );
             mslim_results.push(r);
         }
@@ -230,7 +238,11 @@ fn main() -> Result<()> {
                 r.prefill_seconds,
                 r.decode_seconds,
                 r.latency_seconds,
-                if r.answer.contains("AZULEJO-7319") { "✓ CORRECTO" } else { "✗ incorrecto" }
+                if r.answer.contains("AZULEJO-7319") {
+                    "✓ CORRECTO"
+                } else {
+                    "✗ incorrecto"
+                }
             );
             dense_results.push(r);
         }
@@ -361,7 +373,11 @@ fn main() -> Result<()> {
             QUERIES.len(),
             mslim_total_s,
             dense_total_s,
-            if mslim_total_s > 1e-9 { dense_total_s / mslim_total_s } else { 0.0 }
+            if mslim_total_s > 1e-9 {
+                dense_total_s / mslim_total_s
+            } else {
+                0.0
+            }
         );
         if let Some(last_m) = mslim_results.last() {
             if last_m.kv_bf16_reference_bytes > 0 {
@@ -380,7 +396,11 @@ fn main() -> Result<()> {
             .all(|(m, d)| m.token_ids == d.token_ids);
         eprintln!(
             "  Fidelidad: tokens {}",
-            if fidelity_ok { "IDÉNTICOS ✓" } else { "DISTINTOS — verificar" }
+            if fidelity_ok {
+                "IDÉNTICOS ✓"
+            } else {
+                "DISTINTOS — verificar"
+            }
         );
     }
 
