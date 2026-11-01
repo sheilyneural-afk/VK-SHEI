@@ -12,6 +12,9 @@ resolver = "3"
 # Security-maintained fork of tch 0.18.1. The immutable revision upgrades both
 # tch and torch-sys from vulnerable zip 0.6.6 to zip 9.0.5.
 tch = { git = "https://github.com/sheilyneural-afk/KV-SHEI-tch-rs.git", rev = "acaf9df5a07a3146da30ce74eebcf9aebd333692" }
+# Security-maintained fork of tokenizers 0.23.2. The immutable revision
+# replaces the unmaintained paste procedural macro with pastey.
+tokenizers = { git = "https://github.com/sheilyneural-afk/KV-SHEI-tokenizers.git", rev = "05eb9baaf444654b77d4a41a15cdbe86f2ffd459" }
 
 [lib]
 name = "mslim"
