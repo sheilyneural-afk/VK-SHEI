@@ -51,6 +51,11 @@ piezas ligadas al commit analizado:
 3. el árbol Cargo con todas las características y objetivos;
 4. un recibo normalizado `mslim.dependency_advisory_evidence/v1`.
 
+La consulta de Dependabot usa exclusivamente el `GITHUB_TOKEN` efímero con
+`vulnerability-alerts: read`; no persiste un PAT ni concede escritura sobre
+alertas. `security-events` corresponde a otras superficies de seguridad y no
+autoriza este endpoint.
+
 El recibo compara esos datos con
 `.github/security/dependency-advisory-baseline.json`. El gate falla si aparece
 un identificador no registrado, cambia paquete/versión/clase o `Cargo.lock` ya
