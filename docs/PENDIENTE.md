@@ -36,12 +36,6 @@ exacto, empaquetado y ejecutable de principio a fin, con su validación y su
 recibo. HIP, instalador, catálogo y router quedarían fuera de ese camino hasta
 que el primero esté cerrado.
 
-## Proteger `main` con pull requests obligatorios
-
-Es una configuración del repositorio en GitHub, no de código. Debe exigir que
-pase el job `core` del CI (que ejecuta `scripts/check.sh`) antes de fusionar.
-Hasta entonces, el hook local `scripts/install-hooks.sh` es la única barrera.
-
 ## Semántica real en la recuperación documental
 
 El canal por raíces y la retroalimentación de pseudo-relevancia ya existen y
