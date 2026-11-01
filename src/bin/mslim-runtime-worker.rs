@@ -1245,6 +1245,28 @@ fn validate_model_bundle(model: &std::path::Path) -> Result<String> {
     Ok(template.to_owned())
 }
 
+/// Treat the configured ColdStore path as a durable namespace root, never as
+/// the live causal session itself. Existing pages may belong to a snapshot
+/// that can only be rebound through the verified restore contract. A fresh
+/// worker therefore starts in a fresh child namespace and leaves every older
+/// namespace untouched for explicit recovery.
+fn allocate_initial_coldstore_namespace(mut config: GpuRegionConfig) -> Result<GpuRegionConfig> {
+    let Some(root) = config.cold_directory.as_ref() else {
+        return Ok(config);
+    };
+    fs::create_dir_all(root)
+        .with_context(|| format!("create canonical ColdStore root {}", root.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("ColdStore namespace clock")?
+        .as_nanos();
+    let active = root.join(format!("session-{}-{nonce}", std::process::id()));
+    fs::create_dir(&active)
+        .with_context(|| format!("create fresh ColdStore namespace {}", active.display()))?;
+    config.cold_directory = Some(active);
+    Ok(config)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut model = PathBuf::from("deploy/local-production/runtime/models/active");
@@ -1593,6 +1615,7 @@ async fn main() -> Result<()> {
         )
     } else {
         let mut engine = if let Some(config) = lod {
+            let config = allocate_initial_coldstore_namespace(config)?;
             GpuLlm::load_with_gpu_region(&model, max_context, mode, config)?
         } else {
             GpuLlm::load(&model, max_context, mode)?
@@ -1738,6 +1761,24 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_start_allocates_a_fresh_coldstore_namespace_without_reusing_old_pages() {
+        let root = tempfile::tempdir().unwrap();
+        let old_pages = root.path().join("pages-exact.kv");
+        fs::write(&old_pages, b"preserved-old-session").unwrap();
+        let config = allocate_initial_coldstore_namespace(GpuRegionConfig {
+            cold_directory: Some(root.path().to_path_buf()),
+            ..GpuRegionConfig::default()
+        })
+        .unwrap();
+        let active = config.cold_directory.unwrap();
+        assert_eq!(active.parent(), Some(root.path()));
+        assert_ne!(active, root.path());
+        assert!(active.is_dir());
+        assert_eq!(fs::read(old_pages).unwrap(), b"preserved-old-session");
+        assert_eq!(fs::read_dir(active).unwrap().count(), 0);
+    }
 
     #[test]
     fn physical_prefix_boundary_depends_on_the_real_finish_reason() {
