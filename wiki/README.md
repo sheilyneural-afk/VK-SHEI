@@ -28,10 +28,12 @@ python3 scripts/wiki_audit.py diff \
   --wiki deploy/local-production/runtime/wiki/generated
 ```
 
-`check` no publica. El workflow `documentation-truth` genera la propuesta y el
-recibo como artefactos de CI. La publicación requiere invocar explícitamente
-`scripts/wiki-publish.sh`, que rechaza árboles sucios, historiales divergentes y
-resultados que no hayan superado el auditor.
+`check` no publica. En pull requests, el workflow `documentation-truth` genera
+la propuesta y el recibo como artefactos de CI y conserva permisos de solo
+lectura. Después de integrar un cambio aprobado en `main`, un segundo job puede
+publicar exactamente ese artefacto auditado. La misma operación puede invocarse
+manualmente con `scripts/wiki-publish.sh`; en ambos casos se rechazan árboles
+sucios, historiales divergentes y resultados que no hayan superado el auditor.
 
 ## Autoridad
 
