@@ -4,29 +4,26 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
 
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+from evidence_io import file_sha256
 
 
 def require_sha256(name: str, value: str) -> None:
-    if len(value) != 64 or any(character not in "0123456789abcdefABCDEF" for character in value):
+    if len(value) != 64 or any(
+        character not in "0123456789abcdefABCDEF" for character in value
+    ):
         raise SystemExit(f"{name} is not a SHA-256 digest")
 
 
 def atomic_write(path: Path, data: bytes, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as out:
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as out:
         temporary = Path(out.name)
         out.write(data)
         out.flush()
@@ -41,7 +38,11 @@ def update_env(path: Path, values: dict[str, str]) -> None:
     seen: set[str] = set()
     output: list[str] = []
     for line in lines:
-        key = line.split("=", 1)[0] if "=" in line and not line.lstrip().startswith("#") else None
+        key = (
+            line.split("=", 1)[0]
+            if "=" in line and not line.lstrip().startswith("#")
+            else None
+        )
         if key in values:
             output.append(f"{key}={values[key]}")
             seen.add(key)

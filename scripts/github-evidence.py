@@ -18,9 +18,10 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Iterable
 
+from evidence_io import atomic_json_write, file_sha256
+
 
 SCHEMA = "mslim.github_evidence/v1"
-CHUNK_SIZE = 1024 * 1024
 
 
 def run(command: list[str], root: Path, *, required: bool = True) -> str | None:
@@ -41,14 +42,6 @@ def run(command: list[str], root: Path, *, required: bool = True) -> str | None:
     return completed.stdout.strip()
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(CHUNK_SIZE):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def display_path(path: Path, root: Path) -> str:
     resolved = path.resolve()
     try:
@@ -57,7 +50,9 @@ def display_path(path: Path, root: Path) -> str:
         return f"external/{resolved.name}"
 
 
-def describe_artifacts(paths: Iterable[Path], display_root: Path) -> list[dict[str, object]]:
+def describe_artifacts(
+    paths: Iterable[Path], display_root: Path
+) -> list[dict[str, object]]:
     artifacts: list[dict[str, object]] = []
     seen: set[Path] = set()
     for candidate in paths:
@@ -66,12 +61,14 @@ def describe_artifacts(paths: Iterable[Path], display_root: Path) -> list[dict[s
             continue
         seen.add(path)
         if not path.is_file() or path.is_symlink():
-            raise ValueError(f"evidence artifact must be a regular non-symlink file: {candidate}")
+            raise ValueError(
+                f"evidence artifact must be a regular non-symlink file: {candidate}"
+            )
         artifacts.append(
             {
                 "path": display_path(path, display_root),
                 "size_bytes": path.stat().st_size,
-                "sha256": sha256(path),
+                "sha256": file_sha256(path),
             }
         )
     artifacts.sort(key=lambda item: str(item["path"]))
@@ -82,9 +79,7 @@ def source_identity(root: Path) -> dict[str, object]:
     commit = run(["git", "rev-parse", "HEAD"], root)
     tree = run(["git", "rev-parse", "HEAD^{tree}"], root)
     branch = run(["git", "branch", "--show-current"], root, required=False) or None
-    dirty_output = run(
-        ["git", "status", "--porcelain", "--untracked-files=no"], root
-    )
+    dirty_output = run(["git", "status", "--porcelain", "--untracked-files=no"], root)
     github_sha = os.environ.get("GITHUB_SHA") or None
     return {
         "commit": commit,
@@ -146,26 +141,15 @@ def boundaries(kind: str) -> dict[str, object]:
     }
 
 
-def atomic_json_write(path: Path, value: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = json.dumps(value, indent=2, sort_keys=True) + "\n"
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=path.parent, delete=False
-    ) as temporary:
-        temporary.write(rendered)
-        temporary.flush()
-        os.fsync(temporary.fileno())
-        temporary_path = Path(temporary.name)
-    temporary_path.replace(path)
-
-
 def build(arguments: argparse.Namespace) -> int:
     root = arguments.root.resolve()
     artifact_base = (arguments.artifact_base or root).resolve()
     artifacts = describe_artifacts(arguments.artifact, artifact_base)
     identity = source_identity(root)
     if identity["tracked_files_modified"] and not arguments.allow_dirty:
-        raise SystemExit("refusing reusable GitHub evidence from modified tracked source")
+        raise SystemExit(
+            "refusing reusable GitHub evidence from modified tracked source"
+        )
     if not identity["github_sha_matches_checkout"]:
         raise SystemExit("GITHUB_SHA does not match the checked-out source revision")
 
@@ -191,7 +175,9 @@ def verify(arguments: argparse.Namespace) -> int:
         raise SystemExit(f"unsupported evidence schema: {manifest.get('schema')!r}")
     if manifest.get("status") not in {"passed", "failed", "cancelled", "skipped"}:
         raise SystemExit("invalid evidence status")
-    if not isinstance(manifest.get("boundaries", {}).get("does_not_by_itself_prove"), list):
+    if not isinstance(
+        manifest.get("boundaries", {}).get("does_not_by_itself_prove"), list
+    ):
         raise SystemExit("missing evidence boundaries")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
@@ -221,12 +207,14 @@ def verify(arguments: argparse.Namespace) -> int:
             local = arguments.artifact_root.resolve() / relative
             if not local.is_file() or local.is_symlink():
                 raise SystemExit(f"missing regular artifact: {relative}")
-            if local.stat().st_size != size or sha256(local) != digest:
+            if local.stat().st_size != size or file_sha256(local) != digest:
                 raise SystemExit(f"artifact digest mismatch: {relative}")
     if arguments.require_source:
         current = run(["git", "rev-parse", "HEAD"], arguments.root.resolve())
         if manifest.get("source", {}).get("commit") != current:
-            raise SystemExit("manifest source commit does not match the current checkout")
+            raise SystemExit(
+                "manifest source commit does not match the current checkout"
+            )
     return 0
 
 
@@ -252,7 +240,9 @@ def self_test(_: argparse.Namespace) -> int:
         )
         loaded = json.loads(output.read_text(encoding="utf-8"))
         assert loaded["schema"] == SCHEMA
-        assert "production readiness" in loaded["boundaries"]["does_not_by_itself_prove"]
+        assert (
+            "production readiness" in loaded["boundaries"]["does_not_by_itself_prove"]
+        )
     print("OK: GitHub evidence self-test passed")
     return 0
 
@@ -287,7 +277,9 @@ def parser() -> argparse.ArgumentParser:
     )
     validate.set_defaults(handler=verify)
 
-    tests = subcommands.add_parser("self-test", help="run dependency-free regression tests")
+    tests = subcommands.add_parser(
+        "self-test", help="run dependency-free regression tests"
+    )
     tests.set_defaults(handler=self_test)
     return command
 
