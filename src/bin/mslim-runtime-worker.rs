@@ -241,11 +241,21 @@ fn render_prompt(
     thinking: bool,
 ) -> Result<String> {
     ensure!(!messages.is_empty(), "no messages");
+    const DEFAULT_SYSTEM_PROMPT: &str =
+        "Responde de forma directa y breve, en el idioma del usuario.";
+    let mut prepared = Vec::with_capacity(messages.len() + 1);
+    if !messages.iter().any(|message| message.role == "system") {
+        prepared.push(ChatMessage {
+            role: "system".into(),
+            content: DEFAULT_SYSTEM_PROMPT.into(),
+        });
+    }
+    prepared.extend(messages.iter().cloned());
     let mut env = Environment::new();
     env.add_template("chat", &template.source)
         .context("invalid model chat template")?;
     let rendered = env.get_template("chat")?.render(context! {
-        messages => messages.iter().map(|message| json!({
+        messages => prepared.iter().map(|message| json!({
             "role": message.role,
             "content": message.content,
         })).collect::<Vec<_>>(),
@@ -2236,7 +2246,7 @@ mod tests {
     #[test]
     fn exact_raw_template_matches_reference() {
         let messages = [ChatMessage {
-            role: "user".into(),
+            role: "system".into(),
             content: "Hola".into(),
         }];
         assert_eq!(
@@ -2250,14 +2260,14 @@ mod tests {
                 false
             )
             .unwrap(),
-            "user: Hola"
+            "system: Hola"
         );
     }
 
     #[test]
     fn configured_special_tokens_reach_the_model_chat_template() {
         let messages = [ChatMessage {
-            role: "user".into(),
+            role: "system".into(),
             content: "Hola".into(),
         }];
         let template = ChatTemplate {
@@ -2268,6 +2278,23 @@ mod tests {
         assert_eq!(
             render_prompt(&template, &messages, false).unwrap(),
             "<|begin_of_text|>Hola<|eot_id|>"
+        );
+    }
+
+    #[test]
+    fn missing_system_message_gets_the_canonical_runtime_default() {
+        let messages = [ChatMessage {
+            role: "user".into(),
+            content: "Hola".into(),
+        }];
+        let template = ChatTemplate {
+            source: "{% for message in messages %}{{ message['role'] }}={{ message['content'] }};{% endfor %}".into(),
+            bos_token: String::new(),
+            eos_token: String::new(),
+        };
+        assert_eq!(
+            render_prompt(&template, &messages, false).unwrap(),
+            "system=Responde de forma directa y breve, en el idioma del usuario.;user=Hola;"
         );
     }
 }
