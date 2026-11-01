@@ -1,0 +1,78 @@
+name: Evidencia o afirmación verificable
+description: Registre una capacidad, resultado o claim y la cadena de evidencia que lo sostiene.
+title: "[evidencia] "
+labels: ["evidence:required"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Este formulario separa fuente, build, instalación, proceso residente, efecto, persistencia y reinicio. Marque únicamente lo que pueda demostrar con evidencia reproducible.
+  - type: dropdown
+    id: level
+    attributes:
+      label: Nivel máximo demostrado
+      options:
+        - Fuente o contrato
+        - Prueba focal
+        - Gate completo de CI
+        - Artefacto construido y hasheado
+        - Artefacto instalado verificado
+        - Proceso residente verificado
+        - Petición E2E autenticada
+        - Persistencia y readback
+        - Recuperación después de reinicio
+        - Release reproducible y atestada
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: Afirmación exacta
+      description: Escriba una afirmación acotada que los artefactos puedan sostener literalmente.
+    validations:
+      required: true
+  - type: textarea
+    id: identity
+    attributes:
+      label: Identidad evaluada
+      description: Commit, tree, workflow/run, binario, bundle, configuración efectiva, backend, dispositivo y timestamps aplicables.
+      placeholder: |
+        source commit:
+        workflow run:
+        artifact SHA-256:
+        model bundle SHA-256:
+        backend/device:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproducción y comandos
+      description: Incluya los comandos exactos, inputs no secretos y condiciones del entorno.
+    validations:
+      required: true
+  - type: textarea
+    id: receipts
+    attributes:
+      label: Artefactos, recibos y enlaces
+      description: Enlace Actions, logs, atestaciones, manifests, matrices, calibraciones y readbacks.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Límites declarados
+      options:
+        - label: He separado código fuente, build, instalación y proceso residente.
+          required: true
+        - label: No trato health, HTTP 200, un manifest o una prueba focal como E2E suficiente.
+          required: true
+        - label: He indicado las rutas físicas, backends o reinicios que no fueron medidos.
+          required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Condición de cierre o siguiente escalón
+      description: Qué evidencia adicional convertiría esta afirmación en una garantía superior.
+    validations:
+      required: true

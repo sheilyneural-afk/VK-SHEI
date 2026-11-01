@@ -1,0 +1,151 @@
+name: Release provenance
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing immutable tag to build
+        required: true
+        type: string
+      publish_release:
+        description: Publish a GitHub Release after building and attesting
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+concurrency:
+  group: release-provenance-${{ github.ref }}-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and attest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the immutable release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require an exact semantic-version tag and clean source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
+        with:
+          toolchain: "1.99.1"
+      - name: Build the supported release surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deploy/local-production/runtime/tmp
+          cargo build --locked --release --features accelerator-backend --bin mslim-runtime-worker
+          cargo build --locked --release --features unified-router --bin mslim-gateway
+          cargo build --locked --release --bin mslim-inspect --bin mslim-certify --bin mslim-document --bin mslim-runtime-host
+      - name: Assemble a bounded release and evidence manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="mslim-${RELEASE_TAG}-linux-x86_64"
+          root="deploy/local-production/runtime/github-evidence"
+          mkdir -p "$root/$package/bin"
+          for binary in mslim-runtime-worker mslim-gateway mslim-inspect mslim-certify mslim-document mslim-runtime-host; do
+            install -m 0755 "deploy/local-production/runtime/build-target/release/$binary" "$root/$package/bin/$binary"
+          done
+          install -m 0644 Cargo.lock rust-toolchain.toml "$root/$package/"
+          arguments=()
+          for artifact in "$root/$package/bin/"* "$root/$package/Cargo.lock" "$root/$package/rust-toolchain.toml"; do
+            arguments+=(--artifact "$artifact")
+          done
+          python3 scripts/github-evidence.py build \
+            --kind release-candidate \
+            --status passed \
+            --artifact-base "$root/$package" \
+            --output "$root/$package/evidence.json" \
+            --claim "portable files were built from the recorded source revision" \
+            --claim "artifact hashes bind this package inventory" \
+            "${arguments[@]}"
+          python3 scripts/github-evidence.py verify "$root/$package/evidence.json" --require-source
+          tar --sort=name --mtime="@$(git show -s --format=%ct HEAD)" \
+            --owner=0 --group=0 --numeric-owner \
+            -C "$root" -cf - "$package" | gzip -n >"$root/$package.tar.gz"
+          sha256sum "$root/$package.tar.gz" >"$root/$package.tar.gz.sha256"
+          cp "$root/$package/evidence.json" "$root/$package.evidence.json"
+          printf '%s\n' "$root/$package.tar.gz" >"$RUNNER_TEMP/release-archive-path"
+          printf '%s\n' "$root/$package.evidence.json" >"$RUNNER_TEMP/release-evidence-path"
+      - name: Attest the release archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ github.workspace }}/deploy/local-production/runtime/github-evidence/*.tar.gz
+      - name: Attest the evidence manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ github.workspace }}/deploy/local-production/runtime/github-evidence/*.evidence.json
+      - name: Preserve the complete release candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ env.RELEASE_TAG }}
+          path: |
+            deploy/local-production/runtime/github-evidence/*.tar.gz
+            deploy/local-production/runtime/github-evidence/*.tar.gz.sha256
+            deploy/local-production/runtime/github-evidence/*.evidence.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Explain the evidence boundary
+        shell: bash
+        run: |
+          {
+            echo "## Release provenance"
+            echo
+            echo "- Tag: \`$RELEASE_TAG\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- The archive and manifest have GitHub artifact attestations."
+            echo "- This proves build provenance and integrity, not installed/resident runtime, physical K/V restore, authenticated E2E, persistence readback or restart recovery."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  publish:
+    if: github.event_name == 'push' || inputs.publish_release
+    name: Publish GitHub Release
+    needs: release
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Download the already attested release candidate
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ env.RELEASE_TAG }}
+          path: release
+      - name: Publish without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            release/*.tar.gz \
+            release/*.tar.gz.sha256 \
+            release/*.evidence.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "M-SLIM $RELEASE_TAG"

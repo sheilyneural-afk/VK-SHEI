@@ -26,6 +26,10 @@
     "_Sidebar.md",
     "_Footer.md"
   ],
+  "editorial_replacements": {
+    "actions/checkout@v5": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "checkout@v5": "checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+  },
   "historical_identifiers": [
     "OpenClLlm",
     "OpenClModelAdapter",

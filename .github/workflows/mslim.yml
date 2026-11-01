@@ -2,8 +2,12 @@ name: M-SLIM
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: mslim-${{ github.workflow }}-${{ github.ref }}
@@ -11,10 +15,10 @@ concurrency:
 
 jobs:
   core:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
         with:
           toolchain: "1.99.1"
           components: rustfmt, clippy, rust-analyzer
@@ -26,14 +30,14 @@ jobs:
       - run: scripts/check.sh
 
   adapters:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         features: ["", "accelerator-backend"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
         with:
           toolchain: "1.99.1"
       - name: Create temp dir required by .cargo/config.toml
@@ -47,11 +51,11 @@ jobs:
           fi
 
   release-artifacts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [core, adapters]
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
         with:
           toolchain: "1.99.1"
       - name: Create temp dir required by .cargo/config.toml
@@ -61,14 +65,40 @@ jobs:
       - run: cargo build --locked --release --features unified-router --bin mslim-gateway
       - run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
       - run: test -x deploy/local-production/runtime/build-target/release/mslim-runtime-worker && test -x deploy/local-production/runtime/build-target/release/mslim-gateway
+      - name: Preserve a source-bound CI build receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="deploy/local-production/runtime/github-evidence/ci-build"
+          mkdir -p "$root"
+          install -m 0755 deploy/local-production/runtime/build-target/release/mslim-runtime-worker "$root/"
+          install -m 0755 deploy/local-production/runtime/build-target/release/mslim-gateway "$root/"
+          python3 scripts/github-evidence.py build \
+            --kind ci-build \
+            --status passed \
+            --artifact-base "$root" \
+            --output "$root/evidence.json" \
+            --artifact "$root/mslim-runtime-worker" \
+            --artifact "$root/mslim-gateway" \
+            --claim "core and adapter prerequisite jobs completed successfully" \
+            --claim "listed binaries were built from the recorded checkout"
+          python3 scripts/github-evidence.py verify "$root/evidence.json" --require-source
+          sha256sum "$root/mslim-runtime-worker" "$root/mslim-gateway" >"$root/SHA256SUMS"
+      - name: Upload the bounded CI build evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mslim-ci-build-${{ github.sha }}
+          path: deploy/local-production/runtime/github-evidence/ci-build
+          if-no-files-found: error
+          retention-days: 30
 
   physical:
     if: github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
         with:
           toolchain: "1.99.1"
       - name: Create temp dir required by .cargo/config.toml
@@ -78,27 +108,73 @@ jobs:
           MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
         run: test -n "$MSLIM_PHYSICAL_MODEL" && test -d "$MSLIM_PHYSICAL_MODEL"
       - name: Physical accelerator tests
-        run: cargo test --locked --features accelerator-backend --all-targets -- --ignored --nocapture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mslim-physical-evidence"
+          cargo test --locked --features accelerator-backend --all-targets -- --ignored --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/mslim-physical-evidence/physical-tests.log"
       - name: Block activation unless multi-step parity passes
         env:
           MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
-        run: cargo run --locked --release --features accelerator-backend --bin mslim-adapter-parity -- "$MSLIM_PHYSICAL_MODEL" --decode-steps 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --release --features accelerator-backend --bin mslim-adapter-parity -- "$MSLIM_PHYSICAL_MODEL" --decode-steps 8 \
+            2>&1 | tee "$RUNNER_TEMP/mslim-physical-evidence/adapter-parity.log"
       - name: Sustained calibration after parity
         env:
           MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
           MSLIM_MAX_CONTEXT_TOKENS: ${{ vars.MSLIM_MAX_CONTEXT_TOKENS }}
+        shell: bash
         run: |
+          set -euo pipefail
           max_context="${MSLIM_MAX_CONTEXT_TOKENS:-8192}"
           cargo run --locked --release --features accelerator-backend --bin mslim-calibrate -- \
             "$MSLIM_PHYSICAL_MODEL" --force --resident \
             --max-context-tokens "$max_context" \
-            --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048
+            --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048 \
+            2>&1 | tee "$RUNNER_TEMP/mslim-physical-evidence/calibration.log"
+      - name: Record the bounded physical-run evidence
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/mslim-physical-evidence"
+          mkdir -p "$root"
+          arguments=()
+          while IFS= read -r -d '' artifact; do
+            arguments+=(--artifact "$artifact")
+          done < <(find "$root" deploy/local-production/runtime/calibration deploy/local-production/runtime/validation \
+            -maxdepth 2 -type f \( -name '*.log' -o -name '*.json' \) -print0 2>/dev/null || true)
+          case "$JOB_STATUS" in
+            success) status=passed ;;
+            failure) status=failed ;;
+            cancelled) status=cancelled ;;
+            *) status=skipped ;;
+          esac
+          python3 scripts/github-evidence.py build \
+            --kind physical-validation-run \
+            --status "$status" \
+            --output "$root/evidence.json" \
+            --claim "only the model, backend and device named by the attached receipts were exercised" \
+            "${arguments[@]}"
+      - name: Upload physical-run evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mslim-physical-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mslim-physical-evidence
+          if-no-files-found: error
+          retention-days: 90
 
   load:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable at 2026-10-16
         with:
           toolchain: "1.99.1"
       - name: Create temp dir required by .cargo/config.toml
