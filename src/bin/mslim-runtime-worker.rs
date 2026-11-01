@@ -236,13 +236,13 @@ fn validate(request: &ChatRequest, served_model: &str) -> Result<usize, ApiError
 }
 
 fn render_prompt(
-    template_source: &str,
+    template: &ChatTemplate,
     messages: &[ChatMessage],
     thinking: bool,
 ) -> Result<String> {
     ensure!(!messages.is_empty(), "no messages");
     let mut env = Environment::new();
-    env.add_template("chat", template_source)
+    env.add_template("chat", &template.source)
         .context("invalid model chat template")?;
     let rendered = env.get_template("chat")?.render(context! {
         messages => messages.iter().map(|message| json!({
@@ -251,14 +251,21 @@ fn render_prompt(
         })).collect::<Vec<_>>(),
         add_generation_prompt => true,
         enable_thinking => thinking,
-        bos_token => "",
-        eos_token => "",
+        bos_token => template.bos_token.as_str(),
+        eos_token => template.eos_token.as_str(),
     })?;
     ensure!(
         !rendered.is_empty(),
         "model chat template rendered an empty prompt"
     );
     Ok(rendered)
+}
+
+#[derive(Clone)]
+struct ChatTemplate {
+    source: String,
+    bos_token: String,
+    eos_token: String,
 }
 
 enum GpuOperation {
@@ -289,7 +296,7 @@ struct GpuAnswer {
 struct GpuExecutor {
     model: GpuLlm,
     tokenizer: Tokenizer,
-    chat_template: String,
+    chat_template: ChatTemplate,
 }
 
 impl InferenceExecutor for GpuExecutor {
@@ -352,7 +359,7 @@ impl InferenceExecutor for GpuExecutor {
 struct ExternalExecutor {
     client: IpcClient,
     tokenizer: Tokenizer,
-    chat_template: String,
+    chat_template: ChatTemplate,
     session_id: String,
     request_sequence: u64,
     session_store: SessionStore,
@@ -1399,7 +1406,7 @@ async fn chat(
     })))
 }
 
-fn validate_model_bundle(model: &std::path::Path) -> Result<String> {
+fn validate_model_bundle(model: &std::path::Path) -> Result<ChatTemplate> {
     validated_bundle_manifest(model)?;
     let _spec = ModelSpec::inspect(model)?;
     let config: Value = serde_json::from_slice(
@@ -1411,7 +1418,19 @@ fn validate_model_bundle(model: &std::path::Path) -> Result<String> {
         .and_then(Value::as_str)
         .context("tokenizer_config.json has no chat_template")?;
     ensure!(!template.trim().is_empty(), "model chat_template is empty");
-    Ok(template.to_owned())
+    Ok(ChatTemplate {
+        source: template.to_owned(),
+        bos_token: config
+            .get("bos_token")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        eos_token: config
+            .get("eos_token")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    })
 }
 
 /// Treat the configured ColdStore path as a durable namespace root, never as
@@ -2222,12 +2241,33 @@ mod tests {
         }];
         assert_eq!(
             render_prompt(
-                "{{ messages[0]['role'] }}: {{ messages[0]['content'] }}",
+                &ChatTemplate {
+                    source: "{{ messages[0]['role'] }}: {{ messages[0]['content'] }}".into(),
+                    bos_token: String::new(),
+                    eos_token: String::new(),
+                },
                 &messages,
                 false
             )
             .unwrap(),
             "user: Hola"
+        );
+    }
+
+    #[test]
+    fn configured_special_tokens_reach_the_model_chat_template() {
+        let messages = [ChatMessage {
+            role: "user".into(),
+            content: "Hola".into(),
+        }];
+        let template = ChatTemplate {
+            source: "{{ bos_token }}{{ messages[0]['content'] }}{{ eos_token }}".into(),
+            bos_token: "<|begin_of_text|>".into(),
+            eos_token: "<|eot_id|>".into(),
+        };
+        assert_eq!(
+            render_prompt(&template, &messages, false).unwrap(),
+            "<|begin_of_text|>Hola<|eot_id|>"
         );
     }
 }
