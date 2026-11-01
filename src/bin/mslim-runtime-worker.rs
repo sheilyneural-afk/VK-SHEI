@@ -14,7 +14,10 @@ use axum::{
 };
 use minijinja::{Environment, context};
 use mslim::{
-    calibration_contract::validate_calibration_receipt,
+    calibration_contract::{
+        matches_accelerator_calibration_environment, matches_accelerator_runtime_configuration,
+        validate_calibration_receipt,
+    },
     continuity_contract::{
         CACHE_RECEIPT_SCHEMA, CacheMode as ContinuityCacheMode,
         ContinuityCacheReceipt as ContinuityReceipt, ContinuityOperation, ContinuityRequest,
@@ -1056,6 +1059,8 @@ struct AppState {
     gpu_decode_fused_kernels: bool,
     gpu_exact_hot_fused_attention: bool,
     gpu_prefill_fuse_projections: bool,
+    gpu_prefill_profile_id: Option<String>,
+    calibration_environment: Option<Value>,
     timeout: Duration,
     runtime_manifest: Option<String>,
     runtime_session_id: Option<String>,
@@ -1065,12 +1070,31 @@ async fn index() -> Html<&'static str> {
     Html(CHAT_HTML)
 }
 
+fn validation_matrix_passed(receipt: &Value) -> bool {
+    const REQUIRED_TRUE_PATHS: &[&str] = &[
+        "/determinism/all_passed",
+        "/determinism/cpu_dense/exact_same_backend_passed",
+        "/determinism/cpu_exact/exact_same_backend_passed",
+        "/determinism/gpu_dense/exact_same_backend_passed",
+        "/determinism/gpu_exact/exact_same_backend_passed",
+        "/same_backend/all_passed",
+        "/same_backend/cpu_dense_vs_exact/exact_same_backend_passed",
+        "/same_backend/gpu_dense_vs_exact/exact_same_backend_passed",
+        "/snapshot_contract/accelerator_exact_physical_snapshot",
+    ];
+    REQUIRED_TRUE_PATHS
+        .iter()
+        .all(|path| receipt.pointer(path).and_then(Value::as_bool) == Some(true))
+}
+
 fn validation_matrix_summary(state: &AppState) -> Option<Value> {
     let model_digest = Path::new(&state.model_dir).file_name()?.to_str()?;
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("deploy/local-production/runtime/validation")
         .join(format!("validation-matrix-{model_digest}.json"));
-    let receipt: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let bytes = fs::read(path).ok()?;
+    let receipt_sha256 = hex::encode(Sha256::digest(&bytes));
+    let receipt: Value = serde_json::from_slice(&bytes).ok()?;
     let frozen = receipt.get("frozen_runtime_configuration")?;
     if receipt.get("project").and_then(Value::as_str) != Some(mslim::project_identity::PROJECT)
         || receipt.get("product").and_then(Value::as_str) != Some(mslim::project_identity::PRODUCT)
@@ -1081,8 +1105,14 @@ fn validation_matrix_summary(state: &AppState) -> Option<Value> {
         || receipt.get("status").and_then(Value::as_str) != Some("passed")
         || receipt.get("bundle_sha256").and_then(Value::as_str) != Some(model_digest)
         || !mslim::build_info::is_current_clean_source_revision(receipt.get("source_revision"))
+        || !validation_matrix_passed(&receipt)
+        || receipt.get("calibration_environment") != state.calibration_environment.as_ref()
         || frozen.get("stage_tokens").and_then(Value::as_u64)
             != state.lod_stage.map(|value| value as u64)
+        || receipt
+            .pointer("/policy/approximation_epsilon")
+            .and_then(Value::as_f64)
+            != state.lod_epsilon
         || frozen.get("prefill_batch_tokens").and_then(Value::as_u64)
             != state.gpu_prefill_batch_tokens.map(|value| value as u64)
         || frozen
@@ -1124,21 +1154,57 @@ fn validation_matrix_summary(state: &AppState) -> Option<Value> {
         "cross_backend_top1_equal": receipt.pointer("/cross_backend_diagnostic/all_top1_equal"),
         "cross_backend_logits_exact": receipt.pointer("/cross_backend_diagnostic/all_logits_exact"),
         "cross_backend_role": "diagnostic-only",
+        "receipt_sha256": receipt_sha256,
     }))
 }
 
-fn calibration_receipt(state: &AppState) -> Option<Value> {
+fn effective_runtime_configuration(state: &AppState) -> Value {
+    json!({
+        "kv_mode": if state.lod_epsilon.is_some() { "exact-coldstore" } else { "dense" },
+        "weight_mode": state.weight_mode.to_ascii_lowercase(),
+        "max_context_tokens": state.max_context_tokens,
+        "lod_epsilon": state.lod_epsilon,
+        "stage_tokens": state.lod_stage,
+        "prefill_batch_tokens": state.gpu_prefill_batch_tokens,
+        "prefill_weight_reuse_tokens": state.gpu_prefill_weight_reuse_tokens,
+        "hot_v_tokens": state.gpu_hot_v_capacity_tokens,
+        "prompt_replay_tokens": state.gpu_verified_prompt_replay_max_tokens,
+        "shared_prefix": state.gpu_verified_shared_prefix_enabled,
+        "micro_hot_v_tokens": state.gpu_micro_hot_v_capacity_tokens,
+        "deferred_cold_commit": state.gpu_deferred_cold_enabled,
+        "exact_hot_fused_attention": state.gpu_exact_hot_fused_attention,
+        "decode_unroll4": state.gpu_decode_unroll4,
+        "decode_fused_kernels": state.gpu_decode_fused_kernels,
+        "prefill_fuse_projections": state.gpu_prefill_fuse_projections,
+        "prefill_profile_id": state.gpu_prefill_profile_id,
+    })
+}
+
+fn calibration_receipt(state: &AppState, validation: Option<&Value>) -> Option<Value> {
     let model_digest = Path::new(&state.model_dir).file_name()?.to_str()?;
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("deploy/local-production/runtime/calibration")
         .join(format!("{model_digest}.json"));
+    let expected_configuration = effective_runtime_configuration(state);
+    let expected_environment = state.calibration_environment.as_ref()?;
+    let validation_matrix_sha256 = validation?.get("receipt_sha256")?.as_str()?;
     serde_json::from_slice::<Value>(&fs::read(path).ok()?)
         .ok()
-        .filter(|receipt| validate_calibration_receipt(receipt, model_digest).is_ok())
+        .filter(|receipt| {
+            validate_calibration_receipt(receipt, model_digest).is_ok()
+                && matches_accelerator_runtime_configuration(receipt, &expected_configuration)
+                && matches_accelerator_calibration_environment(receipt, expected_environment)
+                && receipt
+                    .get("validation_matrix_sha256")
+                    .and_then(Value::as_str)
+                    == Some(validation_matrix_sha256)
+        })
 }
 
 fn readiness_evidence(state: &AppState) -> (Option<Value>, Option<Value>) {
-    (validation_matrix_summary(state), calibration_receipt(state))
+    let validation = validation_matrix_summary(state);
+    let calibration = calibration_receipt(state, validation.as_ref());
+    (validation, calibration)
 }
 
 fn evidence_is_ready(validation: &Option<Value>, calibration: &Option<Value>) -> bool {
@@ -1255,26 +1321,14 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
     let worker_capabilities = mslim::worker_capabilities::effective_configuration(
         model_digest,
         backend,
-        json!({
-            "lod_epsilon": state.lod_epsilon,
-            "stage_tokens": state.lod_stage,
-            "prefill_batch_tokens": state.gpu_prefill_batch_tokens,
-            "prefill_weight_reuse_tokens": state.gpu_prefill_weight_reuse_tokens,
-            "hot_v_tokens": state.gpu_hot_v_capacity_tokens,
-            "prompt_replay_tokens": state.gpu_verified_prompt_replay_max_tokens,
-            "shared_prefix": state.gpu_verified_shared_prefix_enabled,
-            "deferred_cold_commit": state.gpu_deferred_cold_enabled,
-            "exact_hot_fused_attention": state.gpu_exact_hot_fused_attention,
-            "decode_unroll4": state.gpu_decode_unroll4,
-            "decode_fused_kernels": state.gpu_decode_fused_kernels,
-            "prefill_fuse_projections": state.gpu_prefill_fuse_projections,
-        }),
+        effective_runtime_configuration(&state),
     );
     Json(json!({
         "engine":"mslim-engine",
         "model_checkpoint":state.model_dir,
         "model_digest":model_digest,
         "worker_capabilities":worker_capabilities,
+        "calibration_environment":state.calibration_environment,
         "calibration":calibration,
         "model":state.model_id,"gpu_device":state.gpu_device,
         "gpu_model_loaded":true,"gpu_full_llm_inference":true,
@@ -1743,6 +1797,7 @@ async fn main() -> Result<()> {
     let (
         worker,
         gpu_device,
+        calibration_environment,
         load_seconds,
         weight_mode_label,
         lod_epsilon,
@@ -1762,6 +1817,7 @@ async fn main() -> Result<()> {
         gpu_decode_fused_kernels,
         gpu_exact_hot_fused_attention,
         gpu_prefill_fuse_projections,
+        gpu_prefill_profile_id,
     ) = if let Some((client, session_id)) = external_client {
         let session_root = std::env::var_os("MSLIM_SESSION_STORE")
             .map(PathBuf::from)
@@ -1791,6 +1847,7 @@ async fn main() -> Result<()> {
         (
             worker,
             "external-runtime".to_owned(),
+            None,
             started.elapsed().as_secs_f64(),
             "External",
             None,
@@ -1810,6 +1867,7 @@ async fn main() -> Result<()> {
             false,
             false,
             false,
+            None,
         )
     } else {
         let mut engine = if let Some(config) = lod {
@@ -1865,10 +1923,17 @@ async fn main() -> Result<()> {
         let gpu_micro_hot_v_capacity_tokens = engine.micro_hot_v_capacity_tokens();
         let gpu_decode_unroll4 = engine.decode_unroll4();
         let gpu_prefill_fuse_projections = engine.prefill_fuse_projections();
+        let gpu_prefill_profile_id = engine.calibrated_prefill_profile().and_then(|profile| {
+            profile
+                .get("profile_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
         let lod_epsilon = engine.gpu_region_config().map(|x| x.epsilon);
         let lod_stage = engine.gpu_region_config().map(|x| x.stage_tokens);
         let gpu_kv_capacity_bytes = engine.gpu_region_gpu_kv_capacity_bytes();
         let gpu_device = engine.device_name().to_owned();
+        let calibration_environment = Some(engine.calibration_environment());
         let tokenizer = Tokenizer::from_file(model.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
         let worker = InferenceWorker::spawn(
@@ -1882,6 +1947,7 @@ async fn main() -> Result<()> {
         (
             worker,
             gpu_device,
+            calibration_environment,
             started.elapsed().as_secs_f64(),
             if mode == WeightMode::Resident {
                 "Resident"
@@ -1905,6 +1971,7 @@ async fn main() -> Result<()> {
             gpu_decode_fused_kernels,
             gpu_exact_hot_fused_attention,
             gpu_prefill_fuse_projections,
+            gpu_prefill_profile_id,
         )
     };
     let state = AppState {
@@ -1932,6 +1999,8 @@ async fn main() -> Result<()> {
         gpu_decode_fused_kernels,
         gpu_exact_hot_fused_attention,
         gpu_prefill_fuse_projections,
+        gpu_prefill_profile_id,
+        calibration_environment,
         timeout: Duration::from_secs(timeout_secs.max(1)),
         runtime_manifest,
         runtime_session_id,
@@ -1968,6 +2037,54 @@ mod tests {
         assert!(!evidence_is_ready(&present, &missing));
         assert!(!evidence_is_ready(&missing, &present));
         assert!(!evidence_is_ready(&missing, &missing));
+    }
+
+    #[test]
+    fn validation_matrix_status_cannot_override_failed_physical_proofs() {
+        let canonical = json!({
+            "status": "passed",
+            "determinism": {
+                "all_passed": true,
+                "cpu_dense": {"exact_same_backend_passed": true},
+                "cpu_exact": {"exact_same_backend_passed": true},
+                "gpu_dense": {"exact_same_backend_passed": true},
+                "gpu_exact": {"exact_same_backend_passed": true},
+            },
+            "same_backend": {
+                "all_passed": true,
+                "cpu_dense_vs_exact": {"exact_same_backend_passed": true},
+                "gpu_dense_vs_exact": {"exact_same_backend_passed": true},
+            },
+            "snapshot_contract": {"accelerator_exact_physical_snapshot": true},
+        });
+        assert!(validation_matrix_passed(&canonical));
+
+        for pointer in [
+            "/determinism/all_passed",
+            "/determinism/cpu_dense/exact_same_backend_passed",
+            "/determinism/cpu_exact/exact_same_backend_passed",
+            "/determinism/gpu_dense/exact_same_backend_passed",
+            "/determinism/gpu_exact/exact_same_backend_passed",
+            "/same_backend/all_passed",
+            "/same_backend/cpu_dense_vs_exact/exact_same_backend_passed",
+            "/same_backend/gpu_dense_vs_exact/exact_same_backend_passed",
+            "/snapshot_contract/accelerator_exact_physical_snapshot",
+        ] {
+            let mut contradictory = canonical.clone();
+            *contradictory.pointer_mut(pointer).unwrap() = json!(false);
+            assert!(
+                !validation_matrix_passed(&contradictory),
+                "matrix must fail closed when {pointer} is false"
+            );
+        }
+
+        let mut incomplete = canonical;
+        incomplete
+            .get_mut("snapshot_contract")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .remove("accelerator_exact_physical_snapshot");
+        assert!(!validation_matrix_passed(&incomplete));
     }
 
     fn test_continuity_request() -> ContinuityRequest {

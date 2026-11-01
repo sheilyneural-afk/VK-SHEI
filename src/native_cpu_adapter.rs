@@ -153,6 +153,8 @@ trait NativeCausalRuntime: Send {
     fn position(&self) -> usize;
     fn forward_token(&mut self, token: u32, capture_logits: bool) -> Result<u32>;
     fn last_logits(&self) -> Option<Vec<f32>>;
+    fn has_last_logits(&self) -> bool;
+    fn clear_last_logits(&mut self);
     fn session_tokens(&self) -> &[u32];
     fn kv_report(&self) -> Value;
     fn kv_integrity_report(&mut self) -> Result<Value>;
@@ -601,6 +603,14 @@ impl NativeCausalRuntime for NativeCpuDecoder {
         self.last_logits.clone()
     }
 
+    fn has_last_logits(&self) -> bool {
+        self.last_logits.is_some()
+    }
+
+    fn clear_last_logits(&mut self) {
+        self.last_logits = None;
+    }
+
     fn session_tokens(&self) -> &[u32] {
         &self.tokens
     }
@@ -682,6 +692,7 @@ pub struct NativeCpuModelAdapter {
     capabilities: AdapterCapabilities,
     model_dir: Option<PathBuf>,
     runtime: Option<Box<dyn NativeCausalRuntime>>,
+    last_argmax: Option<u32>,
 }
 
 impl Default for NativeCpuModelAdapter {
@@ -697,7 +708,78 @@ impl Default for NativeCpuModelAdapter {
             },
             model_dir: None,
             runtime: None,
+            last_argmax: None,
         }
+    }
+}
+
+impl NativeCpuModelAdapter {
+    fn prefill_with_output(&mut self, input: &[u32], capture_logits: bool) -> Result<(Value, u32)> {
+        ensure!(!input.is_empty(), "prefill vacío");
+        let runtime = self.runtime.as_mut().context("CPU nativa no cargada")?;
+        let exact_prefix = runtime.session_tokens() == input;
+        if exact_prefix {
+            let next = self
+                .last_argmax
+                .context("prefijo CPU verificado sin argmax de continuación")?;
+            if capture_logits {
+                ensure!(
+                    runtime.has_last_logits(),
+                    "prefijo CPU verificado sin logits diagnósticos"
+                );
+            } else {
+                runtime.clear_last_logits();
+            }
+            return Ok((
+                json!({
+                    "tokens": input.len(),
+                    "position": runtime.position(),
+                    "kv": runtime.kv_report(),
+                    "mode": "verified-prefix-reuse",
+                    "reused_tokens": input.len(),
+                    "full_vocabulary_logits_captured": capture_logits,
+                }),
+                next,
+            ));
+        }
+
+        let reused_tokens = if !runtime.session_tokens().is_empty()
+            && input.starts_with(runtime.session_tokens())
+        {
+            runtime.session_tokens().len()
+        } else {
+            self.last_argmax = None;
+            if runtime.position() != 0 {
+                runtime
+                    .reset()
+                    .context("reset CPU causal session before unrelated prompt")?;
+            }
+            0
+        };
+        runtime.clear_last_logits();
+        self.last_argmax = None;
+        let suffix = &input[reused_tokens..];
+        let mut next = None;
+        for (index, &token) in suffix.iter().enumerate() {
+            next = Some(runtime.forward_token(token, capture_logits && index + 1 == suffix.len())?);
+        }
+        let next = next.context("prefill CPU no produjo continuación")?;
+        self.last_argmax = Some(next);
+        Ok((
+            json!({
+                "tokens": input.len(),
+                "position": runtime.position(),
+                "kv": runtime.kv_report(),
+                "mode": if reused_tokens == 0 {
+                    "causal-prefill"
+                } else {
+                    "verified-shared-prefix"
+                },
+                "reused_tokens": reused_tokens,
+                "full_vocabulary_logits_captured": capture_logits,
+            }),
+            next,
+        ))
     }
 }
 
@@ -718,30 +800,41 @@ impl ModelAdapter for NativeCpuModelAdapter {
         let spec = ModelSpec::inspect(model_dir)?;
         self.runtime = Some(build_runtime(model_dir, &spec, config)?);
         self.model_dir = Some(model_dir.to_owned());
+        self.last_argmax = None;
         Ok(())
     }
 
     fn prefill(&mut self, input: &[u32]) -> Result<Value> {
-        ensure!(!input.is_empty(), "prefill vacío");
-        let runtime = self.runtime.as_mut().context("CPU nativa no cargada")?;
-        for (index, &token) in input.iter().enumerate() {
-            runtime.forward_token(token, index + 1 == input.len())?;
-        }
-        Ok(json!({
-            "tokens": input.len(),
-            "position": runtime.position(),
-            "kv": runtime.kv_report(),
-        }))
+        self.prefill_with_output(input, true)
+            .map(|(metadata, _)| metadata)
+    }
+
+    fn prefill_token_only(&mut self, input: &[u32]) -> Result<(Value, u32)> {
+        self.prefill_with_output(input, false)
     }
 
     fn decode(&mut self, token_id: u32) -> Result<u32> {
-        self.runtime
+        self.last_argmax = None;
+        let next = self
+            .runtime
             .as_mut()
             .context("CPU nativa no cargada")?
-            .forward_token(token_id, true)
+            .forward_token(token_id, true)?;
+        self.last_argmax = Some(next);
+        Ok(next)
+    }
+
+    fn decode_token_only(&mut self, token_id: u32) -> Result<u32> {
+        self.last_argmax = None;
+        let runtime = self.runtime.as_mut().context("CPU nativa no cargada")?;
+        runtime.clear_last_logits();
+        let next = runtime.forward_token(token_id, false)?;
+        self.last_argmax = Some(next);
+        Ok(next)
     }
 
     fn reset_session(&mut self) -> Result<()> {
+        self.last_argmax = None;
         self.runtime
             .as_mut()
             .context("CPU nativa no cargada")?
@@ -799,8 +892,9 @@ impl ModelAdapter for NativeCpuModelAdapter {
             .collect::<Result<Vec<_>>>()?;
         let runtime = self.runtime.as_mut().context("CPU nativa no cargada")?;
         runtime.reset()?;
+        self.last_argmax = None;
         for token in tokens {
-            runtime.forward_token(token, false)?;
+            self.last_argmax = Some(runtime.forward_token(token, false)?);
         }
         Ok(())
     }
@@ -809,6 +903,88 @@ impl ModelAdapter for NativeCpuModelAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct ScriptedRuntime {
+        tokens: Vec<u32>,
+        last_logits: Option<Vec<f32>>,
+        resets: usize,
+    }
+
+    impl NativeCausalRuntime for ScriptedRuntime {
+        fn position(&self) -> usize {
+            self.tokens.len()
+        }
+
+        fn forward_token(&mut self, token: u32, capture_logits: bool) -> Result<u32> {
+            self.tokens.push(token);
+            self.last_logits = capture_logits.then_some(vec![token as f32]);
+            Ok(token + 100)
+        }
+
+        fn last_logits(&self) -> Option<Vec<f32>> {
+            self.last_logits.clone()
+        }
+
+        fn has_last_logits(&self) -> bool {
+            self.last_logits.is_some()
+        }
+
+        fn clear_last_logits(&mut self) {
+            self.last_logits = None;
+        }
+
+        fn session_tokens(&self) -> &[u32] {
+            &self.tokens
+        }
+
+        fn kv_report(&self) -> Value {
+            json!({"tokens": self.tokens.len(), "resets": self.resets})
+        }
+
+        fn kv_integrity_report(&mut self) -> Result<Value> {
+            Ok(self.kv_report())
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            self.tokens.clear();
+            self.last_logits = None;
+            self.resets += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn prefill_reuses_only_verified_prefixes_and_resets_unrelated_prompts() {
+        let mut adapter = NativeCpuModelAdapter {
+            runtime: Some(Box::new(ScriptedRuntime::default())),
+            ..Default::default()
+        };
+
+        let (_, next) = adapter.prefill_token_only(&[1, 2]).unwrap();
+        assert_eq!(next, 102);
+        assert_eq!(adapter.runtime.as_ref().unwrap().session_tokens(), &[1, 2]);
+
+        let (exact, exact_next) = adapter.prefill_token_only(&[1, 2]).unwrap();
+        assert_eq!(exact_next, 102);
+        assert_eq!(exact["mode"], "verified-prefix-reuse");
+        assert_eq!(adapter.runtime.as_ref().unwrap().session_tokens(), &[1, 2]);
+
+        let (shared, shared_next) = adapter.prefill_token_only(&[1, 2, 3]).unwrap();
+        assert_eq!(shared_next, 103);
+        assert_eq!(shared["mode"], "verified-shared-prefix");
+        assert_eq!(shared["reused_tokens"], 2);
+        assert_eq!(
+            adapter.runtime.as_ref().unwrap().session_tokens(),
+            &[1, 2, 3]
+        );
+
+        let (fresh, fresh_next) = adapter.prefill_token_only(&[9]).unwrap();
+        assert_eq!(fresh_next, 109);
+        assert_eq!(fresh["mode"], "causal-prefill");
+        assert_eq!(fresh["kv"]["resets"], 1);
+        assert_eq!(adapter.runtime.as_ref().unwrap().session_tokens(), &[9]);
+    }
 
     #[test]
     fn rms_norm_is_finite_and_bf16_rounded() {

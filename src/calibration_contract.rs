@@ -10,6 +10,189 @@ pub const CALIBRATION_RECEIPT_SCHEMA: &str = crate::project_identity::CALIBRATIO
 pub const CALIBRATION_RECEIPT_STATUS: &str = "measured-sustained-execution";
 pub const LOGICAL_REPLAY_SNAPSHOT_KIND: &str = "logical-replay-token-history";
 pub const PHYSICAL_COLDSTORE_SNAPSHOT_KIND: &str = "physical-coldstore-handle";
+pub const TOKEN_ONLY_PREFILL_KIND: &str = "token-only-prefill-next-token-argmax";
+pub const TOKEN_ONLY_DECODE_KIND: &str = "token-only-next-token-argmax";
+pub const ACCELERATOR_TOKEN_ONLY_PREFILL_PATH: &str =
+    "accelerator-prefill-device-argmax-without-full-logits-readback";
+pub const ADAPTER_TOKEN_ONLY_PREFILL_PATH: &str = "adapter-token-only-prefill-contract";
+pub const ACCELERATOR_TOKEN_ONLY_PATH: &str =
+    "accelerator-device-argmax-without-full-logits-readback";
+pub const ADAPTER_TOKEN_ONLY_PATH: &str = "adapter-token-only-contract";
+pub const CALIBRATION_ENVIRONMENT_SCHEMA: &str = "mslim.calibration-environment/v1";
+const ACCELERATOR_CALIBRATION_ENVIRONMENT_FIELDS: &[&str] = &["schema", "backend", "device_key"];
+
+pub fn validate_accelerator_calibration_environment(value: &Value) -> Result<()> {
+    let environment = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("accelerator calibration environment is missing"))?;
+    ensure!(
+        environment.len() == ACCELERATOR_CALIBRATION_ENVIRONMENT_FIELDS.len()
+            && ACCELERATOR_CALIBRATION_ENVIRONMENT_FIELDS
+                .iter()
+                .all(|field| environment.contains_key(*field)),
+        "accelerator calibration environment has a non-canonical field set"
+    );
+    ensure!(
+        environment.get("schema").and_then(Value::as_str) == Some(CALIBRATION_ENVIRONMENT_SCHEMA),
+        "accelerator calibration environment schema is invalid"
+    );
+    ensure!(
+        environment.get("backend").and_then(Value::as_str) == Some("accelerator-runtime"),
+        "accelerator calibration environment backend is invalid"
+    );
+    ensure!(
+        environment
+            .get("device_key")
+            .and_then(Value::as_str)
+            .is_some_and(is_sha256),
+        "accelerator calibration environment device key is invalid"
+    );
+    Ok(())
+}
+
+pub fn matches_accelerator_calibration_environment(receipt: &Value, expected: &Value) -> bool {
+    let Some(measured) = receipt.get("calibration_environment") else {
+        return false;
+    };
+    validate_accelerator_calibration_environment(measured).is_ok()
+        && validate_accelerator_calibration_environment(expected).is_ok()
+        && measured == expected
+}
+
+const ACCELERATOR_RUNTIME_CONFIGURATION_FIELDS: &[&str] = &[
+    "kv_mode",
+    "weight_mode",
+    "max_context_tokens",
+    "lod_epsilon",
+    "stage_tokens",
+    "prefill_batch_tokens",
+    "prefill_weight_reuse_tokens",
+    "hot_v_tokens",
+    "prompt_replay_tokens",
+    "shared_prefix",
+    "micro_hot_v_tokens",
+    "deferred_cold_commit",
+    "exact_hot_fused_attention",
+    "decode_unroll4",
+    "decode_fused_kernels",
+    "prefill_fuse_projections",
+    "prefill_profile_id",
+];
+
+/// Validate the complete performance-sensitive configuration captured by an
+/// accelerator calibration.  This deliberately accepts only the exact v5
+/// field set: adding an optimization without adding it to the evidence must
+/// fail closed instead of silently reusing measurements from another route.
+pub fn validate_accelerator_runtime_configuration(value: &Value) -> Result<()> {
+    let configuration = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("accelerator runtime configuration is missing"))?;
+    ensure!(
+        configuration.len() == ACCELERATOR_RUNTIME_CONFIGURATION_FIELDS.len()
+            && ACCELERATOR_RUNTIME_CONFIGURATION_FIELDS
+                .iter()
+                .all(|field| configuration.contains_key(*field)),
+        "accelerator runtime configuration has a non-canonical field set"
+    );
+    ensure!(
+        configuration.get("kv_mode").and_then(Value::as_str) == Some("exact-coldstore"),
+        "accelerator calibration must use exact ColdStore"
+    );
+    ensure!(
+        configuration
+            .get("weight_mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| matches!(mode, "resident" | "stream")),
+        "accelerator weight mode is invalid"
+    );
+    let max_context = configuration
+        .get("max_context_tokens")
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=32_768).contains(value))
+        .ok_or_else(|| anyhow::anyhow!("accelerator max context is invalid"))?;
+    ensure!(
+        configuration.get("lod_epsilon").and_then(Value::as_f64) == Some(0.0),
+        "accelerator calibration must use exact epsilon zero"
+    );
+    let stage_tokens = positive_u64(configuration.get("stage_tokens"), "stage_tokens")?;
+    ensure!(
+        stage_tokens <= max_context,
+        "accelerator stage_tokens exceeds max context"
+    );
+    let batch = positive_u64(
+        configuration.get("prefill_batch_tokens"),
+        "prefill_batch_tokens",
+    )?;
+    ensure!(batch <= 512, "accelerator prefill batch exceeds 512");
+    ensure!(
+        configuration
+            .get("prefill_weight_reuse_tokens")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| matches!(value, 1 | 8 | 16 | 32)),
+        "accelerator prefill weight reuse is invalid"
+    );
+    let hot_v = configuration
+        .get("hot_v_tokens")
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= max_context && *value <= 2_048)
+        .ok_or_else(|| anyhow::anyhow!("accelerator hot V capacity is invalid"))?;
+    let prompt_replay = configuration
+        .get("prompt_replay_tokens")
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= hot_v)
+        .ok_or_else(|| anyhow::anyhow!("accelerator prompt replay capacity is invalid"))?;
+    let shared_prefix = bool_field(configuration.get("shared_prefix"), "shared_prefix")?;
+    ensure!(
+        !shared_prefix || prompt_replay >= 32,
+        "accelerator shared prefix requires at least 32 replay tokens"
+    );
+    ensure!(
+        configuration
+            .get("micro_hot_v_tokens")
+            .and_then(Value::as_u64)
+            == Some(0),
+        "accelerator exact calibration must disable positive-epsilon micro hot V"
+    );
+    for field in [
+        "deferred_cold_commit",
+        "exact_hot_fused_attention",
+        "decode_unroll4",
+        "decode_fused_kernels",
+        "prefill_fuse_projections",
+    ] {
+        bool_field(configuration.get(field), field)?;
+    }
+    ensure!(
+        configuration.get("prefill_profile_id") == Some(&Value::Null),
+        "accelerator calibration does not yet certify a promoted prefill profile"
+    );
+    Ok(())
+}
+
+/// A structurally valid receipt is reusable by a worker only when its complete
+/// captured runtime configuration is byte-for-byte equal to the effective
+/// configuration reported by that worker.
+pub fn matches_accelerator_runtime_configuration(receipt: &Value, expected: &Value) -> bool {
+    let Some(measured) = receipt.get("frozen_runtime_configuration") else {
+        return false;
+    };
+    validate_accelerator_runtime_configuration(measured).is_ok()
+        && validate_accelerator_runtime_configuration(expected).is_ok()
+        && measured == expected
+}
+
+fn positive_u64(value: Option<&Value>, field: &str) -> Result<u64> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| anyhow::anyhow!("accelerator {field} is invalid"))
+}
+
+fn bool_field(value: Option<&Value>, field: &str) -> Result<bool> {
+    value
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow::anyhow!("accelerator {field} is not boolean"))
+}
 
 pub fn validate_calibration_receipt(receipt: &Value, expected_bundle: &str) -> Result<()> {
     ensure!(
@@ -35,10 +218,6 @@ pub fn validate_calibration_receipt(receipt: &Value, expected_bundle: &str) -> R
     ensure!(
         receipt.get("bundle").and_then(Value::as_str) == Some(expected_bundle),
         "calibration receipt belongs to another bundle"
-    );
-    ensure!(
-        crate::build_info::is_current_clean_source_revision(receipt.get("source_revision")),
-        "calibration receipt belongs to another or dirty source revision"
     );
     ensure!(
         receipt
@@ -81,6 +260,92 @@ pub fn validate_calibration_receipt(receipt: &Value, expected_bundle: &str) -> R
             == Some(expected_gate),
         "calibration validation-matrix gate is invalid for the selected adapter"
     );
+    if adapter == "accelerator-runtime" {
+        ensure!(
+            receipt
+                .get("validation_matrix_sha256")
+                .and_then(Value::as_str)
+                .is_some_and(is_sha256),
+            "calibration validation-matrix digest is invalid"
+        );
+    } else {
+        ensure!(
+            receipt.get("validation_matrix_sha256") == Some(&Value::Null),
+            "non-accelerator calibration must not claim a validation matrix"
+        );
+    }
+    let frozen_runtime_configuration = receipt
+        .get("frozen_runtime_configuration")
+        .ok_or_else(|| anyhow::anyhow!("calibration runtime configuration is missing"))?;
+    if adapter == "accelerator-runtime" {
+        validate_accelerator_runtime_configuration(frozen_runtime_configuration)?;
+        validate_accelerator_calibration_environment(
+            receipt
+                .get("calibration_environment")
+                .ok_or_else(|| anyhow::anyhow!("calibration environment is missing"))?,
+        )?;
+    } else {
+        ensure!(
+            frozen_runtime_configuration.is_object(),
+            "non-accelerator runtime configuration must be an object"
+        );
+        ensure!(
+            receipt
+                .get("calibration_environment")
+                .is_some_and(Value::is_object),
+            "non-accelerator calibration environment must be an object"
+        );
+    }
+
+    let prefill_contract = receipt
+        .get("prefill_execution_contract")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("calibration prefill execution contract is missing"))?;
+    ensure!(
+        prefill_contract.get("kind").and_then(Value::as_str) == Some(TOKEN_ONLY_PREFILL_KIND),
+        "unsupported calibration prefill execution kind"
+    );
+    ensure!(
+        prefill_contract
+            .get("diagnostic_full_vocabulary_logits_captured")
+            .and_then(Value::as_bool)
+            == Some(false),
+        "calibration prefill must not capture diagnostic full-vocabulary logits"
+    );
+    let expected_prefill_path = if adapter == "accelerator-runtime" {
+        ACCELERATOR_TOKEN_ONLY_PREFILL_PATH
+    } else {
+        ADAPTER_TOKEN_ONLY_PREFILL_PATH
+    };
+    ensure!(
+        prefill_contract.get("adapter_path").and_then(Value::as_str) == Some(expected_prefill_path),
+        "calibration prefill path does not match the selected adapter"
+    );
+
+    let decode_contract = receipt
+        .get("decode_execution_contract")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("calibration decode execution contract is missing"))?;
+    ensure!(
+        decode_contract.get("kind").and_then(Value::as_str) == Some(TOKEN_ONLY_DECODE_KIND),
+        "unsupported calibration decode execution kind"
+    );
+    ensure!(
+        decode_contract
+            .get("diagnostic_full_vocabulary_logits_captured")
+            .and_then(Value::as_bool)
+            == Some(false),
+        "calibration decode must not capture diagnostic full-vocabulary logits"
+    );
+    let expected_adapter_path = if adapter == "accelerator-runtime" {
+        ACCELERATOR_TOKEN_ONLY_PATH
+    } else {
+        ADAPTER_TOKEN_ONLY_PATH
+    };
+    ensure!(
+        decode_contract.get("adapter_path").and_then(Value::as_str) == Some(expected_adapter_path),
+        "calibration decode path does not match the selected adapter"
+    );
 
     let snapshot = receipt
         .get("snapshot_contract")
@@ -121,20 +386,37 @@ pub fn validate_calibration_receipt(receipt: &Value, expected_bundle: &str) -> R
             sample.get("status").and_then(Value::as_str) == Some("measured"),
             "calibration context sample is not measured"
         );
-        ensure!(
-            sample
-                .get("prompt_tokens")
-                .and_then(Value::as_u64)
-                .is_some_and(|value| value > 0),
-            "calibration prompt length is invalid"
-        );
+        let prompt_tokens = sample
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow::anyhow!("calibration prompt length is invalid"))?;
         ensure!(
             sample.get("decode_tokens").and_then(Value::as_u64) == Some(decode_tokens),
             "calibration decode length does not match the receipt"
         );
-        validate_distribution(sample.get("prefill_micros"), measured_runs)?;
-        validate_distribution(sample.get("decode_micros"), measured_runs)?;
+        let prefill_median = validate_distribution(sample.get("prefill_micros"), measured_runs)?;
+        let decode_median = validate_distribution(sample.get("decode_micros"), measured_runs)?;
+        validate_rate(
+            sample,
+            "prefill_tokens_per_second_median",
+            prompt_tokens,
+            prefill_median,
+        )?;
+        validate_rate(
+            sample,
+            "decode_tokens_per_second_median",
+            decode_tokens,
+            decode_median,
+        )?;
     }
+    // Source identity remains the final authority gate. Structural checks run
+    // first so malformed evidence is diagnosed (and unit-tested) precisely
+    // even while the developer tree used to compile tests is dirty.
+    ensure!(
+        crate::build_info::is_current_clean_source_revision(receipt.get("source_revision")),
+        "calibration receipt belongs to another or dirty source revision"
+    );
     Ok(())
 }
 
@@ -150,7 +432,7 @@ fn bounded(receipt: &Value, field: &str, minimum: u64, maximum: u64) -> Result<u
     Ok(value)
 }
 
-fn validate_distribution(distribution: Option<&Value>, measured_runs: u64) -> Result<()> {
+fn validate_distribution(distribution: Option<&Value>, measured_runs: u64) -> Result<u64> {
     let distribution = distribution
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow::anyhow!("calibration distribution is missing"))?;
@@ -188,6 +470,22 @@ fn validate_distribution(distribution: Option<&Value>, measured_runs: u64) -> Re
             "calibration distribution field {field} does not match its samples"
         );
     }
+    ensure!(values[len / 2] > 0, "calibration median duration is zero");
+    Ok(values[len / 2])
+}
+
+fn validate_rate(sample: &Value, field: &str, tokens: u64, median_micros: u64) -> Result<()> {
+    let measured = sample
+        .get(field)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| anyhow::anyhow!("calibration rate {field} is invalid"))?;
+    let expected = tokens as f64 * 1_000_000.0 / median_micros as f64;
+    let tolerance = expected.abs().max(1.0) * 1e-12;
+    ensure!(
+        (measured - expected).abs() <= tolerance,
+        "calibration rate {field} does not match its median duration"
+    );
     Ok(())
 }
 
@@ -199,6 +497,28 @@ fn is_sha256(value: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn accelerator_configuration() -> Value {
+        json!({
+            "kv_mode": "exact-coldstore",
+            "weight_mode": "resident",
+            "max_context_tokens": 8192,
+            "lod_epsilon": 0.0,
+            "stage_tokens": 64,
+            "prefill_batch_tokens": 128,
+            "prefill_weight_reuse_tokens": 8,
+            "hot_v_tokens": 512,
+            "prompt_replay_tokens": 0,
+            "shared_prefix": false,
+            "micro_hot_v_tokens": 0,
+            "deferred_cold_commit": false,
+            "exact_hot_fused_attention": true,
+            "decode_unroll4": false,
+            "decode_fused_kernels": true,
+            "prefill_fuse_projections": true,
+            "prefill_profile_id": null,
+        })
+    }
 
     fn receipt(schema: &str, bundle: &str) -> Value {
         json!({
@@ -213,18 +533,36 @@ mod tests {
             },
             "adapter": "accelerator-runtime",
             "identity_digest": "b".repeat(64),
+            "calibration_environment": {
+                "schema": CALIBRATION_ENVIRONMENT_SCHEMA,
+                "backend": "accelerator-runtime",
+                "device_key": "d".repeat(64)
+            },
             "started_unix_seconds": 1,
             "load_micros": 1,
             "warmup_runs": 1,
             "measured_runs": 3,
             "decode_tokens_per_run": 8,
+            "frozen_runtime_configuration": accelerator_configuration(),
+            "prefill_execution_contract": {
+                "kind": TOKEN_ONLY_PREFILL_KIND,
+                "adapter_path": ACCELERATOR_TOKEN_ONLY_PREFILL_PATH,
+                "diagnostic_full_vocabulary_logits_captured": false,
+                "note": "token-only prefill calibration"
+            },
+            "decode_execution_contract": {
+                "kind": TOKEN_ONLY_DECODE_KIND,
+                "adapter_path": ACCELERATOR_TOKEN_ONLY_PATH,
+                "diagnostic_full_vocabulary_logits_captured": false,
+                "note": "token-only calibration"
+            },
             "context_samples": [{
                 "prompt_tokens": 1,
                 "prefill_micros": {"samples": [1, 2, 3], "minimum": 1, "median": 2, "p95": 3, "maximum": 3},
-                "prefill_tokens_per_second_median": 1.0,
+                "prefill_tokens_per_second_median": 500000.0,
                 "decode_tokens": 8,
                 "decode_micros": {"samples": [3, 4, 5], "minimum": 3, "median": 4, "p95": 5, "maximum": 5},
-                "decode_tokens_per_second_median": 1.0,
+                "decode_tokens_per_second_median": 2000000.0,
                 "snapshot_handle_bytes": 1,
                 "status": "measured"
             }],
@@ -235,13 +573,14 @@ mod tests {
                 "note": "logical replay only"
             },
             "validation_matrix_gate": "same-backend-and-kv-integrity-passed",
+            "validation_matrix_sha256": "f".repeat(64),
             "checks": ["inspect", "load"],
             "status": CALIBRATION_RECEIPT_STATUS
         })
     }
 
     #[test]
-    fn accepts_only_the_canonical_v4_contract() {
+    fn accepts_only_the_canonical_v5_contract() {
         let bundle = "a".repeat(64);
         let canonical =
             validate_calibration_receipt(&receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle), &bundle);
@@ -253,6 +592,7 @@ mod tests {
             "mslim.calibration_receipt/v1",
             "mslim.calibration_receipt/v2",
             "mslim.calibration_receipt/v3",
+            "mslim.calibration_receipt/v4",
             "kvslim.calibration_receipt/v2",
         ] {
             assert!(validate_calibration_receipt(&receipt(legacy, &bundle), &bundle).is_err());
@@ -272,5 +612,154 @@ mod tests {
         value["source_revision"]["commit"] = json!(crate::build_info::SOURCE_COMMIT);
         value["context_samples"] = json!([]);
         assert!(validate_calibration_receipt(&value, &bundle).is_err());
+    }
+
+    #[test]
+    fn runtime_configuration_must_be_complete_and_match_the_worker() {
+        let bundle = "a".repeat(64);
+        let canonical = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        assert!(matches_accelerator_runtime_configuration(
+            &canonical,
+            &accelerator_configuration()
+        ));
+
+        let mut worker_configuration = accelerator_configuration();
+        worker_configuration["weight_mode"] = json!("stream");
+        assert!(!matches_accelerator_runtime_configuration(
+            &canonical,
+            &worker_configuration
+        ));
+
+        let mut incomplete = canonical.clone();
+        incomplete["frozen_runtime_configuration"]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_context_tokens");
+        assert_eq!(
+            validate_calibration_receipt(&incomplete, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "accelerator runtime configuration has a non-canonical field set"
+        );
+
+        let mut profiled = canonical;
+        profiled["frozen_runtime_configuration"]["prefill_profile_id"] = json!("a".repeat(64));
+        assert_eq!(
+            validate_calibration_receipt(&profiled, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "accelerator calibration does not yet certify a promoted prefill profile"
+        );
+    }
+
+    #[test]
+    fn accelerator_environment_must_be_complete_and_match_the_worker() {
+        let bundle = "a".repeat(64);
+        let canonical = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        let expected = canonical["calibration_environment"].clone();
+        assert!(matches_accelerator_calibration_environment(
+            &canonical, &expected
+        ));
+
+        let mut other_device = expected.clone();
+        other_device["device_key"] = json!("e".repeat(64));
+        assert!(!matches_accelerator_calibration_environment(
+            &canonical,
+            &other_device
+        ));
+
+        let mut incomplete = canonical;
+        incomplete["calibration_environment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("device_key");
+        assert_eq!(
+            validate_calibration_receipt(&incomplete, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "accelerator calibration environment has a non-canonical field set"
+        );
+    }
+
+    #[test]
+    fn rejects_diagnostic_or_undeclared_decode_measurements() {
+        let bundle = "a".repeat(64);
+
+        let mut missing = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("decode_execution_contract");
+        assert_eq!(
+            validate_calibration_receipt(&missing, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "calibration decode execution contract is missing"
+        );
+
+        let mut requires_logits = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        requires_logits["decode_execution_contract"]["diagnostic_full_vocabulary_logits_captured"] =
+            json!(true);
+        assert_eq!(
+            validate_calibration_receipt(&requires_logits, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "calibration decode must not capture diagnostic full-vocabulary logits"
+        );
+
+        let mut wrong_path = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        wrong_path["decode_execution_contract"]["adapter_path"] = json!(ADAPTER_TOKEN_ONLY_PATH);
+        assert_eq!(
+            validate_calibration_receipt(&wrong_path, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "calibration decode path does not match the selected adapter"
+        );
+
+        let mut fabricated_rate = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        fabricated_rate["context_samples"][0]["decode_tokens_per_second_median"] = json!(42.0);
+        assert_eq!(
+            validate_calibration_receipt(&fabricated_rate, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "calibration rate decode_tokens_per_second_median does not match its median duration"
+        );
+    }
+
+    #[test]
+    fn rejects_diagnostic_or_undeclared_prefill_measurements() {
+        let bundle = "a".repeat(64);
+
+        let mut missing = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("prefill_execution_contract");
+        assert_eq!(
+            validate_calibration_receipt(&missing, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "calibration prefill execution contract is missing"
+        );
+
+        let mut requires_logits = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        requires_logits["prefill_execution_contract"]["diagnostic_full_vocabulary_logits_captured"] =
+            json!(true);
+        assert_eq!(
+            validate_calibration_receipt(&requires_logits, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "calibration prefill must not capture diagnostic full-vocabulary logits"
+        );
+
+        let mut wrong_path = receipt(CALIBRATION_RECEIPT_SCHEMA, &bundle);
+        wrong_path["prefill_execution_contract"]["adapter_path"] =
+            json!(ADAPTER_TOKEN_ONLY_PREFILL_PATH);
+        assert_eq!(
+            validate_calibration_receipt(&wrong_path, &bundle)
+                .unwrap_err()
+                .to_string(),
+            "calibration prefill path does not match the selected adapter"
+        );
     }
 }

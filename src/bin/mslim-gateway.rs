@@ -219,6 +219,9 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
             .get("worker_capabilities")
             .is_some_and(|value| mslim::worker_capabilities::validate(value, digest))
     });
+    let effective_runtime_configuration = capabilities
+        .get("worker_capabilities")
+        .and_then(|value| value.get("effective_configuration"));
     let checkpoint_digest = capabilities
         .get("model_checkpoint")
         .and_then(Value::as_str)
@@ -234,20 +237,48 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
             mslim::calibration_contract::validate_calibration_receipt(receipt, digest).is_ok()
         })
     });
+    let configuration_matches_calibration = calibration
+        .zip(effective_runtime_configuration)
+        .is_some_and(|(receipt, configuration)| {
+            mslim::calibration_contract::matches_accelerator_runtime_configuration(
+                receipt,
+                configuration,
+            )
+        });
+    let environment_matches_calibration = calibration
+        .zip(capabilities.get("calibration_environment"))
+        .is_some_and(|(receipt, environment)| {
+            mslim::calibration_contract::matches_accelerator_calibration_environment(
+                receipt,
+                environment,
+            )
+        });
     let validation = capabilities.get("validation_matrix");
+    let validation_matrix_digest = validation
+        .and_then(|matrix| matrix.get("receipt_sha256"))
+        .and_then(Value::as_str)
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     let has_validation = model_digest.is_some_and(|digest| {
         validation.is_some_and(|matrix| {
             matrix.get("schema").and_then(Value::as_str)
                 == Some("mslim.validation-matrix-summary/v1")
                 && matrix.get("status").and_then(Value::as_str) == Some("passed")
                 && matrix.get("bundle_sha256").and_then(Value::as_str) == Some(digest)
+                && matrix.get("deterministic").and_then(Value::as_bool) == Some(true)
                 && matrix.get("same_backend_exact").and_then(Value::as_bool) == Some(true)
+                && matrix.get("cpu_dense_vs_exact").and_then(Value::as_bool) == Some(true)
+                && matrix.get("gpu_dense_vs_exact").and_then(Value::as_bool) == Some(true)
                 && matrix
                     .get("physical_coldstore_snapshot")
                     .and_then(Value::as_bool)
                     == Some(true)
+                && validation_matrix_digest.is_some()
         })
     });
+    let matrix_matches_calibration = calibration
+        .and_then(|receipt| receipt.get("validation_matrix_sha256"))
+        .and_then(Value::as_str)
+        == validation_matrix_digest;
     let identity_matches = model_digest.is_some()
         && model_digest == checkpoint_digest
         && model_digest == calibration_digest;
@@ -255,7 +286,10 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
         && has_model
         && has_runtime_description
         && has_calibration
+        && configuration_matches_calibration
+        && environment_matches_calibration
         && has_validation
+        && matrix_matches_calibration
         && identity_matches
 }
 
@@ -475,6 +509,25 @@ mod tests {
     #[test]
     fn worker_certificate_requires_matching_model_identity() {
         let bundle = "a".repeat(64);
+        let runtime_configuration = json!({
+            "kv_mode": "exact-coldstore",
+            "weight_mode": "resident",
+            "max_context_tokens": 8192,
+            "lod_epsilon": 0.0,
+            "stage_tokens": 64,
+            "prefill_batch_tokens": 128,
+            "prefill_weight_reuse_tokens": 8,
+            "hot_v_tokens": 512,
+            "prompt_replay_tokens": 0,
+            "shared_prefix": false,
+            "micro_hot_v_tokens": 0,
+            "deferred_cold_commit": false,
+            "exact_hot_fused_attention": true,
+            "decode_unroll4": false,
+            "decode_fused_kernels": true,
+            "prefill_fuse_projections": true,
+            "prefill_profile_id": null,
+        });
         let valid = json!({
             "engine": "mslim-engine",
             "model_checkpoint": format!("runtime/models/{bundle}"),
@@ -482,8 +535,13 @@ mod tests {
             "worker_capabilities": mslim::worker_capabilities::effective_configuration(
                 &bundle,
                 "accelerator-runtime",
-                json!({"lod_epsilon": 0.0}),
+                runtime_configuration.clone(),
             ),
+            "calibration_environment": {
+                "schema": mslim::calibration_contract::CALIBRATION_ENVIRONMENT_SCHEMA,
+                "backend": "accelerator-runtime",
+                "device_key": "d".repeat(64)
+            },
             "calibration": {
                 "project": "KV-SHEI",
                 "product": "M-SLIM",
@@ -497,15 +555,33 @@ mod tests {
                 },
                 "adapter": "accelerator-runtime",
                 "identity_digest": "b".repeat(64),
+                "calibration_environment": {
+                    "schema": mslim::calibration_contract::CALIBRATION_ENVIRONMENT_SCHEMA,
+                    "backend": "accelerator-runtime",
+                    "device_key": "d".repeat(64)
+                },
                 "started_unix_seconds": 1,
                 "warmup_runs": 1,
                 "measured_runs": 3,
                 "decode_tokens_per_run": 8,
+                "frozen_runtime_configuration": runtime_configuration,
+                "prefill_execution_contract": {
+                    "kind": mslim::calibration_contract::TOKEN_ONLY_PREFILL_KIND,
+                    "adapter_path": mslim::calibration_contract::ACCELERATOR_TOKEN_ONLY_PREFILL_PATH,
+                    "diagnostic_full_vocabulary_logits_captured": false
+                },
+                "decode_execution_contract": {
+                    "kind": mslim::calibration_contract::TOKEN_ONLY_DECODE_KIND,
+                    "adapter_path": mslim::calibration_contract::ACCELERATOR_TOKEN_ONLY_PATH,
+                    "diagnostic_full_vocabulary_logits_captured": false
+                },
                 "context_samples": [{
                     "prompt_tokens": 1,
                     "prefill_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                    "prefill_tokens_per_second_median": 1000000.0,
                     "decode_tokens": 8,
                     "decode_micros": {"samples": [1, 1, 1], "minimum": 1, "median": 1, "p95": 1, "maximum": 1},
+                    "decode_tokens_per_second_median": 8000000.0,
                     "status": "measured"
                 }],
                 "snapshot_contract": {
@@ -513,14 +589,19 @@ mod tests {
                     "physical_kv_persisted": true,
                     "restore_latency_measured_as_physical_kv_hydration": false
                 },
-                "validation_matrix_gate": "same-backend-and-kv-integrity-passed"
+                "validation_matrix_gate": "same-backend-and-kv-integrity-passed",
+                "validation_matrix_sha256": "f".repeat(64)
             },
             "validation_matrix": {
                 "schema": "mslim.validation-matrix-summary/v1",
                 "status": "passed",
                 "bundle_sha256": "a".repeat(64),
+                "deterministic": true,
                 "same_backend_exact": true,
-                "physical_coldstore_snapshot": true
+                "cpu_dense_vs_exact": true,
+                "gpu_dense_vs_exact": true,
+                "physical_coldstore_snapshot": true,
+                "receipt_sha256": "f".repeat(64)
             }
         });
         assert_eq!(
@@ -547,6 +628,33 @@ mod tests {
         let mut invalid = valid.clone();
         invalid["calibration"]["bundle"] = json!("c".repeat(64));
         assert!(!worker_capabilities_are_valid(Some(&invalid)));
+        let mut mismatched_configuration = valid.clone();
+        mismatched_configuration["worker_capabilities"]["effective_configuration"]["prefill_weight_reuse_tokens"] =
+            json!(16);
+        assert!(!worker_capabilities_are_valid(Some(
+            &mismatched_configuration
+        )));
+        let mut mismatched_environment = valid.clone();
+        mismatched_environment["calibration_environment"]["device_key"] = json!("e".repeat(64));
+        assert!(!worker_capabilities_are_valid(Some(
+            &mismatched_environment
+        )));
+        let mut mismatched_matrix = valid.clone();
+        mismatched_matrix["validation_matrix"]["receipt_sha256"] = json!("0".repeat(64));
+        assert!(!worker_capabilities_are_valid(Some(&mismatched_matrix)));
+        let mut nondeterministic_matrix = valid.clone();
+        nondeterministic_matrix["validation_matrix"]["deterministic"] = json!(false);
+        assert!(!worker_capabilities_are_valid(Some(
+            &nondeterministic_matrix
+        )));
+        for field in ["cpu_dense_vs_exact", "gpu_dense_vs_exact"] {
+            let mut failed_route = valid.clone();
+            failed_route["validation_matrix"][field] = json!(false);
+            assert!(
+                !worker_capabilities_are_valid(Some(&failed_route)),
+                "gateway must reject a failed {field} route"
+            );
+        }
         let mut legacy = valid;
         legacy["calibration"]["schema"] = json!("kvslim.calibration_receipt/v2");
         assert!(!worker_capabilities_are_valid(Some(&legacy)));

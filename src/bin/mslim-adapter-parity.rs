@@ -64,6 +64,12 @@ fn object(config: &mut Value) -> Result<&mut serde_json::Map<String, Value>> {
 fn frozen_common_config(base: &Value) -> Result<Value> {
     let mut config = base.clone();
     let values = object(&mut config)?;
+    // The validation matrix certifies the canonical worker route. Promoted
+    // prefill profiles and experimental attention kernels have separate
+    // evidence and may not be inherited invisibly from a bundle config.
+    values.remove("mslim_prefill_profile");
+    values.remove("mslim_attention_kernel");
+    values.remove("mslim_allow_experimental_attention");
     values.insert("mslim_lod_epsilon".into(), json!(0.0));
     values.insert("mslim_epsilon".into(), json!(0.0));
     values.insert("mslim_stage_tokens".into(), json!(64));
@@ -144,15 +150,16 @@ fn run_mode(
     config: &Value,
     prompt: &[u32],
     decode_inputs: &[u32],
-) -> Result<(ExecutionTrace, Value)> {
+) -> Result<(ExecutionTrace, Value, Option<Value>)> {
     let mut engine = MslimEngine::new(create_adapter(adapter)?);
     engine.inspect(model, config)?;
     engine.load(model, config)?;
+    let calibration_environment = engine.calibration_environment()?;
     let first = run_once(&mut engine, prompt, decode_inputs)?;
     engine.reset_session()?;
     let second = run_once(&mut engine, prompt, decode_inputs)?;
     let determinism = compare_traces("run-1", &first, "run-2", &second)?;
-    Ok((first, determinism))
+    Ok((first, determinism, calibration_environment))
 }
 
 fn kv_digest(trace: &ExecutionTrace) -> Result<&str> {
@@ -286,14 +293,14 @@ fn main() -> Result<()> {
     let base_config: Value = serde_json::from_slice(&fs::read(model.join("config.json"))?)?;
     let gpu_cold = tempfile::tempdir()?;
 
-    let (cpu_dense, cpu_dense_determinism) = run_mode(
+    let (cpu_dense, cpu_dense_determinism, _) = run_mode(
         "native-cpu-runtime",
         &model,
         &cpu_config(&base_config, true)?,
         &prompt,
         &decode_inputs,
     )?;
-    let (cpu_exact, cpu_exact_determinism) = run_mode(
+    let (cpu_exact, cpu_exact_determinism, _) = run_mode(
         "native-cpu-runtime",
         &model,
         &cpu_config(&base_config, false)?,
@@ -307,14 +314,14 @@ fn main() -> Result<()> {
         &cpu_exact,
     )?;
 
-    let (gpu_dense, gpu_dense_determinism) = run_mode(
+    let (gpu_dense, gpu_dense_determinism, gpu_dense_environment) = run_mode(
         "accelerator-runtime",
         &model,
         &gpu_config(&base_config, false, gpu_cold.path())?,
         &prompt,
         &decode_inputs,
     )?;
-    let (gpu_exact, gpu_exact_determinism) = run_mode(
+    let (gpu_exact, gpu_exact_determinism, gpu_exact_environment) = run_mode(
         "accelerator-runtime",
         &model,
         &gpu_config(&base_config, true, gpu_cold.path())?,
@@ -335,6 +342,12 @@ fn main() -> Result<()> {
     .all(comparison_passed);
     let same_backend_exact =
         comparison_passed(&cpu_same_backend) && comparison_passed(&gpu_same_backend);
+    let calibration_environment =
+        gpu_dense_environment.context("la ruta GPU densa no publicó su entorno físico cargado")?;
+    ensure!(
+        gpu_exact_environment.as_ref() == Some(&calibration_environment),
+        "las rutas GPU densa y ColdStore se ejecutaron en entornos físicos distintos"
+    );
     let accelerator_physical_snapshot = physical_snapshot(&gpu_exact);
     let passed = deterministic && same_backend_exact && accelerator_physical_snapshot;
 
@@ -346,6 +359,7 @@ fn main() -> Result<()> {
         "status": if passed { "passed" } else { "failed" },
         "source_revision": mslim::build_info::source_revision(),
         "bundle_sha256": bundle_id,
+        "calibration_environment": calibration_environment,
         "model": model,
         "probe_tokens": prompt.len(),
         "decode_steps": decode_steps,
@@ -414,11 +428,25 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::within_one_bf16_ulp;
+    use super::{frozen_common_config, within_one_bf16_ulp};
+    use serde_json::json;
 
     #[test]
     fn bf16_ulp_comparison_rejects_large_drift() {
         assert!(within_one_bf16_ulp(&[1.0], &[1.0]));
         assert!(!within_one_bf16_ulp(&[1.0], &[1.5]));
+    }
+
+    #[test]
+    fn matrix_does_not_inherit_unrepresented_runtime_profiles() {
+        let config = frozen_common_config(&json!({
+            "mslim_prefill_profile": "foreign-profile.json",
+            "mslim_attention_kernel": {"mode": "experimental"},
+            "mslim_allow_experimental_attention": true
+        }))
+        .unwrap();
+        assert!(config.get("mslim_prefill_profile").is_none());
+        assert!(config.get("mslim_attention_kernel").is_none());
+        assert!(config.get("mslim_allow_experimental_attention").is_none());
     }
 }

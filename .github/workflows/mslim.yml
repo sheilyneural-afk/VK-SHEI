@@ -125,10 +125,15 @@ jobs:
       - name: Sustained calibration after parity
         env:
           MSLIM_PHYSICAL_MODEL: ${{ vars.MSLIM_PHYSICAL_MODEL }}
+          MSLIM_MAX_CONTEXT_TOKENS: ${{ vars.MSLIM_MAX_CONTEXT_TOKENS }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo run --locked --release --features accelerator-backend --bin mslim-calibrate -- "$MSLIM_PHYSICAL_MODEL" --force --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048 \
+          max_context="${MSLIM_MAX_CONTEXT_TOKENS:-8192}"
+          cargo run --locked --release --features accelerator-backend --bin mslim-calibrate -- \
+            "$MSLIM_PHYSICAL_MODEL" --force --resident \
+            --max-context-tokens "$max_context" \
+            --warmups 1 --repeats 5 --decode-tokens 64 --contexts 128,512,2048 \
             2>&1 | tee "$RUNNER_TEMP/mslim-physical-evidence/calibration.log"
       - name: Record the bounded physical-run evidence
         if: always()

@@ -83,6 +83,11 @@ authority = canonical-bf16-coldstore
 La comprobación asegura que no se aceptó por error un snapshot lógico de replay
 como si fuera el estado físico de ColdStore.
 
+El handle conserva además el `last_argmax` autoritativo para reanudar una ruta
+token-only sin copiar logits completos. Al leer handles anteriores, el runtime
+puede derivarlo de `last_logits`; si no existe ninguna de las dos evidencias,
+la reutilización exacta del prefijo falla cerrada.
+
 ### 4. Diagnóstico CPU/GPU
 
 Se compara CPU hot-dense con GPU densa usando las mismas entradas. Se registran:
@@ -129,6 +134,40 @@ La matriz llama a `snapshot_kv`, pero no restaura ese snapshot. El restore se
 valida en la conformidad del adapter y en los E2E de continuidad. La matriz
 incluye `source_revision`; los consumidores de activación exigen que sea el
 commit exacto del binario actual y que el árbol estuviera limpio al compilarlo.
+
+La calibración sostenida añade una segunda ligadura, distinta de la matriz:
+`frozen_runtime_configuration` registra la configuración física con la que se
+midieron prefill y decode. Incluye ColdStore, modo de pesos, contexto máximo,
+epsilon, capacidades hot/replay y los switches de kernel. El worker publica el
+mismo objeto como `worker_capabilities.effective_configuration`; tanto el
+worker como el gateway exigen igualdad completa antes de admitir readiness.
+Así, una medición `stream` no autoriza un worker `resident`, ni una calibración
+de 8192 tokens autoriza por accidente un proceso configurado para 32768.
+
+La v5 liga además la medición al entorno físico mediante
+`calibration_environment.device_key`. La huella cubre el dispositivo y vendor
+seleccionados, las versiones de driver/runtime OpenCL, el shader y sus opciones
+de compilación, sin almacenar hostname, usuario ni identificadores de máquina.
+El worker obtiene esa huella del `GpuEngine` que mantiene el modelo cargado
+—no de un segundo sondeo— y el gateway repite la comparación contra el recibo.
+La matriz exige además que sus rutas GPU densa y ColdStore publiquen la misma
+huella cargada. Una calibración copiada desde otra GPU o driver queda rechazada
+aunque coincidan bundle, fuente y configuración.
+
+La matriz v2 lleva el mismo `calibration_environment`. El calibrador solo la
+acepta si coincide con su dispositivo efectivo y registra el SHA-256 de los
+bytes exactos de la matriz como `validation_matrix_sha256`. El worker recalcula
+ese digest desde el archivo que publica y el gateway comprueba de nuevo la
+relación. Así, sustituir la matriz después de calibrar o encadenar matriz y
+calibración de máquinas distintas invalida readiness.
+
+Los perfiles promovidos de prefill no están cubiertos por la calibración v5:
+si el worker activa uno, su identidad efectiva deja de coincidir y readiness
+falla cerrada. Para admitirlos habrá que ampliar el productor de calibración y
+versionar el contrato con la identidad concreta del perfil. La matriz y el
+calibrador eliminan también cualquier kernel de atención experimental heredado
+del `config.json`; una ruta así necesita evidencia explícita, no una activación
+implícita bajo la identidad de la ruta canónica.
 
 ## Evidencia histórica
 

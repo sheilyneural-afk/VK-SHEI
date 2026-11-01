@@ -96,12 +96,28 @@ La disponibilidad de un proceso se demuestra aparte mediante `/health` y la
 aptitud para servir peticiones mediante `/ready` y un E2E autenticado.
 
 El contrato de calibración está unificado en
-`mslim.calibration_receipt/v4`, estado `measured-sustained-execution`, mediante
+`mslim.calibration_receipt/v5`, estado `measured-sustained-execution`, mediante
 el validador compartido por `mslim-calibrate`, el worker, el gateway y
-`mslim-autoconfigure`. La matriz `mslim.validation-matrix/v2` congela también
-`prefill_weight_reuse_tokens`, `hot_v_tokens` y el resto del perfil efectivo;
-el worker devuelve `/ready` 503 si falta la evidencia local o si cualquier
-valor difiere. Los documentos anteriores se archivan por hash antes de
+`mslim-autoconfigure`. La v5 mide contratos token-only de argmax tanto para
+prefill como para decode y, en el acelerador, excluye la lectura al host del
+vocabulario completo en ambos tramos. Los recibos v4
+midieron la ruta diagnóstica con logits completos y no son reutilizables ni
+migrables como evidencia v5. La matriz `mslim.validation-matrix/v2` congela
+los kernels y políticas cuya exactitud valida. La calibración v5 añade su
+`frozen_runtime_configuration`: modo de pesos, contexto máximo, epsilon,
+ColdStore, prefill, hot V, replay y kernels efectivos. Worker y gateway
+comparan el objeto completo, no solo su presencia. El recibo también fija un
+`calibration_environment` sin identidad personal: su `device_key` liga GPU,
+driver/runtime OpenCL, shader y opciones de compilación. El worker publica la
+huella efectiva y el gateway exige igualdad, por lo que copiar un recibo desde
+otro entorno no autoriza readiness. La matriz v2 contiene la misma huella y la
+calibración conserva el SHA-256 exacto de esa matriz; worker y gateway exigen
+que siga siendo el mismo recibo. `/ready` devuelve 503 si falta evidencia,
+cambia la matriz o difiere un valor. Un perfil de prefill promovido queda
+cerrado por defecto hasta que exista una calibración que lo identifique; la
+matriz y el calibrador tampoco heredan kernels experimentales ocultos en el
+bundle.
+Los documentos anteriores se archivan por hash antes de
 migrarlos; el bloque `migration` enlaza esquema, SHA-256 y copia original. Una
 migración conserva la medición histórica, pero no la convierte en una medición
 nueva ni sustituye una certificación ejecutada desde el commit actual.
