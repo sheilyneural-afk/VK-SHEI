@@ -47,6 +47,8 @@ if git -C "$worktree" diff --cached --quiet; then
     echo "wiki already matches generated content"
     exit 0
 fi
+git -C "$worktree" config user.name "github-actions[bot]"
+git -C "$worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git -C "$worktree" commit -m "Synchronize wiki with $(git rev-parse --short=12 HEAD)"
 git -C "$worktree" fetch --quiet origin master
 git -C "$worktree" merge-base --is-ancestor origin/master HEAD || {

@@ -92,3 +92,26 @@ jobs:
             ${{ runner.temp }}/wiki-audit-receipt.json
             ${{ runner.temp }}/wiki-proposal.patch
           if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          name: documentation-truth-${{ github.sha }}
+          path: ${{ runner.temp }}/documentation-truth
+      - name: Publish audited wiki after an approved main update
+        env:
+          WIKI_REMOTE: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.wiki.git
+        run: |
+          scripts/wiki-publish.sh \
+            --wiki "$RUNNER_TEMP/documentation-truth/generated-wiki" \
+            --remote "$WIKI_REMOTE" \
+            --confirm-publish
