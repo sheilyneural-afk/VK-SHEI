@@ -7,7 +7,7 @@ updates:
       day: monday
       time: "05:17"
       timezone: Europe/Madrid
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     labels: ["dependencies", "area:repository"]
     groups:
       rust-patch-and-minor:
@@ -19,5 +19,5 @@ updates:
       day: monday
       time: "05:47"
       timezone: Europe/Madrid
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     labels: ["dependencies", "area:repository"]

@@ -2,6 +2,7 @@ name: Documentation truth
 
 on:
   push:
+    branches: [main]
     paths:
       - "README.md"
       - "Cargo.toml"
