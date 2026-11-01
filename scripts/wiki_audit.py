@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -147,15 +146,23 @@ def derive_page(entry: dict, configuration: dict) -> str:
 
 
 def copy_editorial_pages(existing: Path, output: Path, configuration: dict) -> None:
+    replacements = configuration.get("editorial_replacements", {})
+
+    def copy_with_migrations(source: Path, target: Path) -> None:
+        text = source.read_text(encoding="utf-8")
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        target.write_text(text, encoding="utf-8", newline="\n")
+
     for name in configuration["required_editorial_pages"]:
         source = existing / name
         if not source.is_file():
             raise AuditError(f"published wiki is missing required editorial page: {name}")
-        shutil.copyfile(source, output / name)
+        copy_with_migrations(source, output / name)
     for source in sorted(existing.glob("*.md")):
         target = output / source.name
         if not target.exists() and source.name not in {entry["target"] for entry in configuration["derived_pages"]}:
-            shutil.copyfile(source, target)
+            copy_with_migrations(source, target)
 
 
 def generate(existing: Path, output: Path) -> None:
