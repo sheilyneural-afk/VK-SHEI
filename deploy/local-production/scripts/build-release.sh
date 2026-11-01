@@ -31,17 +31,21 @@ build_input_digest_before=$(python3 "$root/scripts/source_inventory.py" --print-
 "$root/deploy/local-production/scripts/cargo-local.sh" build --locked --release \
   --bin mslim-server --features unified-router
 
+build_input_digest=$(python3 "$root/scripts/source_inventory.py" --print-build-input-digest)
+[ "$build_input_digest" = "$build_input_digest_before" ] || {
+  echo "source or build input changed while compiling; release not installed" >&2
+  exit 1
+}
+
+# Do not replace the resident release until both builds have completed from one
+# stable input snapshot. The temporary names keep each individual replacement
+# atomic after that gate has passed.
 mkdir -p "$runtime/bin"
 install -m 0755 "$runtime/build-target/release/mslim-runtime-worker" "$runtime/bin/.mslim-runtime-worker.new"
 install -m 0755 "$runtime/build-target/release/mslim-server" "$runtime/bin/.mslim-server.new"
 mv -f "$runtime/bin/.mslim-runtime-worker.new" "$runtime/bin/mslim-runtime-worker"
 mv -f "$runtime/bin/.mslim-server.new" "$runtime/bin/mslim-server"
 
-build_input_digest=$(python3 "$root/scripts/source_inventory.py" --print-build-input-digest)
-[ "$build_input_digest" = "$build_input_digest_before" ] || {
-  echo "source or build input changed while compiling; release not written" >&2
-  exit 1
-}
 python3 "$root/scripts/write-local-release.py" \
   --root "$root" \
   --build-input-digest "$build_input_digest" \

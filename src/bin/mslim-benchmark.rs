@@ -215,7 +215,7 @@ fn normalize_answer(answer: &str) -> String {
     answer
         .trim()
         .trim_matches(|c: char| {
-            c.is_whitespace() || matches!(c, '.' | '"' | '\'' | '`' | '«' | '»')
+            c.is_whitespace() || matches!(c, '.' | ':' | '"' | '\'' | '`' | '«' | '»')
         })
         .to_lowercase()
 }
@@ -777,7 +777,7 @@ fn main() -> Result<()> {
             "sha256":sha256(build_system_prompt(options.repetitions)?.as_bytes())},
         "measurement_policy":{"one_model_per_fresh_process":true,"os_page_cache":"uncontrolled_not_cold",
             "route_order":"rotated_by_repeat; restart_immediately_follows_prefix","warmups":options.warmups,"measured_repeats":options.repeats,
-            "question_count":options.query_count,"answer_check":"per_question_exact_match_casefold_trim_outer_quotes_periods_and_whitespace",
+            "question_count":options.query_count,"answer_check":"per_question_exact_match_casefold_trim_outer_quotes_periods_colons_and_whitespace",
             "latency":"wall_around_generation_not_time_to_first_token","memory":"per_child_Linux_VmHWM_not_VRAM; KV fields are runtime counters",
             "disk":"apparent_file_bytes_not_allocated_disk_blocks","prefix_restart":"parent_waits_for_exit_then_new_process_same_prefix_files"},
         "summaries":summaries(&observations)?,"comparisons":comparisons,"observations":observations,
@@ -803,6 +803,7 @@ mod tests {
         assert!(answer_is_correct(0, 60, "AZULEJO-7319"));
         assert!(answer_is_correct(1, 60, "60"));
         assert!(answer_is_correct(2, 60, "Conserva este dato."));
+        assert!(answer_is_correct(2, 60, "Conserva este dato:"));
         assert!(!answer_is_correct(1, 60, "AZULEJO-7319"));
         assert!(!answer_is_correct(2, 60, "No conserves este dato"));
         assert!(!answer_is_correct(0, 60, "No es AZULEJO-7319"));

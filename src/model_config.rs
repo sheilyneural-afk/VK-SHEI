@@ -41,6 +41,58 @@ pub struct ModelSpec {
     pub eos_token_ids: Vec<u32>,
 }
 
+/// Resolve the checkpoint's authoritative generation stop IDs. Hugging Face
+/// generation settings take precedence over the architectural config because
+/// chat checkpoints can declare an additional end-of-turn token there.
+pub fn resolve_eos_token_ids(
+    model_dir: impl AsRef<Path>,
+    vocab_size: Option<usize>,
+) -> Result<Vec<u32>> {
+    let model_dir = model_dir.as_ref();
+    let generation = model_dir.join("generation_config.json");
+    let source = if generation.is_file() {
+        generation
+    } else {
+        model_dir.join("config.json")
+    };
+    let bytes = fs::read(&source)
+        .with_context(|| format!("no se pudo leer la configuración EOS {}", source.display()))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("configuración EOS inválida: {}", source.display()))?;
+    let Some(raw) = value.get("eos_token_id") else {
+        ensure!(
+            source.file_name().and_then(|name| name.to_str()) != Some("generation_config.json"),
+            "generation_config.json necesita eos_token_id"
+        );
+        return Ok(Vec::new());
+    };
+    let candidates = match raw {
+        Value::Number(_) => vec![raw],
+        Value::Array(values) => {
+            ensure!(!values.is_empty(), "eos_token_id no puede estar vacío");
+            values.iter().collect()
+        }
+        _ => anyhow::bail!("eos_token_id debe ser entero o lista de enteros"),
+    };
+    let mut resolved = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let id = candidate
+            .as_u64()
+            .context("eos_token_id debe contener enteros")?;
+        if let Some(vocab) = vocab_size {
+            ensure!(
+                id < vocab as u64,
+                "eos_token_id {id} excede vocab_size {vocab}"
+            );
+        }
+        let id = u32::try_from(id).context("eos_token_id fuera de rango")?;
+        if !resolved.contains(&id) {
+            resolved.push(id);
+        }
+    }
+    Ok(resolved)
+}
+
 impl ModelSpec {
     pub fn inspect(model_dir: impl AsRef<Path>) -> Result<Self> {
         let model_dir = model_dir.as_ref();
@@ -166,27 +218,7 @@ impl ModelSpec {
             })
             .collect::<Vec<_>>();
         weight_shards.sort();
-        let eos_token_ids = match config.get("eos_token_id") {
-            Some(Value::Number(value)) => vec![
-                value
-                    .as_u64()
-                    .context("eos_token_id debe ser un entero")?
-                    .try_into()
-                    .context("eos_token_id fuera de rango")?,
-            ],
-            Some(Value::Array(values)) => values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_u64()
-                        .context("eos_token_id debe contener enteros")?
-                        .try_into()
-                        .context("eos_token_id fuera de rango")
-                })
-                .collect::<Result<Vec<u32>>>()?,
-            Some(_) => anyhow::bail!("eos_token_id debe ser entero o lista de enteros"),
-            None => Vec::new(),
-        };
+        let eos_token_ids = resolve_eos_token_ids(model_dir, vocab_size)?;
 
         Ok(Self {
             model_dir: model_dir.to_path_buf(),
@@ -361,5 +393,45 @@ mod tests {
             Some(FloatFormat::F32)
         );
         assert_eq!(ModelSpec::parse_float_dtype("fp8"), None);
+    }
+
+    #[test]
+    fn generation_config_is_authoritative_for_chat_stop_ids() {
+        let config = json!({
+            "model_type":"llama", "hidden_size":128, "num_hidden_layers":1,
+            "num_attention_heads":1, "vocab_size":128256, "eos_token_id":128001
+        });
+        let (dir, initial) = model(config);
+        assert_eq!(initial.eos_token_ids, vec![128001]);
+        fs::write(
+            dir.path().join("generation_config.json"),
+            r#"{"eos_token_id":[128001,128009,128009]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ModelSpec::inspect(dir.path()).unwrap().eos_token_ids,
+            vec![128001, 128009]
+        );
+    }
+
+    #[test]
+    fn generation_stop_ids_fail_closed_when_malformed_or_outside_vocab() {
+        let config = json!({
+            "model_type":"llama", "hidden_size":128, "num_hidden_layers":1,
+            "num_attention_heads":1, "vocab_size":128256, "eos_token_id":128001
+        });
+        let (dir, _) = model(config);
+        for invalid in [
+            r#"{"eos_token_id":[]}"#,
+            r#"{"eos_token_id":"128009"}"#,
+            r#"{"eos_token_id":[128256]}"#,
+            r#"{}"#,
+        ] {
+            fs::write(dir.path().join("generation_config.json"), invalid).unwrap();
+            assert!(
+                ModelSpec::inspect(dir.path()).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 }

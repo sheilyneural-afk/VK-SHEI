@@ -40,7 +40,7 @@ use opencl3::memory::ClMem;
 
 use crate::{
     gpu_region_store::{GpuRegionConfig, GpuRegionStats, GpuRegionStore},
-    model_config::ModelSpec,
+    model_config::{ModelSpec, resolve_eos_token_ids},
     portable::AttentionGeometry,
 };
 
@@ -52,49 +52,6 @@ pub(crate) use kernels::{
 
 const LOCAL_WORK_SIZE: usize = 128;
 const BYTES_PER_BF16: usize = 2;
-
-/// Read stopping tokens from the actual checkpoint; never assume configured-model IDs
-/// for a Llama tokenizer. A generation_config.json has precedence over
-/// config.json, because chat checkpoints can have multiple stop IDs.
-fn checkpoint_eos_token_ids(model_dir: &Path, vocab: usize) -> Result<Vec<u32>> {
-    let generation = model_dir.join("generation_config.json");
-    let config = if generation.is_file() {
-        generation
-    } else {
-        model_dir.join("config.json")
-    };
-    let bytes = fs::read(&config)
-        .with_context(|| format!("EOS config cannot be read: {}", config.display()))?;
-    let content: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("invalid EOS JSON: {}", config.display()))?;
-    let raw = content
-        .get("eos_token_id")
-        .context("checkpoint has no eos_token_id; generation requires explicit stopping IDs")?;
-    let candidates = if let Some(array) = raw.as_array() {
-        array.iter().collect::<Vec<_>>()
-    } else {
-        vec![raw]
-    };
-    ensure!(
-        !candidates.is_empty(),
-        "checkpoint eos_token_id array is empty"
-    );
-    let mut eos = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let id = candidate
-            .as_u64()
-            .context("eos_token_id must be an unsigned integer")?;
-        ensure!(
-            id < vocab as u64,
-            "eos_token_id {id} exceeds vocabulary {vocab}"
-        );
-        let id = u32::try_from(id).context("eos_token_id does not fit u32")?;
-        if !eos.contains(&id) {
-            eos.push(id);
-        }
-    }
-    Ok(eos)
-}
 
 #[cfg(test)]
 mod replay_reset_tests {
@@ -127,56 +84,6 @@ mod replay_reset_tests {
             admit_verified_replay(true, 40, false),
             ReplayAdmission::Poisoned
         );
-    }
-}
-
-#[cfg(test)]
-mod checkpoint_eos_tests {
-    use super::checkpoint_eos_token_ids;
-    use std::fs;
-
-    #[test]
-    fn checkpoint_eos_follows_generation_config_and_ignores_minicpm_stop_for_llama() {
-        let root = tempfile::tempdir().unwrap();
-        fs::write(
-            root.path().join("config.json"),
-            r#"{"eos_token_id":128009}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            checkpoint_eos_token_ids(root.path(), 128256).unwrap(),
-            vec![128009]
-        );
-        fs::write(
-            root.path().join("generation_config.json"),
-            r#"{"eos_token_id":[128001,128008,128009]}"#,
-        )
-        .unwrap();
-        let ids = checkpoint_eos_token_ids(root.path(), 128256).unwrap();
-        assert_eq!(ids, vec![128001, 128008, 128009]);
-        assert!(!ids.contains(&1));
-        fs::write(
-            root.path().join("generation_config.json"),
-            r#"{"eos_token_id":[1,130073,1]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            checkpoint_eos_token_ids(root.path(), 130560).unwrap(),
-            vec![1, 130073]
-        );
-        assert!(checkpoint_eos_token_ids(root.path(), 120000).is_err());
-        fs::write(
-            root.path().join("generation_config.json"),
-            r#"{"eos_token_id":[]}"#,
-        )
-        .unwrap();
-        assert!(checkpoint_eos_token_ids(root.path(), 130560).is_err());
-        fs::write(
-            root.path().join("generation_config.json"),
-            r#"{"eos_token_id":"1"}"#,
-        )
-        .unwrap();
-        assert!(checkpoint_eos_token_ids(root.path(), 130560).is_err());
     }
 }
 
@@ -466,7 +373,11 @@ impl GpuLlm {
             "layer count outside resource budget"
         );
         let vocab = spec.vocab_size.context("vocab_size missing")?;
-        let eos_token_ids = checkpoint_eos_token_ids(model_dir, vocab)?;
+        let eos_token_ids = resolve_eos_token_ids(model_dir, Some(vocab))?;
+        ensure!(
+            !eos_token_ids.is_empty(),
+            "checkpoint has no eos_token_id; generation requires explicit stopping IDs"
+        );
         ensure!(
             vocab <= 300_000,
             "vocabulary exceeds tested resource budget"
