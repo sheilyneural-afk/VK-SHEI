@@ -81,3 +81,5 @@ pub mod native_hip;
 
 pub mod generic_runtime;
 pub mod gpu_micro_regions;
+#[cfg(test)]
+mod sheily_port; // Ports without a runtime caller yet: compiled and tested only.
