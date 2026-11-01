@@ -16,7 +16,7 @@ if [ -n "${MSLIM_RUNTIME_MANIFEST:-}" ]; then
   "$script_dir/verify-runtime-manifest.sh" "$MSLIM_RUNTIME_MANIFEST"
 fi
 
-binary="$root/deploy/local-production/runtime/bin/mslim-server"
+binary="$root/deploy/local-production/runtime/bin/mslim-gateway"
 : "${MSLIM_GATEWAY_TOKEN:?MSLIM_GATEWAY_TOKEN must be set}"
 export MSLIM_GATEWAY_TOKEN
 

@@ -2,7 +2,7 @@
   "project": "KV-SHEI",
   "product": "M-SLIM",
   "technical_namespace": "mslim",
-  "schema": "mslim.local_release/v2",
+  "schema": "mslim.local_release/v3",
   "build_input_digest": "0000000000000000000000000000000000000000000000000000000000000000",
   "release_id": "REPLACE_WITH_RELEASE_ID",
   "backend": "auto",
@@ -11,7 +11,7 @@
   "lod_enabled": true,
   "coldstore_format": "TSKVPG04",
   "binary": {
-    "path": "runtime/bin/mslim-server",
+    "path": "runtime/bin/mslim-gateway",
     "sha256": "REPLACE_WITH_SHA256"
   },
   "worker_binary": {

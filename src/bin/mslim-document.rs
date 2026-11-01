@@ -263,7 +263,7 @@ fn query(arguments: Vec<String>) -> Result<()> {
 }
 
 fn print_help() {
-    println!("M-SLIM original-document graph and micro-metadata router");
+    println!("M-SLIM verified-document retrieval");
     println!(
         "  mslim-document build --document-id ID --version HASH --pages pages.json --output graph.json"
     );

@@ -58,9 +58,9 @@ jobs:
         run: mkdir -p deploy/local-production/runtime/tmp
       - run: cargo build --locked --release --no-default-features --lib
       - run: cargo build --locked --release --features accelerator-backend --bin mslim-runtime-worker
-      - run: cargo build --locked --release --features unified-router --bin mslim-server
+      - run: cargo build --locked --release --features unified-router --bin mslim-gateway
       - run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
-      - run: test -x deploy/local-production/runtime/build-target/release/mslim-runtime-worker && test -x deploy/local-production/runtime/build-target/release/mslim-server
+      - run: test -x deploy/local-production/runtime/build-target/release/mslim-runtime-worker && test -x deploy/local-production/runtime/build-target/release/mslim-gateway
 
   physical:
     if: github.event_name == 'workflow_dispatch'

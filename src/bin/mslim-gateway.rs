@@ -92,7 +92,7 @@ fn parse_workers(assignments: &[String]) -> Result<Vec<(String, String)>> {
 async fn health() -> impl IntoResponse {
     (
         StatusCode::OK,
-        Json(json!({"status": "alive", "service": "mslim-server"})),
+        Json(json!({"status": "alive", "service": "mslim-gateway"})),
     )
 }
 
@@ -200,7 +200,6 @@ fn worker_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
     };
     let has_engine = capabilities
         .get("engine")
-        .or_else(|| capabilities.get("server"))
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
     let has_model = capabilities
@@ -296,7 +295,7 @@ async fn capabilities(state: State<Arc<AppState>>) -> Result<Json<Value>, Gatewa
         .map_err(|error| GatewayError(StatusCode::BAD_GATEWAY, error.to_string()))?;
     ensure_worker_success(status, &body)?;
     Ok(Json(json!({
-        "server": "mslim-server",
+        "gateway": "mslim-gateway",
         "worker_capabilities": body,
         "routing": "readiness-and-worker-registry"
     })))
@@ -332,7 +331,7 @@ async fn chat(
         return Err(GatewayError(status, body.to_string()));
     }
     if let Some(object) = body.as_object_mut() {
-        object.insert("mslim_server".into(), json!({"routing": "dynamic-worker"}));
+        object.insert("mslim_gateway".into(), json!({"routing": "dynamic-worker"}));
     }
     Ok(Json(body))
 }
@@ -342,12 +341,6 @@ async fn main() -> Result<()> {
     let mut host = "127.0.0.1".to_owned();
     let mut port = 8288u16;
     let mut assignments = Vec::new();
-    let auth_token = std::env::var("MSLIM_GATEWAY_TOKEN")
-        .context("MSLIM_GATEWAY_TOKEN must be set; refusing unauthenticated gateway")?;
-    ensure!(
-        !auth_token.is_empty(),
-        "MSLIM_GATEWAY_TOKEN cannot be empty"
-    );
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -355,12 +348,18 @@ async fn main() -> Result<()> {
             "--port" => port = args.next().context("missing --port")?.parse()?,
             "--worker" => assignments.push(args.next().context("missing --worker id=endpoint")?),
             "--help" | "-h" => {
-                println!("mslim-server --worker <id=http://127.0.0.1:port> [--worker ...]");
+                println!("mslim-gateway --worker <id=http://127.0.0.1:port> [--worker ...]");
                 return Ok(());
             }
             other => bail!("unknown argument: {other}"),
         }
     }
+    let auth_token = std::env::var("MSLIM_GATEWAY_TOKEN")
+        .context("MSLIM_GATEWAY_TOKEN must be set; refusing unauthenticated gateway")?;
+    ensure!(
+        !auth_token.is_empty(),
+        "MSLIM_GATEWAY_TOKEN cannot be empty"
+    );
     ensure!(
         !assignments.is_empty(),
         "at least one --worker id=endpoint is required"

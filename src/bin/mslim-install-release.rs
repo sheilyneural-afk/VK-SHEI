@@ -212,15 +212,6 @@ mod tests {
     }
 
     #[test]
-    fn local_manifest_uses_the_installer_contract_when_present() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/local-production/manifest.json");
-        if path.exists() {
-            parse_manifest(&fs::read(path).unwrap()).unwrap();
-        }
-    }
-
-    #[test]
     fn historical_hyphenated_schema_is_rejected() {
         let manifest = br#"{"project":"KV-SHEI","product":"M-SLIM","technical_namespace":"mslim","schema":"mslim.local-release/v1","build_input_digest":"0000000000000000000000000000000000000000000000000000000000000000","artifacts":[]}"#;
         assert!(parse_manifest(manifest).is_err());
@@ -229,6 +220,12 @@ mod tests {
     #[test]
     fn identity_free_v1_release_schema_is_rejected() {
         let manifest = br#"{"project":"KV-SHEI","product":"M-SLIM","technical_namespace":"mslim","schema":"mslim.local_release/v1","build_input_digest":"0000000000000000000000000000000000000000000000000000000000000000","artifacts":[]}"#;
+        assert!(parse_manifest(manifest).is_err());
+    }
+
+    #[test]
+    fn gateway_rename_invalidates_v2_release_manifests() {
+        let manifest = br#"{"project":"KV-SHEI","product":"M-SLIM","technical_namespace":"mslim","schema":"mslim.local_release/v2","build_input_digest":"0000000000000000000000000000000000000000000000000000000000000000","artifacts":[]}"#;
         assert!(parse_manifest(manifest).is_err());
     }
 }

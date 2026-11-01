@@ -1,5 +1,18 @@
 # Validación de calibración adaptativa — 31 de octubre de 2026
 
+> Evidencia histórica: este documento registra una ejecución fechada y no
+> certifica el `HEAD`, los binarios instalados ni el runtime residente actual.
+
+```mermaid
+flowchart LR
+    S[Commit congelado] --> T[Suites automáticas]
+    T --> M[Campaña física shadow]
+    M --> C[Canary con muestras nuevas]
+    C --> P[Promoción aislada]
+    P --> H[Registro histórico fechado]
+    H -. no certifica .-> A[Runtime actual]
+```
+
 ## Fuente y alcance
 
 Código probado: `eb1a51d5a990511afdb9ea18ee00f752c46f7d7f`. Rama: `feat/adaptive-calibration-rls`.

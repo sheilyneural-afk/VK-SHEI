@@ -6,17 +6,31 @@ product: M-SLIM
 technical_namespace: mslim
 ```
 
-El nombre del directorio es `local-production`, pero su existencia no demuestra
-que haya una release instalada ni un servicio activo. Este árbol aísla modelos,
-binarios, estado, recibos y compilación dentro del proyecto.
+`deploy/local-production` es una ruta persistente conservada por compatibilidad
+con instalaciones y recibos existentes; no es una declaración del estado del
+servicio. El entorno se identifica como `local-runtime`. Este árbol aísla
+modelos, binarios, estado, recibos y compilación dentro del proyecto.
 
 ## Qué demuestra cada capa
+
+```mermaid
+flowchart LR
+    S[Fuente limpia] --> B[build-release]
+    B --> V[verify-release]
+    V --> E[Recibos y matriz]
+    E --> R[/ready]
+    R --> G[Gateway autenticado]
+    G --> X[E2E con reinicio total]
+```
+
+El desarrollo completo de este flujo está en
+[`../../docs/ARCHITECTURE_FLOWS.md`](../../docs/ARCHITECTURE_FLOWS.md).
 
 El contenido de `runtime/` es local, mutable e ignorado por Git. Su mera
 existencia no demuestra el estado del commit ni el de un proceso residente.
 
 - `build-release.sh` demuestra que ambos binarios se construyeron sin que
-  cambiaran los inputs y deja sus hashes en `mslim.local_release/v2`.
+  cambiaran los inputs y deja sus hashes en `mslim.local_release/v3`.
 - `verify-release.sh` demuestra estructura, rutas, permisos y coincidencia de
   hashes de fuente, binarios y bundle en el instante de la comprobación.
 - `mslim.validation_receipt/v2`, `mslim.validation-matrix/v2` y
@@ -152,7 +166,7 @@ los inputs de compilación y comprueba el contenido completo del modelo:
 deploy/local-production/scripts/build-release.sh
 ```
 
-El script escribe `mslim.local_release/v2`, actualiza únicamente los tres
+El script escribe `mslim.local_release/v3`, actualiza únicamente los tres
 digests efectivos del entorno y ejecuta `verify-release.sh`. El digest del
 modelo usa el mismo dominio (ruta relativa + NUL + bytes + NUL) que los
 importadores; no es un hash de la lista de nombres. `MSLIM_GATEWAY_TOKEN` es
@@ -186,7 +200,7 @@ descarte. Un valor positivo no está autorizado por la matriz actual.
 El script comprueba:
 
 - que existen `local-production.env` y `manifest.json`;
-- que `manifest.json` usa `mslim.local_release/v2` y que sus rutas y hashes de
+- que `manifest.json` usa `mslim.local_release/v3` y que sus rutas y hashes de
   binarios y modelo coinciden con la configuración efectiva;
 - que la cabecera declara `KV-SHEI` / `M-SLIM` / `mslim` y que
   `build_input_digest` coincide con código, manifests, lockfiles, toolchain,
@@ -195,7 +209,7 @@ El script comprueba:
 - que `MSLIM_ENABLE_LOD` es `true` o `false`;
 - que `MSLIM_COLDSTORE_FORMAT` es `TSKVPG04`;
 - que las rutas configuradas permanecen dentro del proyecto;
-- que existen y son ejecutables `mslim-server` y
+- que existen y son ejecutables `mslim-gateway` y
   `mslim-runtime-worker`;
 - que sus SHA-256 coinciden con las variables del entorno;
 - que el digest de contenido del bundle coincide con el nombre de su directorio;
@@ -313,6 +327,6 @@ conservado por la ejecución.
   E2E.
 - Los recibos locales están ignorados por Git; para reproducibilidad hay que
   conservar su hash y la identidad exacta del árbol que los produjo.
-- La matriz actual no incluye esa identidad del árbol; debe añadirse a futuros
-  recibos o conservarse externamente junto a ellos.
+- La matriz v2 incluye `source_revision` y los consumidores exigen que coincida
+  con el binario creado desde un árbol limpio.
 - Los nuevos recibos deben usar únicamente el contrato `mslim.*` vigente.

@@ -138,7 +138,7 @@ fn main() -> Result<()> {
             "--gpu-exact-fused-attention" => {
                 exact_hot_fused = true;
             }
-            "--gpu-exact-original-attention" => {
+            "--gpu-exact-reference-attention" => {
                 exact_hot_fused = false;
             }
             "--gpu-unfused-decode" => {
@@ -219,7 +219,7 @@ fn main() -> Result<()> {
                 println!(
                     "--attention-kernel-json JSON [--allow-experimental-attention]: optional strict_tiled or online_experimental/split_kv_experimental; reference is default"
                 );
-                println!("M-SLIM BF16 Rust/GPU full LLM inference, experimental");
+                println!("M-SLIM BF16 accelerator runtime");
                 println!(
                     "Usage: mslim-runtime-cli [--model dir] [--prompt Hola | --ids 1,2,3] [--max-new-tokens 1] [--max-context-tokens 128] [--resident|--stream-weights] [--load-only] [--verify-weights] [--logits] [--thinking] [--gpu-lod] [--lod-epsilon 0] [--lod-stage 64] [--gpu-dense-kv] [--gpu-prefill-batch 128|--gpu-prefill-fallback] [--prefill-profile PATH]"
                 );

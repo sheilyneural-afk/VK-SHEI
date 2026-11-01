@@ -63,7 +63,7 @@ def main() -> None:
     require_sha256("model_digest", arguments.model_digest)
     root = arguments.root.resolve()
     runtime = root / "deploy/local-production/runtime"
-    gateway = runtime / "bin/mslim-server"
+    gateway = runtime / "bin/mslim-gateway"
     worker = runtime / "bin/mslim-runtime-worker"
     model = runtime / "models" / arguments.model_digest
     for binary in (gateway, worker):
@@ -77,9 +77,9 @@ def main() -> None:
         "project": "KV-SHEI",
         "product": "M-SLIM",
         "technical_namespace": "mslim",
-        "schema": "mslim.local_release/v2",
+        "schema": "mslim.local_release/v3",
         "build_input_digest": arguments.build_input_digest,
-        "binary": {"path": "runtime/bin/mslim-server", "sha256": gateway_digest},
+        "binary": {"path": "runtime/bin/mslim-gateway", "sha256": gateway_digest},
         "worker_binary": {
             "path": "runtime/bin/mslim-runtime-worker",
             "sha256": worker_digest,

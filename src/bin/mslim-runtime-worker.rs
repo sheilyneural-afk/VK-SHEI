@@ -2,7 +2,7 @@
 //! Local model runtime worker behind the backend-neutral M-SLIM gateway.
 //! This worker is an independent local runtime behind the M-SLIM gateway.
 //! No PyTorch or LibTorch needed: Rust + local runtime executes all transformer
-//! neural arithmetic, retaining original BF16 weights and BF16 KV in device RAM.
+//! model arithmetic, retaining source BF16 weights and BF16 K/V in device RAM.
 
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
@@ -1148,7 +1148,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "device":state.gpu_device,
         "weight_mode":state.weight_mode,
         "load_seconds":state.load_seconds,
-        "model_weights":"original_BF16_unchanged",
+        "model_weights":"source-bf16-unchanged",
         "device_matrix_arithmetic":"measured-device-kernels-with-declared-precision",
         "full_llm_layers_computed_on_gpu": if state.runtime_manifest.is_some() { Value::Null } else { json!(true) },
         "mslim_lod_active":state.lod_epsilon.is_some(),
@@ -1160,7 +1160,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "gpu_micro_axis_warmup":state.gpu_micro_axis_warmup,
         "gpu_micro_axis_open_safety_fuse":state.gpu_micro_axis_safety_fuse,
         "gpu_micro_metadata_region_pruning_active":state.lod_epsilon.is_some_and(|e|e>0.0),
-        "gpu_micro_metadata_regions":"original CPU ParallelContextAxis communicating_dimensions and 4-bit LSH; original BF16 K bounding boxes and conservative omitted-mass certificate",
+        "gpu_micro_metadata_regions":"CPU ParallelContextAxis communicating_dimensions and 4-bit LSH; source BF16 K bounding boxes and conservative omitted-mass certificate",
         "gpu_micro_epsilon_zero":"disabled: all BF16 K/V retained with exact scores",
         "gpu_lod_stage_tokens":state.lod_stage,
         "gpu_kv_capacity_bytes":state.gpu_kv_capacity_bytes,
@@ -1169,10 +1169,10 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "gpu_hot_v_capacity_tokens":state.gpu_hot_v_capacity_tokens,
         "gpu_verified_prompt_replay_max_tokens":state.gpu_verified_prompt_replay_max_tokens,
         "gpu_verified_shared_prefix_enabled":state.gpu_verified_shared_prefix_enabled,
-        "gpu_verified_shared_prefix_policy":"enabled when exact canonical KV is configured: identical tokenizer-ID prefix, SHA256 original BF16 K/V, CPU ColdStore/4-bit index restored; only the causal suffix is physically executed",
-        "gpu_verified_prompt_replay_policy":"bounded RAM-only exact replay: identical tokenizer IDs and SHA256 original BF16 K/V required before ColdStore/four-bit rehydration; mismatches recompute full prefill",
+        "gpu_verified_shared_prefix_policy":"enabled when authoritative exact K/V is configured: identical tokenizer-ID prefix, SHA256 source BF16 K/V, CPU ColdStore/4-bit index restored; only the causal suffix is physically executed",
+        "gpu_verified_prompt_replay_policy":"bounded RAM-only exact replay: identical tokenizer IDs and SHA256 source BF16 K/V required before ColdStore/four-bit rehydration; mismatches recompute full prefill",
         "gpu_micro_hot_v_capacity_tokens":state.gpu_micro_hot_v_capacity_tokens,
-        "gpu_micro_hot_policy":"Optional positive epsilon only: GPU resident BF16 V and cached certified token IDs, original CPU ColdStore BF16 commits preserved; full BF16 GPU fallback when no K-region certificate",
+        "gpu_micro_hot_policy":"Optional positive epsilon only: GPU-resident BF16 V and cached certified token IDs, authoritative CPU ColdStore commits preserved; full BF16 GPU fallback when no K-region certificate",
         "gpu_decode_unroll4":state.gpu_decode_unroll4,
         "gpu_deferred_cold_enabled":state.gpu_deferred_cold_enabled,
         "gpu_decode_fused_kernels":state.gpu_decode_fused_kernels,
@@ -1270,8 +1270,8 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_micro_axis_warmup":state.gpu_micro_axis_warmup,
         "gpu_micro_axis_open_safety_fuse":state.gpu_micro_axis_safety_fuse,
         "micro_metadata_sparse_qk_opt_in":state.lod_epsilon.is_some_and(|e|e>0.0),
-        "micro_metadata_scope":"original CPU 4bit/LSH and communicating_dimensions prioritize CPU semantic regions. BF16 K min/max and omitted softmax mass bound certify possible QK/V avoidance. Ambiguous boxes fall back to original full GPU QK and ColdStore. Exact epsilon=0 never prunes",
-        "micro_metadata_memory":"Bounded 512 regions per layer, disables sparse metadata on fragmentation; exact K/V always in original BF16 storage",
+        "micro_metadata_scope":"CPU 4-bit/LSH and communicating_dimensions prioritize indexed regions. BF16 K min/max and omitted-softmax-mass bounds certify possible QK/V avoidance. Ambiguous boxes use full GPU QK and ColdStore. Exact epsilon=0 never prunes",
+        "micro_metadata_memory":"Bounded to 512 regions per layer; sparse metadata is disabled on fragmentation; exact K/V remains in authoritative BF16 storage",
         "gpu_region_stage_tokens":state.lod_stage,
         "gpu_kv_capacity_bytes":state.gpu_kv_capacity_bytes,
         "gpu_prefill_batch_tokens":state.gpu_prefill_batch_tokens,
@@ -1279,22 +1279,22 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "gpu_hot_v_capacity_tokens":state.gpu_hot_v_capacity_tokens,
         "gpu_verified_prompt_replay_max_tokens":state.gpu_verified_prompt_replay_max_tokens,
         "gpu_verified_shared_prefix_enabled":state.gpu_verified_shared_prefix_enabled,
-        "gpu_verified_shared_prefix_policy":"enabled when exact canonical KV is configured: identical tokenizer-ID prefix, SHA256 original BF16 K/V, CPU ColdStore/4-bit index restored; only the causal suffix is physically executed",
-        "gpu_verified_prompt_replay_policy":"bounded RAM-only exact replay: identical tokenizer IDs and SHA256 original BF16 K/V required before ColdStore/four-bit rehydration; mismatches recompute full prefill",
+        "gpu_verified_shared_prefix_policy":"enabled when authoritative exact K/V is configured: identical tokenizer-ID prefix, SHA256 source BF16 K/V, CPU ColdStore/4-bit index restored; only the causal suffix is physically executed",
+        "gpu_verified_prompt_replay_policy":"bounded RAM-only exact replay: identical tokenizer IDs and SHA256 source BF16 K/V required before ColdStore/four-bit rehydration; mismatches recompute full prefill",
         "gpu_micro_hot_v_capacity_tokens":state.gpu_micro_hot_v_capacity_tokens,
-        "gpu_micro_hot_policy":"Optional positive epsilon only: GPU resident BF16 V and cached certified token IDs, original CPU ColdStore BF16 commits preserved; full BF16 GPU fallback when no K-region certificate",
+        "gpu_micro_hot_policy":"Optional positive epsilon only: GPU-resident BF16 V and cached certified token IDs, authoritative CPU ColdStore commits preserved; full BF16 GPU fallback when no K-region certificate",
         "gpu_decode_unroll4":state.gpu_decode_unroll4,
         "gpu_deferred_cold_enabled":state.gpu_deferred_cold_enabled,
         "gpu_decode_fused_kernels":state.gpu_decode_fused_kernels,
         "gpu_exact_hot_fused_attention":state.gpu_exact_hot_fused_attention,
         "gpu_exact_hot_fused_scope":"Single exact QK-softmax-PV BF16 GPU kernel over ALL K/V, cold store and CPU unchanged, opt-in with hot V <=2048",
-        "gpu_deferred_cold_policy":"exact BF16 K/V from GPU committed to original CPU ColdStore BEFORE response, only for epsilon zero and whole turn within bounded hot V",
-        "gpu_hot_v_policy":"Canonical ColdStore V exact always; bounded BF16 hot tier only at epsilon=0",
-        "gpu_prefill_cold_pages":"batched up to 64 BF16 tokens/page using original ColdStore",
+        "gpu_deferred_cold_policy":"exact BF16 K/V from GPU committed to authoritative CPU ColdStore before response, only for epsilon zero and a complete turn within bounded hot V",
+        "gpu_hot_v_policy":"authoritative exact ColdStore V; bounded BF16 hot tier only at epsilon=0",
+        "gpu_prefill_cold_pages":"batched up to 64 BF16 tokens/page using ColdStore",
         "gpu_prefill_temporary_v_residency":"released after cold seal; no permanent extra GPU V cache",
-         "gpu_region_scope":"hierarchical best-first Grid/Chunk/Page selection over original CPU index/LSH and micro-links; ColdStore and conservative BF16-box omitted-mass certificates authorize positive-epsilon pruning; exact epsilon=0 remains dense",
+         "gpu_region_scope":"hierarchical best-first Grid/Chunk/Page selection over the CPU index/LSH and micro-links; ColdStore and conservative BF16-box omitted-mass certificates authorize positive-epsilon pruning; exact epsilon=0 remains dense",
         "validation_matrix":validation,
-        "server_backend":backend,
+        "runtime_backend":backend,
         "max_context_tokens":state.max_context_tokens,
         "max_output_tokens":512,
         "API":{"OpenAI_compatible_subset":true,"stream":false,
@@ -1547,7 +1547,7 @@ async fn main() -> Result<()> {
             "--gpu-decode-unroll4" => {
                 decode_unroll4 = true;
             }
-            "--gpu-decode-original" => {
+            "--gpu-decode-reference" => {
                 decode_unroll4 = false;
             }
             "--gpu-deferred-cold" => {
@@ -1562,13 +1562,13 @@ async fn main() -> Result<()> {
             "--gpu-exact-fused-attention" => {
                 exact_hot_fused = true;
             }
-            "--gpu-exact-original-attention" => {
+            "--gpu-exact-reference-attention" => {
                 exact_hot_fused = false;
             }
             "--gpu-fused-prefill-projections" => {
                 prefill_fuse_projections = true;
             }
-            "--gpu-original-prefill-projections" => {
+            "--gpu-reference-prefill-projections" => {
                 prefill_fuse_projections = false;
             }
             "--gpu-unfused-decode" => {
@@ -1615,7 +1615,7 @@ async fn main() -> Result<()> {
             "--help" | "-h" => {
                 println!("M-SLIM local runtime worker (local model runtime)");
                 println!(
-                    "--model DIR --host 127.0.0.1 --port 8188 --max-context-tokens 2048 --timeout-secs 300 --resident|--stream-weights --gpu-lod|--gpu-dense-kv --lod-epsilon 0 --lod-stage 64 --gpu-prefill-batch 128|--gpu-prefill-fallback --gpu-prefill-weight-reuse 8 --gpu-fused-prefill-projections|--gpu-original-prefill-projections --prefill-profile PATH --gpu-hot-v-tokens 512 --gpu-decode-unroll4|--gpu-decode-original --gpu-deferred-cold|--gpu-immediate-cold --gpu-fused-decode|--gpu-unfused-decode"
+                    "--model DIR --host 127.0.0.1 --port 8188 --max-context-tokens 2048 --timeout-secs 300 --resident|--stream-weights --gpu-lod|--gpu-dense-kv --lod-epsilon 0 --lod-stage 64 --gpu-prefill-batch 128|--gpu-prefill-fallback --gpu-prefill-weight-reuse 8 --gpu-fused-prefill-projections|--gpu-reference-prefill-projections --prefill-profile PATH --gpu-hot-v-tokens 512 --gpu-decode-unroll4|--gpu-decode-reference --gpu-deferred-cold|--gpu-immediate-cold --gpu-fused-decode|--gpu-unfused-decode"
                 );
                 println!(
                     "No direct authentication: bind loopback only; use the authenticated gateway for clients."

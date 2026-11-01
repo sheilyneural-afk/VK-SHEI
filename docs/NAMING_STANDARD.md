@@ -6,6 +6,18 @@ product: M-SLIM
 technical_namespace: mslim
 ```
 
+```mermaid
+flowchart TB
+    R[KV-SHEI: repositorio] --> P[M-SLIM: producto visible]
+    P --> N[mslim: namespace técnico]
+    N --> C[mslim.*: schemas]
+    N --> E[MSLIM_*: entorno]
+    N --> B[mslim-*: binarios y rutas]
+```
+
+Estos niveles son deliberados: cambiar un identificador persistente requiere
+versionado y migración de consumidores, no una sustitución estética.
+
 ## Decisión de identidad
 
 El proyecto tiene tres niveles de identidad y no deben mezclarse:

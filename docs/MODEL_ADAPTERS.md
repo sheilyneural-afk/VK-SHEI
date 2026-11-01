@@ -2,6 +2,18 @@
 
 ## Contrato
 
+```mermaid
+stateDiagram-v2
+    [*] --> Declarado
+    Declarado --> Inspeccionado: inspect(bundle)
+    Inspeccionado --> Cargado: load
+    Cargado --> SesionActiva: prefill
+    SesionActiva --> SesionActiva: decode
+    SesionActiva --> Snapshot: snapshot_kv
+    Snapshot --> SesionActiva: restore_kv
+    SesionActiva --> Cargado: reset_session
+```
+
 El contrato ejecutable vive en `crates/mslim-adapter-api`. `ModelAdapter`
 separa el núcleo de una implementación física y define estas operaciones:
 

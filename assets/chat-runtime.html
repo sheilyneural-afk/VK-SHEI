@@ -58,11 +58,11 @@
       </header>
       <div id="log"></div>
       <footer>
-        <textarea id="input" placeholder="El texto va tal cual al modelo: pega el libro, luego pregunta. Historial ON."></textarea>
+        <textarea id="input" placeholder="Escriba un mensaje o proporcione el contenido que desea consultar."></textarea>
         <div class="row">
           <button id="send" type="button">Enviar</button>
           <button id="stop" class="ghost" type="button" hidden>Cancelar</button>
-          <button id="clear" class="ghost" type="button">Vaciar</button>
+          <button id="clear" class="ghost" type="button">Limpiar conversación</button>
         </div>
       </footer>
     </main>
@@ -80,7 +80,7 @@
       </label>
       <label class="check" for="thinking">
         <input id="thinking" type="checkbox" />
-        Cadena de pensamiento
+        Modo de razonamiento del modelo
       </label>
       <h2>Última respuesta</h2>
       <dl id="metrics"></dl>
@@ -125,12 +125,13 @@
         try {
           const response = await fetch("/health");
           const data = await response.json();
-          status.textContent = data.model + " · denso BF16";
+          status.textContent = data.model + " · " + data.running_backend;
           status.className = "ok";
           fillDl(engine, [
             ["modelo", data.model],
-            ["atención", "dense_bf16"],
-            ["rewrites", "ninguno"],
+            ["backend", data.running_backend],
+            ["dispositivo", data.device || "no informado"],
+            ["modo de pesos", data.weight_mode || "no informado"],
           ]);
         } catch (error) {
           status.textContent = "motor no disponible";

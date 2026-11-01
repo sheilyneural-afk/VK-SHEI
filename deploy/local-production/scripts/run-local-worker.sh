@@ -56,7 +56,7 @@ fi
   profile_args+=(--gpu-no-shared-prefix)
 [ "${MSLIM_DECODE_UNROLL4:-false}" = "true" ] &&
   profile_args+=(--gpu-decode-unroll4) ||
-  profile_args+=(--gpu-decode-original)
+  profile_args+=(--gpu-decode-reference)
 [ "${MSLIM_DEFERRED_COLD:-false}" = "true" ] &&
   profile_args+=(--gpu-deferred-cold) ||
   profile_args+=(--gpu-immediate-cold)
@@ -65,10 +65,10 @@ fi
   profile_args+=(--gpu-unfused-decode)
 [ "${MSLIM_EXACT_HOT_FUSED_ATTENTION:-false}" = "true" ] &&
   profile_args+=(--gpu-exact-fused-attention) ||
-  profile_args+=(--gpu-exact-original-attention)
+  profile_args+=(--gpu-exact-reference-attention)
 [ "${MSLIM_PREFILL_FUSE_PROJECTIONS:-false}" = "true" ] &&
   profile_args+=(--gpu-fused-prefill-projections) ||
-  profile_args+=(--gpu-original-prefill-projections)
+  profile_args+=(--gpu-reference-prefill-projections)
 
 exec "$binary" \
   --model "$model_dir" \

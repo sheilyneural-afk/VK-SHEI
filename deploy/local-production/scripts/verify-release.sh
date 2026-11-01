@@ -37,9 +37,9 @@ expected_model_path = f"runtime/models/{model_digest}"
 assert manifest.get("project") == "KV-SHEI"
 assert manifest.get("product") == "M-SLIM"
 assert manifest.get("technical_namespace") == "mslim"
-assert manifest.get("schema") == "mslim.local_release/v2"
+assert manifest.get("schema") == "mslim.local_release/v3"
 assert manifest.get("build_input_digest") == build_input_digest
-assert manifest.get("binary", {}).get("path") == "runtime/bin/mslim-server"
+assert manifest.get("binary", {}).get("path") == "runtime/bin/mslim-gateway"
 assert manifest.get("binary", {}).get("sha256") == binary_digest
 assert manifest.get("worker_binary", {}).get("path") == "runtime/bin/mslim-runtime-worker"
 assert manifest.get("worker_binary", {}).get("sha256") == worker_digest
@@ -67,7 +67,7 @@ for value in "${MSLIM_MODEL_DIR:-}" "${MSLIM_COLDSTORE_DIR:-}" "${MSLIM_RECEIPTS
   is_inside_project "$path" || fail "path escapes project: $path"
 done
 
-binary="$runtime/bin/mslim-server"
+binary="$runtime/bin/mslim-gateway"
 worker_binary="$runtime/bin/mslim-runtime-worker"
 [ -f "$binary" ] || fail "missing binary: $binary"
 [ -x "$binary" ] || fail "binary is not executable: $binary"

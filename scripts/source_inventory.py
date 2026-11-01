@@ -157,8 +157,8 @@ def area_for(rel: str) -> str:
         return "gpu_inference"
     if rel.startswith("src/torch_runtime/"):
         return "torch_inference"
-    if rel.startswith("src/sheily_port/"):
-        return "test_only_sheily_port_inspiration"
+    if rel.startswith("src/design_reference_tests/"):
+        return "test_only_design_references"
     if rel.startswith("crates/mslim-adapter-api/"):
         return "adapter_contract"
     if rel.startswith("tests/"):

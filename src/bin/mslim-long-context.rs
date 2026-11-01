@@ -23,7 +23,7 @@ fn main() -> Result<()> {
     let mut reference_speculative = false;
     let mut reference_speculative_cold = false;
     let mut apply_omission_tolerance = None;
-    let mut prefix_reuse_demo = false;
+    let mut prefix_reuse_validation = false;
     let mut it = std::env::args().skip(1);
     while let Some(argument) = it.next() {
         match argument.as_str() {
@@ -73,7 +73,7 @@ fn main() -> Result<()> {
                         .parse::<f64>()?,
                 )
             }
-            "--prefix-reuse-demo" => prefix_reuse_demo = true,
+            "--prefix-reuse-validation" => prefix_reuse_validation = true,
             other => bail!("argumento desconocido: {other}"),
         }
     }
@@ -82,14 +82,16 @@ fn main() -> Result<()> {
     }
     let model_path = model.context("--model es obligatorio")?;
     let load_started = Instant::now();
-    let prefix_dir = prefix_reuse_demo.then(tempfile::tempdir).transpose()?;
+    let prefix_dir = prefix_reuse_validation
+        .then(tempfile::tempdir)
+        .transpose()?;
     let runtime = if let Some(dir) = &prefix_dir {
         TorchModelRuntime::load_with_prefix_cache(&model_path, dir.path())?
     } else {
         TorchModelRuntime::load(&model_path)?
     };
     let load_seconds = load_started.elapsed().as_secs_f64();
-    if prefix_reuse_demo {
+    if prefix_reuse_validation {
         use mslim::torch_runtime::TorchChatMessage;
         let system =
             "Conserva este dato: la clave secreta verificable es AZULEJO-7319. ".repeat(40);

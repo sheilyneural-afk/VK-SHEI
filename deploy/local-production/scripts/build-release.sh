@@ -29,7 +29,7 @@ build_input_digest_before=$(python3 "$root/scripts/source_inventory.py" --print-
 "$root/deploy/local-production/scripts/cargo-local.sh" build --locked --release \
   --bin mslim-runtime-worker --features accelerator-backend
 "$root/deploy/local-production/scripts/cargo-local.sh" build --locked --release \
-  --bin mslim-server --features unified-router
+  --bin mslim-gateway --features unified-router
 
 build_input_digest=$(python3 "$root/scripts/source_inventory.py" --print-build-input-digest)
 [ "$build_input_digest" = "$build_input_digest_before" ] || {
@@ -42,9 +42,9 @@ build_input_digest=$(python3 "$root/scripts/source_inventory.py" --print-build-i
 # atomic after that gate has passed.
 mkdir -p "$runtime/bin"
 install -m 0755 "$runtime/build-target/release/mslim-runtime-worker" "$runtime/bin/.mslim-runtime-worker.new"
-install -m 0755 "$runtime/build-target/release/mslim-server" "$runtime/bin/.mslim-server.new"
+install -m 0755 "$runtime/build-target/release/mslim-gateway" "$runtime/bin/.mslim-gateway.new"
 mv -f "$runtime/bin/.mslim-runtime-worker.new" "$runtime/bin/mslim-runtime-worker"
-mv -f "$runtime/bin/.mslim-server.new" "$runtime/bin/mslim-server"
+mv -f "$runtime/bin/.mslim-gateway.new" "$runtime/bin/mslim-gateway"
 
 python3 "$root/scripts/write-local-release.py" \
   --root "$root" \

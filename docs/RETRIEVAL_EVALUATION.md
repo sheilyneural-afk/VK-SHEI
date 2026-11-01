@@ -7,6 +7,22 @@
   (`fused_retrieval`, `page_fusion`). Cada página admitida se verifica contra el
   SHA-256 de su texto original.
 
+```mermaid
+flowchart LR
+    Q[Pregunta] --> R[Routing determinista]
+    Q --> T[Raíces + BM25]
+    T -->|expansion-terms > 0| P[Pseudo-relevancia opcional]
+    R --> F[Fusión RRF]
+    T --> F
+    P --> F
+    F --> V[Verificar SHA-256 de páginas]
+    V --> O[Ranking con evidencia original]
+```
+
+La rama de pseudo-relevancia está implementada, pero permanece desactivada por
+defecto porque la evaluación no mostró una mejora estable. Ningún índice
+derivado sustituye el texto original verificado.
+
 ## Resultado medido
 
 Se midió con el binario real. El modo por defecto no cambia: no hay evidencia de

@@ -2,6 +2,17 @@
 
 ## Alcance y propietarios
 
+```mermaid
+flowchart LR
+    B[Configuración base] --> P[Predictor ordena candidatos]
+    P --> S[Shadow físico]
+    S -->|pasa| C[Canary con muestras nuevas]
+    S -->|falla| R[Rechazo]
+    C -->|pasa + autoridad| A[Promoción atómica]
+    C -->|falla| V[Reversión]
+    A --> L[Carga por identidad y cobertura]
+```
+
 Esta ampliación ayuda al calibrador existente; no introduce otro planificador,
 almacén de memoria, sistema de sesiones ni autoridad de activación.
 

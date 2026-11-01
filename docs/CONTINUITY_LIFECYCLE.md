@@ -53,6 +53,17 @@ colisionen.
 
 ## Máquina de estados
 
+```mermaid
+stateDiagram-v2
+    [*] --> Ausente
+    Ausente --> Activo0: snapshot(gen 0)
+    Activo0 --> ActivoN: snapshot(gen esperada)
+    ActivoN --> ActivoN: resume(identidad y límites válidos)
+    Activo0 --> Liberado: release
+    ActivoN --> Liberado: release
+    Liberado --> Rechazado: snapshot / resume / release
+```
+
 | Estado actual | Operación aceptada | Condición principal | Estado resultante |
 |---|---|---|---|
 | ausente | `snapshot` | generación esperada `0` | activo, generación `0` |
@@ -107,10 +118,14 @@ físico.
 
 1. genera K/V en un runtime externo;
 2. crea el snapshot explícito;
-3. reinicia el worker sin reiniciar el proveedor;
-4. restaura la generación durable y comprueba tokens y bytes físicos;
-5. libera la sesión y crea una generación nueva con lápida;
-6. prueba que esa generación liberada ya no puede restaurarse.
+3. detiene tanto el worker como el proveedor;
+4. arranca procesos nuevos y restaura desde el ColdStore persistido;
+5. comprueba la generación durable, los tokens y los bytes físicos;
+6. libera la sesión y crea una generación nueva con lápida;
+7. prueba que esa generación liberada ya no puede restaurarse.
+
+El diagrama de secuencia completo está en
+[ARCHITECTURE_FLOWS.md](ARCHITECTURE_FLOWS.md#4-continuidad-tras-reinicio-total).
 
 Las pruebas unitarias demuestran además que los namespaces automáticos y
 explícitos son deterministas, internos y separados por dominio, y que estados

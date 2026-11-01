@@ -3,6 +3,20 @@
 Lo que se decidió no hacer todavía, con el motivo. Ninguno de estos puntos está
 resuelto en el árbol actual.
 
+```mermaid
+flowchart LR
+    I[Necesidad confirmada] --> D{¿Contrato decidido?}
+    D -->|no| P[Decisión de producto pendiente]
+    D -->|sí| E{¿Evidencia y autoridad disponibles?}
+    E -->|no| A[Aplazado con motivo]
+    E -->|sí| T[Implementar y verificar]
+    T --> C[Retirar de este documento]
+```
+
+Este archivo contiene únicamente trabajo no cerrado. Una capacidad ya
+implementada se describe en su documento operativo y aquí permanece solo la
+parte que todavía carece de contrato o evidencia.
+
 ## Partir los archivos gigantes
 
 `src/gpu_llm/mod.rs` (unas 5.200 líneas) y `src/torch_runtime/kv_cache.rs`
@@ -26,11 +40,14 @@ Es una configuración del repositorio en GitHub, no de código. Debe exigir que
 pase el job `core` del CI (que ejecuta `scripts/check.sh`) antes de fusionar.
 Hasta entonces, el hook local `scripts/install-hooks.sh` es la única barrera.
 
-## Canal de sinónimos en la recuperación documental
+## Semántica real en la recuperación documental
 
-La medición de `docs/RETRIEVAL_EVALUATION.md` muestra que `routing` y `fused`
-fallan cuando la pregunta y el documento usan palabras distintas para lo mismo.
-Queda por implementar una expansión de consulta sin latencia añadida (raíces de
-palabras y retroalimentación de pseudo-relevancia, derivadas solo del propio
-documento) y medirla con las mismas 36 preguntas etiquetadas. Los embeddings
-requerirían un modelo propio del proyecto, que hoy no existe.
+El canal por raíces y la retroalimentación de pseudo-relevancia ya existen y
+están medidos en `docs/RETRIEVAL_EVALUATION.md`. Las raíces mejoran flexiones,
+pero no relacionan sinónimos reales como "tarjeta gráfica" y "GPU"; la
+retroalimentación permanece desactivada porque no mejoró de forma estable.
+
+Queda por diseñar y medir un canal semántico con un modelo propio o un
+diccionario versionado, sin convertir texto derivado en autoridad ni introducir
+una dependencia de red. Antes de activarlo necesita un conjunto etiquetado más
+amplio, medidas de latencia y una política explícita de fallback.

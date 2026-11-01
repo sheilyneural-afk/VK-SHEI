@@ -14,23 +14,30 @@ Esta documentación describe el código y las pruebas que existen en el árbol
 actual. No utiliza “producción”, “exacto” o “certificado” como sinónimos de
 “compila” o “tiene tests”. Cada afirmación indica el alcance de la evidencia.
 
-## Estado actual comprobado
+## Estado y evidencia
 
-La evidencia más reciente del árbol de trabajo es la matriz:
+La documentación versionada define contratos y procedimientos; no congela el
+estado mutable de esta máquina. Las matrices, calibraciones, recibos y E2E viven
+en `deploy/local-production/runtime/`, están ignorados por Git y solo son
+vigentes si enlazan la revisión fuente limpia, los binarios, el bundle y la
+configuración efectiva que se están comprobando.
 
-```text
-deploy/local-production/runtime/validation/
-validation-matrix-43e8fa4641e6f06d9df96abc4ef285556a8c714af6909b13e22e01e723d3d686.json
+```mermaid
+flowchart LR
+    S[Fuente limpia] --> B[Release verificada]
+    B --> V[Bundle + matriz + calibración]
+    V --> R[Worker /ready]
+    R --> G[Gateway autenticado]
+    G --> E[E2E y recuperación]
 ```
 
-Su SHA-256 es
-`8afd03f87d0c842788f33e86c3e45ff8343aeee974a9049e3b849a8d2d7e3344`.
-El recibo no está versionado y solo describe el bundle, el equipo y la
-configuración congelada que figuran en él. No incluye el commit ni un digest del
-árbol fuente, por lo que su hash protege el recibo pero no demuestra por sí solo
-qué revisión exacta lo produjo.
+La matriz `mslim.validation-matrix/v2` incluye `source_revision`. Los
+consumidores la rechazan si no coincide con la revisión del binario o si la
+compilación se hizo desde un árbol sucio. El mapa completo de capas, autoridad
+y fallos cerrados está en
+[`docs/ARCHITECTURE_FLOWS.md`](docs/ARCHITECTURE_FLOWS.md).
 
-Resultado observado:
+Una ejecución histórica local observó:
 
 | Comprobación | Resultado |
 |---|---|
@@ -43,7 +50,7 @@ Resultado observado:
 | Snapshot de la ruta GPU exacta | contrato físico de ColdStore reconocido |
 | CPU densa frente a GPU densa | mismos top-1 y tokens en la muestra; logits y K/V no bit-exactos |
 
-La comparación CPU/GPU es diagnóstica. En este recibo, sobre un prefill y ocho
+La comparación CPU/GPU es diagnóstica. En aquella muestra, sobre un prefill y ocho
 pasos de decode forzado, el máximo absoluto entre logits fue `0.234375`, el
 máximo KL fue `0.0004376959013237726` y el p95 absoluto máximo fue `0.0859375`.
 Estos números no son umbrales generales ni una evaluación de calidad del
@@ -83,7 +90,7 @@ Los binarios, modelos y recibos instalados viven bajo
 repositorio no atribuye al `HEAD` el estado mutable de una máquina concreta.
 `deploy/local-production/scripts/build-release.sh` construye los dos binarios
 canónicos desde una única instantánea estable de inputs, instala copias locales
-y escribe `mslim.local_release/v2`. `verify-release.sh` vuelve a calcular los
+y escribe `mslim.local_release/v3`. `verify-release.sh` vuelve a calcular los
 hashes de inputs, binarios y contenido del bundle antes de aceptar esa release.
 La disponibilidad de un proceso se demuestra aparte mediante `/health` y la
 aptitud para servir peticiones mediante `/ready` y un E2E autenticado.
@@ -103,7 +110,7 @@ nueva ni sustituye una certificación ejecutada desde el commit actual.
 
 ### Superficies HTTP
 
-La API de producto soportada es la del gateway `mslim-server`:
+La API de producto soportada es la del gateway `mslim-gateway`:
 `/v1/models`, `/v1/capabilities` y `/v1/chat/completions`. El endpoint
 `/v1/generate` pertenece exclusivamente a `mslim-runtime-proxy`: es un puente
 interno de tokens sobre la sesión IPC genérica para integración de runtimes y
@@ -187,9 +194,9 @@ El contrato backend-neutral permite conectar un proveedor mediante un manifest
 `prefill`, `decode`, `reset_session`, `snapshot_kv` y `restore_kv`. Si falta una,
 el arranque con runtime externo se rechaza.
 
-El script E2E disponible reinicia solo el worker y mantiene el proveedor
-residente. No existe una prueba retenida ni una prueba de reinicio simultáneo de
-worker y proveedor.
+El E2E `scripts/e2e-worker-external-restart.sh` detiene worker y proveedor,
+arranca procesos nuevos y restaura el K/V desde ColdStore y SessionStore. La
+evidencia queda en el runtime local; otro commit debe regenerarla.
 
 ### Servicio HTTP
 
@@ -213,9 +220,9 @@ bearer token y solo acepta workers en loopback. Worker y gateway exigen la misma
 matriz y calibración válidas; un manifest de runtime externo demuestra sus
 capacidades IPC, pero no sustituye esas evidencias.
 
-Cargo tiene `autobins = false` y registra `mslim-server` con
+Cargo tiene `autobins = false` y registra `mslim-gateway` con
 `src/bin/mslim-gateway.rs`. La implementación HTTP anterior que vivía en
-`src/bin/mslim-server.rs` se eliminó porque no se compilaba; sigue en el
+`src/bin/mslim-gateway.rs` se eliminó porque no se compilaba; sigue en el
 historial de git.
 
 ## Módulos principales
@@ -282,7 +289,10 @@ congelada coincide con la que se pretende ejecutar.
 
 ## Documentación
 
+- [Arquitectura y flujos verificables](docs/ARCHITECTURE_FLOWS.md)
 - [Contrato de validación](docs/VALIDATION.md)
+- [Continuidad y ciclo de vida](docs/CONTINUITY_LIFECYCLE.md)
+- [Calibración adaptativa](docs/ADAPTIVE_CALIBRATION.md)
 - [Adaptadores y selección](docs/MODEL_ADAPTERS.md)
 - [Entorno local](deploy/local-production/README.md)
 - [Perfil de prefill](docs/PREFILL_PROFILE.md)

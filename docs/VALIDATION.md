@@ -12,6 +12,18 @@ diagnóstico numérico y no sustituye la comprobación de integridad K/V.
 
 ## Matriz de cuatro rutas
 
+```mermaid
+flowchart LR
+    I[Mismos inputs] --> CH[CPU hot-dense x2]
+    I --> CC[CPU exact-coldstore x2]
+    I --> GD[GPU dense x2]
+    I --> GC[GPU exact-coldstore x2]
+    CH <-->|igualdad exacta| CC
+    GD <-->|igualdad exacta| GC
+    CH -. diagnóstico .-> GD
+    GC --> S[Snapshot físico]
+```
+
 `mslim-adapter-parity` carga el mismo bundle en cuatro configuraciones:
 
 | Identificador del recibo | Adapter | Configuración relevante |
@@ -116,6 +128,9 @@ incluye `source_revision`; los consumidores de activación exigen que sea el
 commit exacto del binario actual y que el árbol estuviera limpio al compilarlo.
 
 ## Evidencia histórica
+
+Esta sección conserva una medición fechada como contexto, no como evidencia
+vigente del `HEAD`. La evidencia actual debe regenerarse desde un árbol limpio.
 
 Una ejecución local anterior para el bundle
 `43e8fa4641e6f06d9df96abc4ef285556a8c714af6909b13e22e01e723d3d686`
