@@ -1,5 +1,11 @@
 # Estándar de nombres de KV-SHEI
 
+```yaml
+project: KV-SHEI
+product: M-SLIM
+technical_namespace: mslim
+```
+
 ## Decisión de identidad
 
 El proyecto tiene tres niveles de identidad y no deben mezclarse:

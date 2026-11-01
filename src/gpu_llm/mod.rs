@@ -221,6 +221,19 @@ pub struct SessionRestore {
     pub hot_values_restored: bool,
 }
 
+/// Receipt for forgetting token positions from a live session. `last_step` is
+/// the prefill result of the surviving prefix (logits of its last token).
+#[derive(Debug, Serialize)]
+pub struct ForgetReceipt {
+    pub project: &'static str,
+    pub product: &'static str,
+    pub technical_namespace: &'static str,
+    pub forgotten_tokens: usize,
+    pub kept_tokens: usize,
+    pub removed_superseded_pages: bool,
+    pub last_step: GpuStep,
+}
+
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1514,6 +1527,67 @@ impl GpuLlm {
         self.lod
             .as_ref()
             .and_then(|lod| lod.config().cold_directory.clone())
+    }
+
+    /// Forget specific token positions from the live causal session.
+    ///
+    /// Attention is causal: each token's K/V depends on every earlier token, so
+    /// removing a span invalidates everything after it. The operation therefore
+    /// drops the span from the token history, moves to a fresh ColdStore
+    /// namespace (this also discards the host replay snapshot), re-prefills the
+    /// surviving tokens, and only then deletes the superseded cold page file.
+    pub fn forget_session_positions(
+        &mut self,
+        positions: &std::collections::BTreeSet<usize>,
+    ) -> Result<ForgetReceipt> {
+        ensure!(!self.poisoned, "GPU runtime poisoned; restart the worker");
+        ensure!(self.position > 0, "no live session to forget");
+        let total = self.session_tokens.len();
+        ensure!(
+            positions.iter().all(|&p| p < total),
+            "forget position beyond session length"
+        );
+        let kept: Vec<u32> = self
+            .session_tokens
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !positions.contains(index))
+            .map(|(_, &token)| token)
+            .collect();
+        ensure!(
+            !kept.is_empty(),
+            "forgetting every token leaves an empty session; use reset_session"
+        );
+        let old_file = self
+            .active_cold_directory()
+            .map(|dir| dir.join("pages-exact.kv"));
+        let new_dir = self.active_cold_directory().map(|current| {
+            let root = current.parent().unwrap_or(current.as_path());
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            root.join(format!("session-forget-{}-{nonce}", std::process::id()))
+        });
+        self.reset_session_at(new_dir)?;
+        let (last_step, _) = self.prefill_only(&kept, true, &AtomicBool::new(false))?;
+        let removed_superseded_pages = match old_file {
+            Some(file) if file.exists() => {
+                fs::remove_file(&file)
+                    .with_context(|| format!("remove superseded cold pages {}", file.display()))?;
+                true
+            }
+            _ => false,
+        };
+        Ok(ForgetReceipt {
+            project: crate::project_identity::PROJECT,
+            product: crate::project_identity::PRODUCT,
+            technical_namespace: crate::project_identity::TECHNICAL_NAMESPACE,
+            forgotten_tokens: total - kept.len(),
+            kept_tokens: kept.len(),
+            removed_superseded_pages,
+            last_step,
+        })
     }
 
     /// Reset only the active causal session. The resident model weights survive.
@@ -3384,6 +3458,70 @@ mod tests {
                 15 * optimized.spec().num_hidden_layers
             );
             assert_eq!(actual.gpu_hot_v_cold_fallback_calls, 0);
+        }
+
+        #[test]
+        #[ignore = "requires physical gfx1103 Radeon and original configured-model BF16 checkpoint"]
+        fn gpu_actual_forget_span_equals_fresh_prefill_and_removes_pages() {
+            use super::*;
+            let model = std::env::var("MSLIM_TEST_MODEL")
+                .unwrap_or_else(|_| "deploy/local-production/runtime/models/active".into());
+            let tok = tokenizers::Tokenizer::from_file(
+                std::path::Path::new(&model).join("tokenizer.json"),
+            )
+            .unwrap();
+            let ids: Vec<u32> = tok
+                .encode(
+                    "<s><|im_start|>user\nResume el documento: El informe conserva códigos de referencia TEST-CODE-001 y TEST-CODE-002 para auditoría. Responde breve.<|im_end|>\n<|im_start|>assistant\n",
+                    false,
+                )
+                .unwrap()
+                .get_ids()
+                .to_vec();
+            assert!(ids.len() > 30, "prompt too short for a forget span");
+            let root = std::env::temp_dir().join(format!("mslim-forget-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            let cold = root.join("cold");
+            fs::create_dir_all(&cold).unwrap();
+            let region = || GpuRegionConfig {
+                epsilon: 0.0,
+                stage_tokens: 64,
+                cold_directory: Some(cold.clone()),
+            };
+            let mut live =
+                GpuLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, region()).unwrap();
+            live.prefill_only(&ids, false, &AtomicBool::new(false))
+                .unwrap();
+            assert_eq!(live.session_token_ids(), ids.as_slice());
+            let old_pages = cold.join("pages-exact.kv");
+            assert!(old_pages.exists());
+
+            let span: std::collections::BTreeSet<usize> = (5..12).collect();
+            let receipt = live.forget_session_positions(&span).unwrap();
+            assert_eq!(receipt.forgotten_tokens, span.len());
+            assert_eq!(receipt.kept_tokens, ids.len() - span.len());
+            assert!(receipt.removed_superseded_pages);
+            assert!(!old_pages.exists(), "superseded cold pages must be deleted");
+
+            let kept: Vec<u32> = ids
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !span.contains(i))
+                .map(|(_, &t)| t)
+                .collect();
+            assert_eq!(live.session_token_ids(), kept.as_slice());
+
+            let mut fresh =
+                GpuLlm::load_with_gpu_region(&model, 512, WeightMode::Resident, region()).unwrap();
+            let (fresh_step, _) = fresh
+                .prefill_only(&kept, true, &AtomicBool::new(false))
+                .unwrap();
+            assert_eq!(receipt.last_step.argmax_token, fresh_step.argmax_token);
+            assert_eq!(
+                receipt.last_step.logits, fresh_step.logits,
+                "logits after forgetting differ from a fresh prefill of the surviving tokens"
+            );
+            let _ = fs::remove_dir_all(&root);
         }
 
         #[test]

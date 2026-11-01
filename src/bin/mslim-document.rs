@@ -22,6 +22,9 @@ struct InputPage {
 
 #[derive(Debug, Serialize)]
 struct BuildReceipt {
+    project: &'static str,
+    product: &'static str,
+    technical_namespace: &'static str,
     operation: &'static str,
     document_id: String,
     version_hash: String,
@@ -109,6 +112,9 @@ fn build_text(arguments: Vec<String>) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&BuildReceipt {
+            project: mslim::project_identity::PROJECT,
+            product: mslim::project_identity::PRODUCT,
+            technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE,
             operation: "document_graph_build_text",
             document_id,
             version_hash,
@@ -156,6 +162,9 @@ fn build(arguments: Vec<String>) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&BuildReceipt {
+            project: mslim::project_identity::PROJECT,
+            product: mslim::project_identity::PRODUCT,
+            technical_namespace: mslim::project_identity::TECHNICAL_NAMESPACE,
             operation: "document_graph_build",
             document_id,
             version_hash,
