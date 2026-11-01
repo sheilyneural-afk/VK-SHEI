@@ -287,8 +287,8 @@ snapshot físico GPU. CPU/GPU se conserva como diagnóstico. Consulte
 ## E2E con proveedor externo
 
 `scripts/e2e-worker-external-restart.sh` compila y arranca un proveedor y un
-worker, genera un token, crea un snapshot, reinicia únicamente el worker y
-restaura la sesión contra el proveedor que permaneció activo.
+worker, genera un token, crea un snapshot, detiene ambos procesos, vuelve a
+arrancar ambos y restaura la sesión desde el estado físico persistido.
 
 ```bash
 MSLIM_MODEL_DIR="$PWD/deploy/local-production/runtime/models/<digest>" \
@@ -300,9 +300,9 @@ sesiones ni sobrescribir evidencia. Esos directorios locales se conservan hasta
 una limpieza auditable; el script no afirma que el resultado anterior siga
 vigente para otra revisión.
 
-No existe en ese script una prueba de reinicio del proveedor. Si se necesita
-recuperación tras caída completa, debe añadirse un ensayo separado que reinicie
-worker y proveedor y restaure desde estado persistente.
+La restauración posterior no puede depender de memoria residente del provider:
+el socket anterior desaparece y el nuevo proceso vuelve a abrir el ColdStore
+conservado por la ejecución.
 
 ## Seguridad y alcance
 

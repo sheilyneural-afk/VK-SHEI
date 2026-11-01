@@ -3,7 +3,7 @@ set -euo pipefail
 export LC_ALL=C
 
 # Real external-runtime certification:
-#   provider (resident/stream) -> HTTP worker -> SessionStore -> worker restart -> restore
+#   provider -> HTTP worker -> SessionStore -> full provider/worker restart -> restore
 # The model is never hard-coded. Set MSLIM_MODEL_DIR to a verified local bundle.
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -61,15 +61,19 @@ with open(path, "w", encoding="utf-8") as f:
     }, f)
 PY
 
-nohup "$provider" --model "$model" --socket "$socket" \
-  --weight-mode "$weight_mode" --cold-dir "$cold_dir" >"$provider_log" 2>&1 < /dev/null &
-provider_pid=$!
-for _ in $(seq 1 600); do
-  [ -S "$socket" ] && break
-  kill -0 "$provider_pid" 2>/dev/null || { cat "$provider_log" >&2; exit 1; }
-  sleep 1
-done
-[ -S "$socket" ] || { cat "$provider_log" >&2; exit 1; }
+start_provider() {
+  rm -f "$socket"
+  nohup "$provider" --model "$model" --socket "$socket" \
+    --weight-mode "$weight_mode" --cold-dir "$cold_dir" >"$provider_log" 2>&1 < /dev/null &
+  provider_pid=$!
+  for _ in $(seq 1 600); do
+    [ -S "$socket" ] && return 0
+    kill -0 "$provider_pid" 2>/dev/null || { cat "$provider_log" >&2; return 1; }
+    sleep 1
+  done
+  cat "$provider_log" >&2
+  return 1
+}
 
 start_worker() {
   nohup env MSLIM_SESSION_STORE="$session_store" "$worker" \
@@ -87,6 +91,7 @@ start_worker() {
   return 1
 }
 
+start_provider
 start_worker
 
 model_digest=$(sha256sum "$model/config.json" | awk '{print $1}')
@@ -156,6 +161,10 @@ PY
 kill "$worker_pid"
 wait "$worker_pid" 2>/dev/null || true
 worker_pid=""
+kill "$provider_pid"
+wait "$provider_pid" 2>/dev/null || true
+provider_pid=""
+start_provider
 start_worker
 
 python3 - "$port" "$expires_at" "$model_digest" "$tokenizer_digest" "$session_handle" >"$resume_json" <<'PY'
@@ -270,7 +279,7 @@ PY
 python3 - "$generation_json" "$snapshot_json" "$resume_json" "$release_json" "$released_resume_json" <<'PY'
 import json, sys
 generation, snapshot, resume, release, denied = (json.load(open(p)) for p in sys.argv[1:])
-print("REAL_EXTERNAL_RESTART_E2E_OK")
+print("REAL_FULL_EXTERNAL_RESTART_E2E_OK")
 print(json.dumps({
     "generation_wall_seconds": generation["measured_wall_seconds"],
     "prefill_seconds": generation["usage"]["prefill_seconds"],
