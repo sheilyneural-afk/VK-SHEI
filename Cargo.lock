@@ -2028,7 +2028,7 @@ dependencies = [
 [[package]]
 name = "tch"
 version = "0.18.1"
-source = "git+https://github.com/sheilyneural-afk/tch-rs.git?rev=acaf9df5a07a3146da30ce74eebcf9aebd333692#acaf9df5a07a3146da30ce74eebcf9aebd333692"
+source = "git+https://github.com/sheilyneural-afk/KV-SHEI-tch-rs.git?rev=acaf9df5a07a3146da30ce74eebcf9aebd333692#acaf9df5a07a3146da30ce74eebcf9aebd333692"
 dependencies = [
  "half",
  "lazy_static",
@@ -2204,7 +2204,7 @@ dependencies = [
 [[package]]
 name = "torch-sys"
 version = "0.18.1"
-source = "git+https://github.com/sheilyneural-afk/tch-rs.git?rev=acaf9df5a07a3146da30ce74eebcf9aebd333692#acaf9df5a07a3146da30ce74eebcf9aebd333692"
+source = "git+https://github.com/sheilyneural-afk/KV-SHEI-tch-rs.git?rev=acaf9df5a07a3146da30ce74eebcf9aebd333692#acaf9df5a07a3146da30ce74eebcf9aebd333692"
 dependencies = [
  "anyhow",
  "cc",
